@@ -120,8 +120,26 @@ export async function deleteDocument(id: string) {
 }
 
 // --- Notifications ---
-export function useNotifications() {
-  return useSWR("/api/notifications", fetcher, { ...swrDefaults, refreshInterval: 30000 })
+export function useNotifications(params?: { unread_only?: boolean; limit?: number }) {
+  const query = new URLSearchParams()
+  if (params?.unread_only) query.set("unread_only", "true")
+  if (params?.limit) query.set("limit", String(params.limit))
+  const qs = query.toString()
+  return useSWR(`/api/notifications${qs ? `?${qs}` : ""}`, fetcher, { ...swrDefaults, refreshInterval: 30000 })
+}
+
+export async function markNotificationRead(id: string) {
+  const res = await fetch(`/api/notifications/${id}/read`, { method: "PATCH" })
+  if (!res.ok) throw new Error("Failed to mark notification read")
+  mutate((key: string) => typeof key === "string" && key.startsWith("/api/notifications"), undefined, { revalidate: true })
+  return res.json()
+}
+
+export async function markAllNotificationsRead() {
+  const res = await fetch("/api/notifications/read-all", { method: "PATCH" })
+  if (!res.ok) throw new Error("Failed to mark all notifications read")
+  mutate((key: string) => typeof key === "string" && key.startsWith("/api/notifications"), undefined, { revalidate: true })
+  return res.json()
 }
 
 // --- Finance Summary ---

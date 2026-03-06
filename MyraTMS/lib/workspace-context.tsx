@@ -11,6 +11,7 @@ export interface Notification {
   type: "info" | "warning" | "success" | "error"
   read: boolean
   timestamp: string
+  link?: string | null
 }
 
 export interface UserProfile {
@@ -68,10 +69,11 @@ function mapDbNotification(row: Record<string, unknown>): Notification {
   return {
     id: String(row.id || ""),
     title: String(row.title || ""),
-    description: String(row.description || row.message || ""),
+    description: String(row.description || row.body || row.message || ""),
     type: (row.type as Notification["type"]) || "info",
     read: Boolean(row.read),
     timestamp: String(row.created_at || row.timestamp || new Date().toISOString()),
+    link: (row.link as string) || null,
   }
 }
 
@@ -128,7 +130,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (!res.ok) return
         const data = await res.json()
         if (cancelled) return
-        if (Array.isArray(data)) {
+        // Support both new { notifications, unreadCount } and legacy array format
+        if (data.notifications && Array.isArray(data.notifications)) {
+          setNotifications(data.notifications.map(mapDbNotification))
+        } else if (Array.isArray(data)) {
           setNotifications(data.map(mapDbNotification))
         }
       } catch {
@@ -147,16 +152,52 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Connect to SSE stream for real-time notification updates
+  useEffect(() => {
+    let es: EventSource | null = null
+
+    try {
+      es = new EventSource("/api/notifications/stream")
+
+      es.addEventListener("notification", (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          const mapped: Notification = {
+            id: data.id,
+            title: data.title || "",
+            description: data.body || "",
+            type: data.type || "info",
+            read: false,
+            timestamp: data.createdAt || new Date().toISOString(),
+          }
+          setNotifications((prev) => {
+            // Avoid duplicates
+            if (prev.some((n) => n.id === mapped.id)) return prev
+            return [mapped, ...prev]
+          })
+        } catch {
+          // Ignore parse errors
+        }
+      })
+
+      es.onerror = () => {
+        // EventSource auto-reconnects, no action needed
+      }
+    } catch {
+      // SSE not supported or failed to connect
+    }
+
+    return () => {
+      es?.close()
+    }
+  }, [])
+
   const markRead = useCallback(async (id: string) => {
     // Optimistic update
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)))
     // Persist to DB
     try {
-      await fetch("/api/notifications", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      })
+      await fetch(`/api/notifications/${id}/read`, { method: "PATCH" })
     } catch {
       // Revert on failure silently
     }
@@ -167,11 +208,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })))
     // Persist to DB
     try {
-      await fetch("/api/notifications", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markAllRead: true }),
-      })
+      await fetch("/api/notifications/read-all", { method: "PATCH" })
     } catch {
       // Revert on failure silently
     }

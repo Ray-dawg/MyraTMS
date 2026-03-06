@@ -69,7 +69,7 @@ export function middleware(request: NextRequest) {
   }
 
   // Public routes -- no auth needed
-  const publicPaths = ["/login", "/api/auth/login", "/api/auth/driver-login"]
+  const publicPaths = ["/login", "/api/auth/login", "/api/auth/driver-login", "/api/drivers/invite/", "/api/drivers/accept-invite"]
   const isPublic = publicPaths.some((p) => pathname.startsWith(p))
 
   // Tracking routes -- token-based auth, not cookie

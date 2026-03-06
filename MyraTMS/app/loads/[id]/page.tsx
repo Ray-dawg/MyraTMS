@@ -1,6 +1,6 @@
 "use client"
 
-import { use, useState, useCallback } from "react"
+import { use, useState, useCallback, useEffect } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import {
@@ -36,11 +36,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { StatusBadge } from "@/components/status-badge"
 import { ActivityNotes, type ActivityNote } from "@/components/activity-notes"
+import { DocumentVault } from "@/components/document-vault"
 import { MatchPanel } from "@/components/carrier-matching/match-panel"
 import { CarrierRating } from "@/components/carrier-matching/carrier-rating"
-import { useLoad, useDocuments, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
+import { useLoad, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import { LoadMap } from "@/components/load-map-dynamic"
 import { cn } from "@/lib/utils"
@@ -57,7 +59,6 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   const router = useRouter()
 
   const { data: rawLoad, mutate: revalidateLoad } = useLoad(id)
-  const { data: rawDocs = [] } = useDocuments({ relatedTo: id, relatedType: "Load" })
   const { data: rawShippers = [] } = useShippers()
   const { data: rawCarriers = [] } = useCarriers()
   const { data: rawNotes = [] } = useNotes("Load", id)
@@ -95,21 +96,13 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   } : null
 
   // Map drivers from DB rows
-  const drivers: Array<{ id: string; name: string; phone: string; status: string }> = rawDrivers.map((d: Record<string, unknown>) => ({
+  const drivers: Array<{ id: string; name: string; phone: string; status: string; inviteStatus?: string; inviteToken?: string }> = rawDrivers.map((d: Record<string, unknown>) => ({
     id: d.id as string,
-    name: (d.name || d.driver_name || "") as string,
+    name: (d.name || d.driver_name || `${d.first_name || ""} ${d.last_name || ""}`.trim() || "") as string,
     phone: (d.phone || d.contact_phone || "") as string,
     status: (d.status || "Available") as string,
-  }))
-
-  // Map documents from DB rows
-  const loadDocs = rawDocs.map((d: Record<string, unknown>) => ({
-    id: d.id as string,
-    name: d.name as string,
-    type: (d.type || "BOL") as string,
-    relatedTo: (d.related_to || "") as string,
-    uploadDate: (d.upload_date || "") as string,
-    status: (d.status || "Pending Review") as string,
+    inviteStatus: (d.invite_status || "active") as string,
+    inviteToken: (d.invite_token || "") as string,
   }))
 
   // Find matching shipper and carrier from lists
@@ -164,6 +157,16 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   // Invoice creation state
   const [creatingInvoice, setCreatingInvoice] = useState(false)
 
+  // Driver invite state
+  const [showInviteForm, setShowInviteForm] = useState(false)
+  const [inviteFirstName, setInviteFirstName] = useState("")
+  const [inviteLastName, setInviteLastName] = useState("")
+  const [invitePhone, setInvitePhone] = useState("")
+  const [inviteEmail, setInviteEmail] = useState("")
+  const [inviting, setInviting] = useState(false)
+  const [inviteResult, setInviteResult] = useState<{ inviteUrl: string; inviteToken: string; smsSent: boolean } | null>(null)
+  const [inviteCopied, setInviteCopied] = useState(false)
+
   async function handleShareLoad() {
     if (trackingUrl) {
       setShareOpen(!shareOpen)
@@ -205,6 +208,66 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
       setDriverAssigning(false)
     }
   }, [id, revalidateLoad])
+
+  // Invite new driver
+  const handleInviteDriver = useCallback(async () => {
+    if (!inviteFirstName.trim() || !inviteLastName.trim() || !invitePhone.trim()) {
+      toast.error("First name, last name, and phone are required")
+      return
+    }
+    if (!load?.carrierId) {
+      toast.error("A carrier must be assigned before inviting a driver")
+      return
+    }
+    setInviting(true)
+    try {
+      const res = await fetch("/api/drivers/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          carrierId: load.carrierId,
+          loadId: id,
+          firstName: inviteFirstName.trim(),
+          lastName: inviteLastName.trim(),
+          phone: invitePhone.trim(),
+          email: inviteEmail.trim() || undefined,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || "Failed to invite driver")
+      }
+      const data = await res.json()
+      setInviteResult({ inviteUrl: data.inviteUrl, inviteToken: data.inviteToken, smsSent: data.smsSent })
+      revalidateLoad()
+      toast.success("Driver invite created")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to invite driver")
+    } finally {
+      setInviting(false)
+    }
+  }, [id, load?.carrierId, inviteFirstName, inviteLastName, invitePhone, inviteEmail, revalidateLoad])
+
+  // Poll invite token status to detect acceptance
+  useEffect(() => {
+    if (!inviteResult?.inviteToken) return
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/drivers/invite/${inviteResult.inviteToken}`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.status === "accepted") {
+            setInviteResult(null)
+            setShowInviteForm(false)
+            revalidateLoad()
+            toast.success("Driver has accepted the invite!")
+            clearInterval(interval)
+          }
+        }
+      } catch { /* ignore polling errors */ }
+    }, 30_000)
+    return () => clearInterval(interval)
+  }, [inviteResult?.inviteToken, revalidateLoad])
 
   // Task 2.2: Send tracking link via email
   const handleSendTrackingEmail = useCallback(async () => {
@@ -652,6 +715,13 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
         <div className="grid grid-cols-3 gap-6 p-6">
           {/* Left Column - 2/3 */}
           <div className="col-span-2 space-y-6">
+            <Tabs defaultValue="details" className="w-full">
+              <TabsList className="h-9">
+                <TabsTrigger value="details" className="text-xs">Details</TabsTrigger>
+                <TabsTrigger value="documents" className="text-xs">Documents</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="details" className="space-y-6 mt-4">
             {/* Load Overview */}
             <Card className="border-border bg-card">
               <CardHeader className="pb-3">
@@ -722,40 +792,6 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
               </CardContent>
             </Card>
 
-            {/* Documents */}
-            <Card className="border-border bg-card">
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm font-medium">Documents</CardTitle>
-                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                    <Upload className="h-3 w-3" />
-                    Upload
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {loadDocs.length > 0 ? (
-                  <div className="space-y-2">
-                    {loadDocs.map((doc: any) => (
-                      <div key={doc.id} className="flex items-center gap-3 p-2.5 rounded-md bg-secondary/30 hover:bg-secondary/50 transition-colors">
-                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-foreground truncate">{doc.name}</p>
-                          <p className="text-[10px] text-muted-foreground">{doc.type} &middot; {doc.uploadDate}</p>
-                        </div>
-                        <StatusBadge status={doc.status} />
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-8 text-center">
-                    <FileText className="h-8 w-8 text-muted-foreground/30 mb-2" />
-                    <p className="text-xs text-muted-foreground">No documents uploaded yet.</p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
             {/* Activity Notes */}
             <ActivityNotes entityId={load.id} entityType="Load" initialNotes={seedNotes} />
 
@@ -789,6 +825,12 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                 </CardContent>
               </Card>
             )}
+              </TabsContent>
+
+              <TabsContent value="documents" className="mt-4">
+                <DocumentVault loadId={load.id} />
+              </TabsContent>
+            </Tabs>
           </div>
 
           {/* Right Column - 1/3 */}
@@ -930,17 +972,36 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                {load.driverName ? (
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-success/10 text-success text-xs font-medium">
-                      <Truck className="h-3.5 w-3.5" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground">{load.driverName}</p>
-                      <p className="text-[11px] text-muted-foreground">Currently assigned</p>
-                    </div>
-                  </div>
-                ) : null}
+                {(() => {
+                  const assignedDriver = load.driverId ? drivers.find((d) => d.id === load.driverId) : null
+                  const isPendingInvite = assignedDriver?.inviteStatus === "pending_invite"
+                  return (
+                    <>
+                      {load.driverName || assignedDriver ? (
+                        <div className="flex items-center gap-3">
+                          <div className={cn(
+                            "flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium",
+                            isPendingInvite ? "bg-warning/10 text-warning" : "bg-success/10 text-success"
+                          )}>
+                            <Truck className="h-3.5 w-3.5" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-foreground">{load.driverName || assignedDriver?.name}</p>
+                            <div className="flex items-center gap-1.5">
+                              {isPendingInvite ? (
+                                <Badge variant="outline" className="text-[10px] text-warning border-warning/30">Pending Invite</Badge>
+                              ) : assignedDriver?.inviteStatus === "active" && assignedDriver?.inviteToken ? (
+                                <Badge variant="outline" className="text-[10px] text-success border-success/30">Connected</Badge>
+                              ) : (
+                                <p className="text-[11px] text-muted-foreground">Currently assigned</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  )
+                })()}
                 <div className="space-y-1.5">
                   <p className="text-[11px] text-muted-foreground">{load.driverName ? "Reassign driver" : "Select a driver"}</p>
                   <Select
@@ -955,14 +1016,16 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                       {drivers.map((driver) => (
                         <SelectItem key={driver.id} value={driver.id}>
                           <span className="text-xs">{driver.name}</span>
-                          {driver.status && (
+                          {driver.inviteStatus === "pending_invite" ? (
+                            <span className="ml-2 text-[10px] text-warning">(Pending)</span>
+                          ) : driver.status ? (
                             <span className={cn(
                               "ml-2 text-[10px]",
                               driver.status === "Available" ? "text-success" : "text-muted-foreground"
                             )}>
                               ({driver.status})
                             </span>
-                          )}
+                          ) : null}
                         </SelectItem>
                       ))}
                       {drivers.length === 0 && (
@@ -977,6 +1040,110 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" />
                     Assigning driver...
+                  </div>
+                )}
+
+                <Separator className="bg-border" />
+
+                {/* Invite New Driver */}
+                {!showInviteForm && !inviteResult && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full text-xs h-8"
+                    onClick={() => setShowInviteForm(true)}
+                    disabled={!load.carrierId}
+                  >
+                    Invite New Driver
+                  </Button>
+                )}
+
+                {showInviteForm && !inviteResult && (
+                  <div className="space-y-2 rounded-lg border border-border p-3">
+                    <p className="text-[11px] font-medium text-foreground">Invite New Driver</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input
+                        placeholder="First Name"
+                        value={inviteFirstName}
+                        onChange={(e) => setInviteFirstName(e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                      <Input
+                        placeholder="Last Name"
+                        value={inviteLastName}
+                        onChange={(e) => setInviteLastName(e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                    </div>
+                    <Input
+                      placeholder="Phone (required)"
+                      value={invitePhone}
+                      onChange={(e) => setInvitePhone(e.target.value)}
+                      className="h-7 text-xs"
+                    />
+                    <Input
+                      placeholder="Email (optional)"
+                      type="email"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      className="h-7 text-xs"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs flex-1"
+                        onClick={() => setShowInviteForm(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-7 text-xs flex-1"
+                        onClick={handleInviteDriver}
+                        disabled={inviting}
+                      >
+                        {inviting ? (
+                          <>
+                            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            Sending...
+                          </>
+                        ) : (
+                          "Send Invite"
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {inviteResult && (
+                  <div className="space-y-2 rounded-lg border border-success/30 bg-success/5 p-3">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="text-[10px] text-success border-success/30">Link Generated</Badge>
+                      {inviteResult.smsSent && (
+                        <Badge variant="outline" className="text-[10px] text-success border-success/30">SMS Sent</Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 rounded-md bg-secondary/50 p-2">
+                      <input
+                        readOnly
+                        value={inviteResult.inviteUrl}
+                        className="flex-1 bg-transparent text-[10px] text-foreground font-mono outline-none truncate"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0 shrink-0"
+                        onClick={() => {
+                          navigator.clipboard.writeText(inviteResult.inviteUrl)
+                          setInviteCopied(true)
+                          setTimeout(() => setInviteCopied(false), 2000)
+                        }}
+                      >
+                        {inviteCopied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+                      </Button>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">Polling for driver acceptance...</p>
                   </div>
                 )}
               </CardContent>

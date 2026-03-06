@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
 import { createToken } from "@/lib/auth"
+import bcrypt from "bcryptjs"
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,12 +15,14 @@ export async function POST(req: NextRequest) {
     }
 
     const sql = getDb()
+    // Fetch by carrier only — PIN check in JS to support both plaintext (legacy) and bcrypt (invite flow)
     const rows = await sql`
       SELECT d.*, c.company as carrier_name
       FROM drivers d
       JOIN carriers c ON d.carrier_id = c.id
       WHERE (c.id = ${carrierCode} OR c.mc_number = ${carrierCode})
-        AND d.app_pin = ${pin}
+        AND d.app_pin IS NOT NULL
+        AND (d.invite_status IN ('active', 'pending_invite') OR d.invite_status IS NULL)
     `
 
     if (rows.length === 0) {
@@ -29,12 +32,31 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const driver = rows[0]
+    // Find the driver whose PIN matches — bcrypt hash (invite flow) or plaintext (legacy)
+    let driver = null
+    for (const row of rows) {
+      const stored = row.app_pin as string
+      const isHashed = stored.startsWith("$2b$") || stored.startsWith("$2a$")
+      const match = isHashed
+        ? await bcrypt.compare(String(pin), stored)
+        : stored === String(pin)
+      if (match) {
+        driver = row
+        break
+      }
+    }
+
+    if (!driver) {
+      return NextResponse.json(
+        { error: "Invalid carrier code or PIN" },
+        { status: 401 }
+      )
+    }
 
     const token = createToken(
       {
         userId: driver.id,
-        email: "", // drivers may not have email
+        email: "",
         role: "driver",
         firstName: driver.first_name,
         lastName: driver.last_name,

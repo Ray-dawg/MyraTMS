@@ -11,6 +11,18 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useWorkspace } from "@/lib/workspace-context"
 import { cn } from "@/lib/utils"
+import { useRouter } from "next/navigation"
+
+function timeAgo(timestamp: string): string {
+  const seconds = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000)
+  if (seconds < 60) return "just now"
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+}
 
 const iconMap = {
   info: Info,
@@ -28,6 +40,14 @@ const colorMap = {
 
 export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void; onOpenAI: () => void }) {
   const { notifications, unreadCount, markRead, markAllRead, dismissNotification } = useWorkspace()
+  const router = useRouter()
+
+  const displayNotifications = notifications.slice(0, 10)
+
+  const handleNotificationClick = (n: { id: string; link?: string | null; read: boolean }) => {
+    if (!n.read) markRead(n.id)
+    if (n.link) router.push(n.link)
+  }
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-border bg-background/80 backdrop-blur-sm px-6">
@@ -70,14 +90,17 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
               )}
             </div>
             <ScrollArea className="max-h-[400px]">
-              {notifications.length === 0 ? (
+              {displayNotifications.length === 0 ? (
                 <div className="p-8 text-center">
                   <p className="text-xs text-muted-foreground">No notifications</p>
                 </div>
               ) : (
                 <div className="divide-y divide-border">
-                  {notifications.map((n) => {
+                  {displayNotifications.map((n) => {
                     const Icon = iconMap[n.type]
+                    const truncatedDesc = n.description.length > 80
+                      ? n.description.slice(0, 80) + "..."
+                      : n.description
                     return (
                       <div
                         key={n.id}
@@ -85,7 +108,7 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                           "flex gap-3 px-4 py-3 transition-colors cursor-pointer hover:bg-secondary/50",
                           !n.read && "bg-accent/5"
                         )}
-                        onClick={() => markRead(n.id)}
+                        onClick={() => handleNotificationClick(n)}
                       >
                         <div className="mt-0.5 shrink-0">
                           <Icon className={cn("h-4 w-4", colorMap[n.type])} />
@@ -102,9 +125,9 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                               <X className="h-3 w-3" />
                             </button>
                           </div>
-                          <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{n.description}</p>
+                          <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{truncatedDesc}</p>
                           <p className="text-[10px] text-muted-foreground/60 mt-1">
-                            {new Date(n.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                            {timeAgo(n.timestamp)}
                           </p>
                         </div>
                         {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent" />}
@@ -114,6 +137,16 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                 </div>
               )}
             </ScrollArea>
+            <div className="border-t border-border px-4 py-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-[11px] text-muted-foreground"
+                onClick={() => router.push("/notifications")}
+              >
+                View all notifications
+              </Button>
+            </div>
           </PopoverContent>
         </Popover>
         <Button
