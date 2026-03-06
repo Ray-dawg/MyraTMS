@@ -22,7 +22,8 @@ import {
   Check,
   Globe,
   ShieldCheck,
-  Calculator
+  Calculator,
+  Map
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { cn } from "@/lib/utils"
@@ -47,6 +48,7 @@ const adminNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
+  { name: "Map", href: "/map", icon: Map },
   { name: "Quotes", href: "/quotes", icon: Calculator },
   { name: "Shippers", href: "/shippers", icon: Building2 },
   { name: "Carriers", href: "/carriers", icon: Users },
@@ -64,6 +66,7 @@ const opsNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
+  { name: "Map", href: "/map", icon: Map },
   { name: "Quotes", href: "/quotes", icon: Calculator },
   { name: "Carriers", href: "/carriers", icon: Users },
   { name: "Documents", href: "/documents", icon: FileText },

@@ -13,12 +13,20 @@ export async function GET(req: NextRequest) {
       )
     }
 
+    const scope = req.nextUrl.searchParams.get("scope")
+    const key = req.nextUrl.searchParams.get("key")
     const sql = getDb()
-    const rows = await sql`
-      SELECT settings_key, settings_value
-      FROM settings
-      WHERE user_id = ${user.userId}
-    `
+
+    let rows
+    if (scope === "global") {
+      rows = key
+        ? await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL AND settings_key = ${key}`
+        : await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`
+    } else if (key) {
+      rows = await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId} AND settings_key = ${key}`
+    } else {
+      rows = await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId}`
+    }
 
     // Build a { key: value } object from rows
     const settings: Record<string, unknown> = {}
@@ -69,22 +77,32 @@ export async function PATCH(req: NextRequest) {
       )
     }
 
+    const scope = body.scope
+    const userId = scope === "global" ? null : user.userId
+
     // Upsert each setting
     for (const entry of entries) {
-      await sql`
-        INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
-        VALUES (gen_random_uuid(), ${user.userId}, ${entry.key}, ${JSON.stringify(entry.value)}::jsonb, NOW())
-        ON CONFLICT (user_id, settings_key)
-        DO UPDATE SET settings_value = ${JSON.stringify(entry.value)}::jsonb, updated_at = NOW()
-      `
+      if (scope === "global") {
+        await sql`
+          INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
+          VALUES (gen_random_uuid(), NULL, ${entry.key}, ${JSON.stringify(entry.value)}::jsonb, NOW())
+          ON CONFLICT (settings_key) WHERE user_id IS NULL
+          DO UPDATE SET settings_value = ${JSON.stringify(entry.value)}::jsonb, updated_at = NOW()
+        `
+      } else {
+        await sql`
+          INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
+          VALUES (gen_random_uuid(), ${user.userId}, ${entry.key}, ${JSON.stringify(entry.value)}::jsonb, NOW())
+          ON CONFLICT (user_id, settings_key)
+          DO UPDATE SET settings_value = ${JSON.stringify(entry.value)}::jsonb, updated_at = NOW()
+        `
+      }
     }
 
-    // Return all settings for the user
-    const rows = await sql`
-      SELECT settings_key, settings_value
-      FROM settings
-      WHERE user_id = ${user.userId}
-    `
+    // Return settings for the scope
+    const rows = scope === "global"
+      ? await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`
+      : await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId}`
 
     const settings: Record<string, unknown> = {}
     for (const row of rows) {

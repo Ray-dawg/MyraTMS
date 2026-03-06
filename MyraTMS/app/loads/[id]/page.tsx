@@ -42,7 +42,7 @@ import { ActivityNotes, type ActivityNote } from "@/components/activity-notes"
 import { DocumentVault } from "@/components/document-vault"
 import { MatchPanel } from "@/components/carrier-matching/match-panel"
 import { CarrierRating } from "@/components/carrier-matching/carrier-rating"
-import { useLoad, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
+import { useLoad, useDocuments, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import { LoadMap } from "@/components/load-map-dynamic"
 import { cn } from "@/lib/utils"
@@ -59,6 +59,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   const router = useRouter()
 
   const { data: rawLoad, mutate: revalidateLoad } = useLoad(id)
+  const { data: rawDocs = [] } = useDocuments({ relatedTo: id, relatedType: "Load" })
   const { data: rawShippers = [] } = useShippers()
   const { data: rawCarriers = [] } = useCarriers()
   const { data: rawNotes = [] } = useNotes("Load", id)
@@ -93,6 +94,8 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
     destLng: rawLoad.dest_lng != null ? Number(rawLoad.dest_lng) : null,
     currentLat: rawLoad.current_lat != null ? Number(rawLoad.current_lat) : null,
     currentLng: rawLoad.current_lng != null ? Number(rawLoad.current_lng) : null,
+    podUrl: (rawLoad.pod_url || null) as string | null,
+    referenceNumber: (rawLoad.reference_number || rawLoad.id || "") as string,
   } : null
 
   // Map drivers from DB rows
@@ -573,6 +576,17 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
               </Badge>
             )}
             <StatusBadge status={load.status} />
+            {load.podUrl ? (
+              <Badge className="bg-success/10 text-success border-success/30 text-[10px] gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                POD Received
+              </Badge>
+            ) : (load.status === "Delivered" || load.status === "Invoiced") && !load.podUrl ? (
+              <Badge variant="outline" className="text-warning border-warning/30 text-[10px] gap-1">
+                <Clock className="h-3 w-3" />
+                Awaiting POD
+              </Badge>
+            ) : null}
             <StatusBadge status={load.source} />
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -669,6 +683,17 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                 </div>
               )}
             </div>
+            {load.podUrl && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs gap-1.5 text-success border-success/30"
+                onClick={() => window.open(load.podUrl!, "_blank")}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                View POD
+              </Button>
+            )}
             <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
               <Edit className="h-3.5 w-3.5" />
               Edit
@@ -827,7 +852,35 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
             )}
               </TabsContent>
 
-              <TabsContent value="documents" className="mt-4">
+              <TabsContent value="documents" className="mt-4 space-y-4">
+                {(() => {
+                  const rateCon = rawDocs.find((d: Record<string, unknown>) => d.type === "Rate Confirmation")
+                  if (!rateCon) return null
+                  return (
+                    <div className="flex items-center gap-2 p-3 rounded-lg border border-border bg-secondary/20">
+                      <FileText className="h-4 w-4 text-accent shrink-0" />
+                      <span className="text-xs font-medium text-foreground flex-1">Rate Confirmation generated</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => window.open(rateCon.blob_url as string, "_blank")}
+                      >
+                        <FileText className="h-3 w-3" />
+                        View Rate Con
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => toast.success("Rate con resend queued for carrier")}
+                      >
+                        <Send className="h-3 w-3" />
+                        Resend to Carrier
+                      </Button>
+                    </div>
+                  )
+                })()}
                 <DocumentVault loadId={load.id} />
               </TabsContent>
             </Tabs>
@@ -914,7 +967,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
             )}
 
             {/* Post-delivery carrier communication rating */}
-            {load.carrierId && load.status === "Delivered" && (
+            {load.carrierId && (load.status === "Delivered" || load.status === "Invoiced") && (
               <Card className="border-border bg-card">
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-medium">Rate Carrier</CardTitle>

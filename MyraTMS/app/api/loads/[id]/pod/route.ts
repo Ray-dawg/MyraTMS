@@ -2,6 +2,57 @@ import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
 import { getCurrentUser } from "@/lib/auth"
 import { put } from "@vercel/blob"
+import { attachDocument } from "@/lib/documents"
+import { createNotification } from "@/lib/notifications"
+import nodemailer from "nodemailer"
+
+async function sendFactoringEmail(load: Record<string, unknown>, invoiceId: string, podUrl: string) {
+  const factoringEmail = process.env.FACTORING_EMAIL
+  if (!factoringEmail) {
+    console.log("[factoring] FACTORING_EMAIL not configured — skipping")
+    return false
+  }
+
+  const host = process.env.SMTP_HOST
+  const port = parseInt(process.env.SMTP_PORT || "587")
+  const user = process.env.SMTP_USER
+  const pass = process.env.SMTP_PASS
+
+  if (!host || !user || !pass) {
+    console.log("[factoring] SMTP not configured — skipping factoring email")
+    return false
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  })
+
+  const fromEmail = process.env.FROM_EMAIL || "noreply@myralogistics.com"
+  const refNum = load.reference_number || load.id
+
+  try {
+    await transporter.sendMail({
+      from: `"Myra AI" <${fromEmail}>`,
+      to: factoringEmail,
+      subject: `New POD Ready for Factoring — ${refNum}`,
+      text: [
+        `Load: ${refNum}`,
+        `Shipper: ${load.shipper_name}`,
+        `Route: ${load.origin} → ${load.destination}`,
+        `Invoice Amount: $${Number(load.revenue).toLocaleString()}`,
+        `POD Document: ${podUrl}`,
+        `Invoice ID: ${invoiceId}`,
+      ].join("\n"),
+    })
+    return true
+  } catch (err) {
+    console.error("[factoring] Failed to send factoring email:", err)
+    return false
+  }
+}
 
 export async function POST(
   req: NextRequest,
@@ -43,11 +94,17 @@ export async function POST(
 
     const sql = getDb()
 
-    // Verify load exists
-    const loads = await sql`SELECT id, status FROM loads WHERE id = ${loadId} LIMIT 1`
+    // Fetch full load details
+    const loads = await sql`
+      SELECT id, reference_number, origin, destination, shipper_id, shipper_name,
+             carrier_id, carrier_name, revenue, carrier_cost, status
+      FROM loads WHERE id = ${loadId} LIMIT 1
+    `
     if (loads.length === 0) {
       return NextResponse.json({ error: "Load not found" }, { status: 404 })
     }
+
+    const load = loads[0]
 
     // Upload to Vercel Blob
     const filename = `pod/${loadId}/${Date.now()}-${file.name}`
@@ -56,28 +113,99 @@ export async function POST(
       addRandomSuffix: false,
     })
 
-    // Update load with POD URL and mark as delivered
+    // Update load: set POD URL, status to Delivered, delivered_at to now
     await sql`
       UPDATE loads
       SET pod_url = ${blob.url},
           status = 'Delivered',
-          updated_at = now()
+          delivered_at = NOW(),
+          updated_at = NOW()
       WHERE id = ${loadId}
     `
 
-    // Insert document record for audit trail
-    const timestamp = Date.now().toString(36).toUpperCase()
-    const docId = `DOC-${timestamp}`
+    // Attach document record via service
     const uploadedBy = `${user.firstName} ${user.lastName}`
+    await attachDocument({
+      loadId,
+      docType: "POD",
+      blobUrl: blob.url,
+      fileName: file.name,
+      fileSize: file.size,
+      uploadedBy,
+    })
 
-    await sql`
-      INSERT INTO documents (id, name, type, related_to, related_type, blob_url, uploaded_by, upload_date)
-      VALUES (${docId}, ${filename}, 'POD', ${loadId}, 'Load', ${blob.url}, ${uploadedBy}, now())
+    // Auto-create invoice if one doesn't already exist
+    let invoiceId: string | null = null
+    let invoiceCreated = false
+
+    const existingInvoices = await sql`
+      SELECT id FROM invoices WHERE load_id = ${loadId} LIMIT 1
     `
+
+    if (existingInvoices.length === 0) {
+      invoiceId = `INV-${Date.now().toString(36).toUpperCase()}`
+
+      await sql`
+        INSERT INTO invoices (id, load_id, shipper_name, amount, status, issue_date, due_date, factoring_status)
+        VALUES (
+          ${invoiceId},
+          ${loadId},
+          ${load.shipper_name},
+          ${load.revenue},
+          'Pending',
+          CURRENT_DATE,
+          CURRENT_DATE + 30,
+          'N/A'
+        )
+      `
+
+      // Update load status to Invoiced
+      await sql`
+        UPDATE loads SET status = 'Invoiced', updated_at = NOW()
+        WHERE id = ${loadId}
+      `
+
+      invoiceCreated = true
+    } else {
+      invoiceId = existingInvoices[0].id as string
+    }
+
+    // Send POD received notification (broadcast)
+    const refNum = load.reference_number || loadId
+    const invoiceNote = invoiceCreated ? " — Invoice auto-generated" : ""
+
+    await createNotification({
+      type: "success",
+      title: `POD Received — ${refNum}`,
+      body: `${load.origin} → ${load.destination}${invoiceNote}`,
+      link: `/loads/${loadId}`,
+      loadId,
+      userId: null,
+    })
+
+    // Send carrier rating prompt notification (broadcast)
+    if (load.carrier_name && load.carrier_id) {
+      await createNotification({
+        type: "info",
+        title: `Rate Carrier — ${load.carrier_name}`,
+        body: `Load ${refNum} delivered. How did ${load.carrier_name} perform?`,
+        link: `/carriers/${load.carrier_id}?rate=true`,
+        loadId,
+        userId: null,
+      })
+    }
+
+    // Send factoring email (non-blocking, logs skip if not configured)
+    sendFactoringEmail(load, invoiceId, blob.url).catch(() => {
+      // Already logged inside the function
+    })
 
     return NextResponse.json({
       podUrl: blob.url,
-      status: "Delivered",
+      status: invoiceCreated ? "Invoiced" : "Delivered",
+      invoiceId,
+      invoiceCreated,
+      notificationSent: true,
     })
   } catch (error) {
     console.error("POD upload error:", error)
