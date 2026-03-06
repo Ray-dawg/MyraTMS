@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/invoice-alerts",
       "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/exception-detect",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

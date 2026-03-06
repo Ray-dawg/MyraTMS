@@ -19,14 +19,22 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
   if (rows.length === 0) throw new Error(`Load ${loadId} not found`)
   const load = rows[0]
 
-  // Fetch terms from global settings
-  const termsRows = await sql`
-    SELECT settings_value FROM settings
-    WHERE settings_key = 'rate_con_terms' AND user_id IS NULL
+  // Fetch global settings: terms + brokerage branding in one query
+  const settingsRows = await sql`
+    SELECT settings_key, settings_value FROM settings
+    WHERE settings_key IN ('rate_con_terms', 'company_name', 'broker_mc', 'broker_website')
+      AND user_id IS NULL
   `
-  const terms = termsRows.length > 0 && termsRows[0].settings_value
-    ? String(termsRows[0].settings_value).replace(/^"|"$/g, "")
-    : DEFAULT_TERMS
+  const settingsMap = Object.fromEntries(
+    settingsRows.map((r: { settings_key: string; settings_value: unknown }) => [
+      r.settings_key,
+      String(r.settings_value).replace(/^"|"$/g, ""),
+    ])
+  )
+  const terms = settingsMap.rate_con_terms || DEFAULT_TERMS
+  const companyName = settingsMap.company_name || "Myra Logistics"
+  const brokerMC = settingsMap.broker_mc || "MC# 123456"
+  const brokerWebsite = settingsMap.broker_website || "myralogistics.com"
 
   const today = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
   const year = new Date().getFullYear()
@@ -47,8 +55,8 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
     // ── HEADER ──
     doc.font("Helvetica-Bold").fontSize(20).text("RATE CONFIRMATION", { align: "center" })
     doc.moveDown(0.3)
-    doc.font("Helvetica").fontSize(12).text("Myra Logistics", { align: "center" })
-    doc.fontSize(10).fillColor("#666666").text("MC# 123456 | myralogistics.com", { align: "center" })
+    doc.font("Helvetica").fontSize(12).text(companyName, { align: "center" })
+    doc.fontSize(10).fillColor("#666666").text(`${brokerMC} | ${brokerWebsite}`, { align: "center" })
     doc.fillColor("#000000")
     doc.moveDown(0.5)
 

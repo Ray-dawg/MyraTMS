@@ -1,6 +1,7 @@
 "use client"
 
 import { Search, Bell, Sparkles, Command, X, CheckCheck, AlertTriangle, Info, CheckCircle, XCircle } from "lucide-react"
+import { AlertCenter } from "@/components/alert-center"
 import { Button } from "@/components/ui/button"
 import { Kbd } from "@/components/ui/kbd"
 import {
@@ -149,6 +150,7 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
             </div>
           </PopoverContent>
         </Popover>
+        <AlertCenter />
         <Button
           variant="ghost"
           size="icon"

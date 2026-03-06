@@ -17,6 +17,7 @@ import {
   Sun,
   ChevronsUpDown,
   ClipboardList,
+  Megaphone,
   BarChart3,
   UserCircle,
   Check,
@@ -46,6 +47,7 @@ import { useWorkspace } from "@/lib/workspace-context"
 
 const adminNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
+  { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
@@ -64,6 +66,7 @@ const adminNavigation = [
 
 const opsNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
+  { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
