@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/fmcsa-reverify",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/invoice-alerts",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}

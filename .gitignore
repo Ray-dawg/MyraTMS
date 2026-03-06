@@ -1,0 +1,28 @@
+# Dependencies
+**/node_modules/
+
+# Build outputs
+**/.next/
+**/out/
+**/dist/
+**/build/
+
+# Environment files
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Vercel
+**/.vercel
+
+# Debug logs
+**/npm-debug.log*
+**/pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+**/*.tsbuildinfo
+**/next-env.d.ts

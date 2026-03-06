@@ -1,0 +1,654 @@
+MYRA LOGISTICS — ENGINEERING SPEC
+QUOTING ENGINE
+Technical Specification & Implementation Guide
+Multi-Source Rate Intelligence with AI-Powered Pricing
+Document Type
+Claude Code Implementation Spec
+Version
+1.0
+Date
+March 2026
+Integrates With
+Myra M1 TMS
+Classification
+Build Blueprint
+1. Overview
+The Quoting Engine is the pricing intelligence layer of Myra’s TMS. It accepts a load request (origin, destination, equipment type, weight, pickup date) and returns an instant rate quote. The engine is designed with a cascading data source architecture: it attempts the highest-confidence source first, and falls back through progressively simpler sources until it can produce a quote. Every quote is stored for win/loss tracking, and every completed load feeds back into the engine’s learning dataset.
+ 
+Design Philosophy
+The quoting engine should never fail to return a number. Even with zero API integrations configured, it should produce a reasonable estimate from benchmark data. As data sources are added (DAT API, Truckstop API, AI analysis), the confidence and accuracy improve, but the engine always works.
+1.1 Feature Location
+The quoting engine is a feature within the TMS application. It manifests in three places:
+Quote Form Page: A dedicated page/modal in the TMS where the user inputs load details and receives an instant quote with margin breakdown. Accessible from the main navigation and from within the load creation flow.
+Inline Quoting: When creating a new load in the TMS, the quoting engine auto-populates the suggested shipper rate and carrier cost estimate based on the load’s parameters.
+API Endpoint: POST /api/v1/quotes — returns a structured quote object. This endpoint will eventually power external integrations (shipper portal, email-based quoting).
+1.2 Settings Page — API Key Management
+The TMS must include a Settings > Integrations page where the user can configure external data source API keys. This is the “plug-in” system that allows the quoting engine to upgrade its data sources without code changes.
+Integration
+API Key Field
+Status Indicator
+Priority
+DAT RateView API
+dat_api_key + dat_api_secret
+Green/Red dot + last successful call
+1 (Primary)
+Truckstop Rate Analysis
+truckstop_api_key
+Green/Red dot + last successful call
+2 (Secondary)
+AI Provider (Claude/OpenAI)
+ai_api_key + provider selector
+Green/Red dot + model info
+3 (Analysis Layer)
+Fuel Index (NRCan/EIA)
+Auto-configured (no key needed)
+Current diesel price + last update
+Always Active
+Mapbox Directions
+mapbox_access_token
+Green/Red dot
+Distance Calculation
+Each integration has a toggle (enabled/disabled) and a “Test Connection” button that validates the API key by making a sample request. The settings are stored in an integrations table in the database, encrypted at rest for API keys.
+2. Data Source Cascade — The Failsafe Architecture
+The quoting engine uses a cascading priority system. When a quote is requested, the engine attempts data sources in order from highest confidence to lowest. If a source fails (API down, key not configured, no data for the lane), it falls through to the next source. This ensures the engine always returns a quote.
+2.1 Source Priority Chain
+PRIORITY 1: Myra Historical Data (own completed loads on this lane)
+    └─ If 5+ loads on lane in last 90 days → HIGH confidence
+    └─ If 1-4 loads → MEDIUM confidence, blend with external
+PRIORITY 2: DAT RateView API (if dat_api_key configured)
+    └─ Real-time spot + contract rates for the lane
+    └─ Cache response in rate_cache table (TTL: 4-8 hours)
+    └─ HIGH confidence
+PRIORITY 3: Truckstop Rate Analysis API (if truckstop_api_key configured)
+    └─ Spot market rate data + rate trending
+    └─ Cache response in rate_cache table (TTL: 4-8 hours)
+    └─ HIGH confidence
+PRIORITY 4: Manually Seeded Rate Cache (rate_cache table)
+    └─ Rates manually entered from DAT website lookups
+    └─ MEDIUM confidence (degrades with age)
+    └─ Flag if older than 7 days
+PRIORITY 5: AI-Powered Estimation (if ai_api_key configured)
+    └─ Send lane details + any partial data to Claude/OpenAI
+    └─ AI analyzes based on market knowledge + provided context
+    └─ MEDIUM confidence
+PRIORITY 6: Benchmark Formula (always available, no config needed)
+    └─ Distance-band rate table × equipment multiplier
+    └─ LOW confidence — flag for manual review
+ 
+Critical Rule
+The engine NEVER returns an empty quote. If all external sources fail, the benchmark formula always produces a number. Low-confidence quotes are flagged in the TMS with a yellow warning badge prompting the user to verify the rate before committing to the shipper.
+2.2 Confidence Scoring
+Every quote includes a confidence field (0.0 to 1.0) and a confidence_label (HIGH, MEDIUM, LOW). This drives the UI treatment in the TMS.
+Confidence
+Score Range
+Data Source
+TMS Display
+HIGH
+0.80 – 1.0
+5+ own loads OR fresh DAT/Truckstop API data
+Green badge. Auto-approve enabled.
+MEDIUM
+0.50 – 0.79
+1-4 own loads, stale cache, AI estimate, or blended sources
+Yellow badge. Manual review recommended.
+LOW
+0.0 – 0.49
+Benchmark formula only, no lane-specific data
+Red badge. Quote marked as estimate. User must verify.
+3. Data Source Integration Specs
+3.1 Source 1: Myra Historical Data
+This is the most valuable and most accurate source because it reflects your actual transaction costs on a given lane. Every completed load in Myra’s database is a data point.
+Database Query
+SELECT
+  AVG(carrier_rate) as avg_carrier_cost,
+  AVG(shipper_rate) as avg_shipper_rate,
+  AVG(margin) as avg_margin,
+  MIN(carrier_rate) as min_carrier_cost,
+  MAX(carrier_rate) as max_carrier_cost,
+  COUNT(*) as load_count,
+  MAX(created_at) as most_recent
+FROM loads
+WHERE status IN ('delivered', 'invoiced', 'paid')
+  AND equipment_type = $equipment_type
+  AND origin_region = $origin_region
+  AND dest_region = $dest_region
+  AND created_at > NOW() - INTERVAL '90 days'
+ORDER BY created_at DESC
+The origin_region and dest_region fields need to be normalized. When a load is created, geocode the addresses and map them to regions. For Ontario, a reasonable region mapping would be metropolitan areas (Toronto, Ottawa, Hamilton, Sudbury, etc.) plus a catch-all for rural areas within each zone. Store this on the load record at creation time.
+Confidence calculation: base = 0.5 + (min(load_count, 10) / 10 × 0.4) + recency_bonus. If most recent load was within 7 days, recency_bonus = 0.1. If within 30 days, recency_bonus = 0.05. If older, recency_bonus = 0.0.
+3.2 Source 2: DAT RateView API
+DAT is the industry’s primary rate data provider for North American truckload freight. Their API returns spot and contract rates for any lane, along with historical trends and volume data.
+Integration Architecture
+// API call structure (DAT RateView)
+POST https://api.dat.com/v3/rates/lane
+Headers:
+  Authorization: Bearer {dat_access_token}
+  Content-Type: application/json
+Body:
+{
+  "origin": {
+    "type": "postalCode",
+    "postalCode": "M5V"       // Origin postal prefix
+  },
+  "destination": {
+    "type": "postalCode",
+    "postalCode": "P3E"       // Destination postal prefix
+  },
+  "equipmentType": "V",        // V=Van, R=Reefer, F=Flatbed
+  "dateRange": {
+    "start": "2026-02-01",
+    "end": "2026-03-01"
+  }
+}
+Response (key fields):
+{
+  "rate": {
+    "averageRatePerMile": 2.85,
+    "lowRatePerMile": 2.20,
+    "highRatePerMile": 3.45,
+    "averageTotalRate": 1140.00,
+    "mileage": 400,
+    "reportCount": 47
+  }
+}
+Note: The actual DAT API schema may differ. Contact developersupport@dat.com for current documentation and credentials. The above represents the typical response structure. DAT uses OAuth2 for authentication — your integration needs to handle token refresh.
+Caching strategy: Store every DAT response in the rate_cache table with a source field of ‘dat’ and an expires_at timestamp set to 4–8 hours from fetch time. Before making an API call, check the cache first. Only call the API if cache is expired or missing for the lane.
+Error handling: If DAT API returns an error (rate limit, auth failure, no data for lane), log the error, skip to next source in cascade. Never block a quote because DAT is down.
+3.3 Source 3: Truckstop Rate Analysis API
+Truckstop offers a Rate Analysis API that provides spot market rate data, trending, and benchmarking. It serves as a strong secondary source that can validate or supplement DAT data.
+Integration Architecture
+// Truckstop Rate Analysis API
+GET https://api.truckstop.com/rates/v2/analysis
+Headers:
+  x-api-key: {truckstop_api_key}
+Params:
+  originCity=Toronto&originState=ON
+  destCity=Sudbury&destState=ON
+  equipmentType=Van
+  dateRange=30
+Response (key fields):
+{
+  "averageRate": 1125.00,
+  "averageRatePerMile": 2.81,
+  "mileage": 400,
+  "loadCount": 38,
+  "trend": "increasing",
+  "trendPercent": 3.2
+}
+Note: Truckstop’s actual API schema may differ. Contact integrations@truckstop.com for documentation. The trend data is particularly valuable — it tells you if rates on this lane are rising or falling, which can inform margin decisions.
+Blending logic: If both DAT and Truckstop return data for the same lane, blend them: weighted_rate = (dat_rate × 0.6) + (truckstop_rate × 0.4). DAT gets higher weight due to larger dataset. Show both sources in the quote detail for transparency.
+3.4 Source 4: Manually Seeded Rate Cache
+Before any API integrations are configured, the rate_cache table can be manually populated with rates looked up from the DAT website, industry contacts, or carrier negotiations. This is the MVP quoting data.
+TMS UI: Rate Management Page
+Build a Rate Management page in the TMS Settings section where the user can:
+Add a new lane rate: input origin region, destination region, equipment type, rate per mile, total rate, and source notes.
+View all cached rates in a sortable/filterable table showing lane, equipment, rate, source, age, and expiry status.
+Edit or update existing rates (one-click update from a DAT lookup).
+Bulk import rates via CSV upload (columns: origin, destination, equipment, rate_per_mile, total_rate).
+See freshness indicators: green if updated within 7 days, yellow if 7–30 days, red if over 30 days.
+Seed this table with your top 20–30 Ontario lanes on day one. Update weekly with a 15-minute DAT website review session.
+3.5 Source 5: AI-Powered Rate Estimation
+When lane-specific data is unavailable from the sources above, an AI model can analyze the available context and produce a reasonable estimate. This is not hallucinated pricing — the AI receives structured data and applies reasoning.
+How It Works
+The TMS Settings page includes an AI Provider configuration with a selector (Claude API / OpenAI API) and an API key field. When the quoting engine reaches this layer in the cascade, it constructs a prompt with all available context and sends it to the configured AI provider.
+Prompt Template
+System: You are a freight rate analyst for a Canadian truckload brokerage
+operating in Ontario. You provide rate estimates based on the data provided.
+Respond ONLY with a JSON object. No explanation.
+User: Estimate the carrier cost for this shipment:
+Lane: {origin_city}, {origin_province} → {dest_city}, {dest_province}
+Distance: {distance_miles} miles / {distance_km} km
+Equipment: {equipment_type}
+Weight: {weight_lbs} lbs
+Pickup Date: {pickup_date} ({day_of_week})
+Available reference data:
+- Current Canadian diesel price: {diesel_price_cad_per_litre}
+- Nearest comparable lanes in our database:
+  {list of 3-5 nearest cached lane rates with dates}
+- Our historical average margin on similar lanes: {avg_margin}%
+- Season: {season} (affects demand patterns)
+- Day type: {weekday/weekend} (affects availability)
+Respond with:
+{
+  "estimated_carrier_rate_per_mile": number,
+  "estimated_total_carrier_cost": number,
+  "confidence": number (0.0-1.0),
+  "reasoning": "brief explanation",
+  "rate_range_low": number,
+  "rate_range_high": number
+}
+Implementation Notes
+Model selection: Use Claude Sonnet 4.5 (claude-sonnet-4-5-20250929) for the best balance of speed, accuracy, and cost. Haiku 4.5 is faster but less nuanced for rate analysis. OpenAI’s GPT-4o is a viable alternative.
+Cost control: Each AI quote call costs approximately $0.01–$0.03. At 50 quotes/day that’s under $1.50/day. Cache the AI response in rate_cache with a 24-hour TTL.
+Failsafe: If the AI returns malformed JSON, unparseable response, or an API error, log it and fall through to the benchmark formula. Never let an AI failure block a quote.
+Learning loop: When a load that was AI-quoted is completed, compare the actual carrier cost to the AI estimate. Store this delta. Over time, apply a correction factor to AI estimates for specific lane corridors.
+3.6 Source 6: Benchmark Formula (Always Available)
+This is the fallback of last resort. It requires zero configuration, zero API keys, and zero historical data. It uses hardcoded rate-per-mile benchmarks by equipment type and distance band, calibrated to the Canadian truckload market.
+Benchmark Rate Table (CAD per mile)
+Distance Band
+Dry Van
+Reefer
+Flatbed
+Under 100 mi
+$5.50 – $7.00
+$6.50 – $8.00
+$6.00 – $8.50
+100 – 250 mi
+$3.50 – $4.50
+$4.00 – $5.50
+$4.00 – $5.50
+250 – 500 mi
+$2.80 – $3.80
+$3.30 – $4.50
+$3.20 – $4.50
+500 – 1000 mi
+$2.40 – $3.20
+$2.80 – $3.80
+$2.80 – $3.80
+Over 1000 mi
+$2.00 – $2.80
+$2.40 – $3.40
+$2.40 – $3.40
+The engine uses the midpoint of each range as the default, adjustable by season (peak = upper quartile, soft market = lower quartile). These benchmarks should be reviewed and updated quarterly based on accumulated transaction data.
+benchmark_rate = benchmark_table[distance_band][equipment_type].midpoint
+seasonal_adjustment = get_seasonal_factor(pickup_date)  // 0.9 to 1.15
+adjusted_rate = benchmark_rate × seasonal_adjustment
+carrier_cost = adjusted_rate × distance_miles
+4. Fuel Surcharge Module
+The fuel surcharge is a variable component added to every quote. It accounts for fluctuations in diesel prices above a baseline. The module auto-updates weekly from public Canadian fuel price data.
+4.1 Data Source
+Natural Resources Canada (NRCan) publishes weekly average diesel prices for 45 Canadian cities through the Kalibrate Daily Price Survey. The Ontario government also publishes weekly diesel prices for 10 Ontario markets through their Open Data portal. Both are free and require no API key.
+Primary: NRCan diesel price page at natural-resources.canada.ca/domestic-international-markets/diesel-prices. Updated weekly. Scrape or manually update each Monday.
+Secondary: Ontario Open Data fuels price survey (open.canada.ca). CSV download with weekly diesel prices for Ontario markets. Can be automated via download script.
+Tertiary: GlobalPetrolPrices.com offers a data API for Canadian diesel prices, updated weekly. Current Canadian average is approximately CAD $1.64/litre.
+4.2 Fuel Surcharge Formula
+// Canadian Trucking Standard Formula
+base_diesel_price = 1.25   // CAD per litre (set at contract baseline)
+current_diesel_price = 1.64 // CAD per litre (updated weekly)
+fuel_consumption = 40       // litres per 100 km (avg tractor-trailer)
+fuel_surcharge_per_km = (current_diesel_price - base_diesel_price)
+                        × (fuel_consumption / 100)
+// For a 644 km haul (Toronto to Sudbury):
+fuel_surcharge = fuel_surcharge_per_km × 644
+              = (1.64 - 1.25) × 0.40 × 644
+              = $100.46
+Alternatively, many Canadian brokers use the Freight Carriers Association of Canada (FCA) fuel index, which publishes a weekly fuel surcharge percentage. If the FCA index is available, applying their published percentage to the base rate is the simplest approach.
+Database Storage
+CREATE TABLE fuel_index (
+  id              UUID PRIMARY KEY,
+  source          VARCHAR(50),     -- 'nrcan', 'ontario_open_data', 'fca', 'manual'
+  price_per_litre DECIMAL(6,4),    -- CAD
+  effective_date  DATE,
+  region          VARCHAR(100),    -- 'Ontario', 'National', city name
+  created_at      TIMESTAMP DEFAULT NOW()
+);
+The quoting engine always uses the most recent fuel_index record to calculate the surcharge. A settings toggle allows the user to use the national average or a specific city’s price.
+5. Quote Calculation Pipeline
+This section defines the exact sequence of operations when a quote is requested. This is the core algorithm to implement.
+Step 1: Distance Calculation
+INPUT: origin_address, destination_address
+// Geocode addresses to coordinates (if not already lat/lng)
+origin_coords = mapbox_geocode(origin_address)
+dest_coords = mapbox_geocode(destination_address)
+// Get driving distance (road miles, not straight-line)
+// Check distance_cache table first
+cached = SELECT * FROM distance_cache
+         WHERE origin_hash = hash(origin_coords)
+           AND dest_hash = hash(dest_coords)
+           AND created_at > NOW() - INTERVAL '30 days'
+IF cached EXISTS:
+  distance_km = cached.distance_km
+  distance_miles = cached.distance_miles
+  drive_time_hours = cached.drive_time_hours
+ELSE:
+  result = mapbox_directions_api(origin_coords, dest_coords)
+  distance_km = result.distance / 1000
+  distance_miles = distance_km × 0.621371
+  drive_time_hours = result.duration / 3600
+  INSERT INTO distance_cache (...)
+Step 2: Region Normalization
+// Map coordinates to named regions for rate cache lookup
+origin_region = normalize_region(origin_coords)
+dest_region = normalize_region(dest_coords)
+// Region mapping logic:
+// If within 50km of a major city center → use city name
+// Major Ontario cities: Toronto, Ottawa, Hamilton, London,
+//   Kitchener, Windsor, Sudbury, Thunder Bay, Barrie,
+//   Kingston, Peterborough, Oshawa, Sault Ste Marie
+// Otherwise → use province + 'Rural' (e.g., 'ON-Rural-North')
+Step 3: Rate Lookup (Cascade)
+function get_rate(origin_region, dest_region, equipment_type, pickup_date):
+  // Source 1: Historical loads
+  historical = query_historical_loads(origin_region, dest_region, equipment_type)
+  IF historical.load_count >= 5:
+    RETURN { rate: historical.avg_carrier_rate_per_mile,
+             source: 'historical', confidence: calculate_confidence(historical) }
+  // Source 2: DAT API
+  IF settings.dat_api_key IS CONFIGURED:
+    cached_dat = check_rate_cache('dat', origin_region, dest_region, equipment_type)
+    IF cached_dat AND NOT expired:
+      rate_data = cached_dat
+    ELSE:
+      TRY: rate_data = call_dat_api(origin, dest, equipment_type)
+           store_in_cache(rate_data, source='dat', ttl=6_hours)
+      CATCH: log_error, continue to next source
+    IF rate_data:
+      // Blend with historical if partial historical data exists
+      IF historical.load_count >= 1:
+        blended = (historical.avg × 0.3) + (rate_data.avg × 0.7)
+        RETURN { rate: blended, source: 'dat+historical', confidence: 0.85 }
+      RETURN { rate: rate_data.avg_rate_per_mile, source: 'dat', confidence: 0.80 }
+  // Source 3: Truckstop API
+  IF settings.truckstop_api_key IS CONFIGURED:
+    // Same pattern as DAT: check cache, call API, fallback
+    ...
+  // Source 4: Manual rate cache
+  manual = check_rate_cache('manual', origin_region, dest_region, equipment_type)
+  IF manual:
+    age_days = days_since(manual.fetched_at)
+    conf = max(0.3, 0.7 - (age_days / 60 × 0.4))  // Degrades over 60 days
+    RETURN { rate: manual.rate_per_mile, source: 'manual_cache', confidence: conf }
+  // Source 5: AI estimation
+  IF settings.ai_api_key IS CONFIGURED:
+    TRY:
+      context = gather_nearby_lanes(origin_region, dest_region)
+      ai_result = call_ai_rate_estimate(lane_details, context)
+      store_in_cache(ai_result, source='ai', ttl=24_hours)
+      RETURN { rate: ai_result.rate_per_mile, source: 'ai', confidence: 0.55 }
+    CATCH: log_error, continue
+  // Source 6: Benchmark formula (always works)
+  benchmark = benchmark_table[distance_band][equipment_type]
+  seasonal = get_seasonal_factor(pickup_date)
+  RETURN { rate: benchmark.midpoint × seasonal, source: 'benchmark', confidence: 0.30 }
+Step 4: Fuel Surcharge
+fuel = get_latest_fuel_index()
+fuel_surcharge = (fuel.price_per_litre - BASE_DIESEL_PRICE)
+                × FUEL_CONSUMPTION_PER_100KM / 100
+                × distance_km
+Step 5: Margin Application
+// Margin is percentage of REVENUE, not cost
+// shipper_rate = carrier_cost / (1 - margin)
+carrier_cost = (rate_per_mile × distance_miles) + fuel_surcharge
+// Determine margin percentage
+margin = get_margin(shipper_id, origin_region, dest_region, confidence)
+// Margin logic:
+// Default margin: 15%
+// New shipper (first load): 10-12% (win the business)
+// Repeat shipper, 10+ loads: 15-18% (earned trust)
+// Hot freight / urgent: 20-25% (premium)
+// Low confidence quote: +2-3% buffer (hedge uncertainty)
+// Override: user can manually adjust on the quote form
+shipper_rate = carrier_cost / (1 - margin)
+margin_dollars = shipper_rate - carrier_cost
+Step 6: Assemble and Store Quote
+quote = {
+  id: generate_uuid(),
+  reference: generate_quote_ref(),   // e.g., MYR-Q-2026-0042
+  shipper_id: shipper_id,
+  origin_address, origin_lat, origin_lng, origin_region,
+  dest_address, dest_lat, dest_lng, dest_region,
+  equipment_type, weight_lbs,
+  pickup_date,
+  distance_miles, distance_km, drive_time_hours,
+  
+  // Pricing
+  rate_per_mile,
+  carrier_cost_estimate: carrier_cost,
+  fuel_surcharge,
+  shipper_rate,
+  margin_percent: margin,
+  margin_dollars,
+  
+  // Source & confidence
+  rate_source,              // 'historical', 'dat', 'truckstop', etc.
+  rate_source_detail,       // JSON with raw source data
+  confidence,               // 0.0 - 1.0
+  confidence_label,         // 'HIGH', 'MEDIUM', 'LOW'
+  
+  // Lifecycle
+  status: 'draft',          // draft, sent, accepted, declined, expired
+  valid_until: pickup_date, // Quote expiry
+  created_at: now(),
+  
+  // Feedback (filled after load completes)
+  actual_carrier_cost: null,
+  quote_accuracy: null      // Computed: 1 - abs(estimated - actual) / actual
+}
+INSERT INTO quotes (...)
+RETURN quote
+6. API Endpoint Specification
+6.1 POST /api/v1/quotes
+Generates a new quote. This is the primary endpoint the TMS quote form calls.
+Request Body
+{
+  "origin": "123 Shipping Lane, Toronto, ON M5V 2T6",
+  "destination": "456 Mining Road, Sudbury, ON P3E 4S9",
+  "equipment_type": "dry_van",     // dry_van | reefer | flatbed | step_deck
+  "weight_lbs": 42000,
+  "pickup_date": "2026-03-10",
+  "shipper_id": "uuid-or-null",    // Optional. If provided, applies shipper-specific margin
+  "target_margin": 0.15,            // Optional. Override default margin (0.0 - 0.30)
+  "commodity": "calcium carbonite" // Optional. Context for AI estimation
+}
+Response
+{
+  "id": "q_abc123",
+  "reference": "MYR-Q-2026-0042",
+  "shipper_rate": 1341.18,
+  "carrier_cost_estimate": 1140.00,
+  "fuel_surcharge": 100.46,
+  "margin_percent": 0.15,
+  "margin_dollars": 201.18,
+  "rate_per_mile": 2.85,
+  "distance_miles": 400,
+  "distance_km": 644,
+  "drive_time_hours": 4.5,
+  "rate_source": "dat",
+  "confidence": 0.82,
+  "confidence_label": "HIGH",
+  "valid_until": "2026-03-10T23:59:59Z",
+  "status": "draft",
+  "rate_range": { "low": 1050.00, "high": 1280.00 },
+  "sources_checked": ["historical", "dat"],
+  "created_at": "2026-03-01T14:30:00Z"
+}
+6.2 POST /api/v1/quotes/:id/book
+Converts an accepted quote into a load. Creates a new load record pre-populated with the quote’s pricing and lane data.
+// Creates a load from the quote
+POST /api/v1/quotes/q_abc123/book
+Response: { load_id: "l_xyz789", status: "created" }
+6.3 GET /api/v1/quotes
+Lists quotes with filtering. Supports: status, shipper_id, date range, confidence_label, equipment_type. Paginated.
+6.4 PATCH /api/v1/quotes/:id/feedback
+After a load is completed, this endpoint records the actual carrier cost against the quote’s estimate, enabling accuracy tracking and model improvement.
+{
+  "actual_carrier_cost": 1095.00,
+  "load_id": "l_xyz789"
+}
+// System computes:
+// quote_accuracy = 1 - abs(1140 - 1095) / 1095 = 0.959 (95.9% accurate)
+7. Database Tables
+7.1 quotes
+CREATE TABLE quotes (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reference            VARCHAR(50) UNIQUE NOT NULL,
+  shipper_id           UUID REFERENCES shippers(id),
+  origin_address       TEXT NOT NULL,
+  origin_lat           DECIMAL(10,7),
+  origin_lng           DECIMAL(10,7),
+  origin_region        VARCHAR(100),
+  dest_address         TEXT NOT NULL,
+  dest_lat             DECIMAL(10,7),
+  dest_lng             DECIMAL(10,7),
+  dest_region          VARCHAR(100),
+  equipment_type       VARCHAR(20) NOT NULL,
+  weight_lbs           INTEGER,
+  commodity            VARCHAR(200),
+  pickup_date          DATE,
+  distance_miles       DECIMAL(8,1),
+  distance_km          DECIMAL(8,1),
+  drive_time_hours     DECIMAL(5,2),
+  rate_per_mile        DECIMAL(6,2),
+  carrier_cost_estimate DECIMAL(10,2),
+  fuel_surcharge       DECIMAL(10,2),
+  shipper_rate         DECIMAL(10,2),
+  margin_percent       DECIMAL(5,4),
+  margin_dollars       DECIMAL(10,2),
+  rate_source          VARCHAR(50),
+  rate_source_detail   JSONB,
+  confidence           DECIMAL(3,2),
+  confidence_label     VARCHAR(10),
+  rate_range_low       DECIMAL(10,2),
+  rate_range_high      DECIMAL(10,2),
+  status               VARCHAR(20) DEFAULT 'draft',
+  valid_until          TIMESTAMP,
+  actual_carrier_cost  DECIMAL(10,2),
+  quote_accuracy       DECIMAL(5,4),
+  load_id              UUID REFERENCES loads(id),
+  created_at           TIMESTAMP DEFAULT NOW(),
+  updated_at           TIMESTAMP DEFAULT NOW()
+);
+7.2 integrations
+CREATE TABLE integrations (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider        VARCHAR(50) UNIQUE NOT NULL,  -- 'dat', 'truckstop', 'ai', 'mapbox'
+  api_key         TEXT,            -- Encrypted at rest
+  api_secret      TEXT,            -- Encrypted at rest (for OAuth2)
+  config          JSONB,           -- Provider-specific settings
+  enabled         BOOLEAN DEFAULT false,
+  last_success_at TIMESTAMP,
+  last_error_at   TIMESTAMP,
+  last_error_msg  TEXT,
+  created_at      TIMESTAMP DEFAULT NOW(),
+  updated_at      TIMESTAMP DEFAULT NOW()
+);
+7.3 distance_cache
+CREATE TABLE distance_cache (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  origin_hash     VARCHAR(64),     -- Hash of lat/lng for dedup
+  dest_hash       VARCHAR(64),
+  origin_address  TEXT,
+  dest_address    TEXT,
+  distance_km     DECIMAL(8,1),
+  distance_miles  DECIMAL(8,1),
+  drive_time_hours DECIMAL(5,2),
+  route_geometry  JSONB,           -- Optional: full route polyline
+  created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_distance_lookup ON distance_cache (origin_hash, dest_hash);
+7.4 fuel_index
+CREATE TABLE fuel_index (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source          VARCHAR(50) NOT NULL,
+  price_per_litre DECIMAL(6,4) NOT NULL,
+  region          VARCHAR(100),
+  effective_date  DATE NOT NULL,
+  created_at      TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_fuel_latest ON fuel_index (effective_date DESC);
+8. TMS User Interface Specification
+8.1 Quote Form Page
+The quote form is the primary interface for generating quotes. It should be accessible from the TMS main navigation (e.g., “New Quote” button) and from within the load creation flow.
+Form Fields
+Origin Address: Text input with geocoding autocomplete (Mapbox/Google Places). As the user types, suggest matching addresses. Display the resolved region below the input.
+Destination Address: Same as origin with autocomplete.
+Equipment Type: Dropdown selector: Dry Van, Reefer, Flatbed, Step Deck.
+Weight (lbs): Numeric input. Default 42,000 (standard full truckload).
+Pickup Date: Date picker. Defaults to tomorrow.
+Commodity: Optional text input. Provides context for AI estimation.
+Shipper: Optional dropdown of existing shippers from CRM. Pre-fills margin based on shipper relationship.
+Target Margin: Slider or numeric input. Range 5% to 30%. Defaults to 15%. Shows the resulting shipper rate in real-time as margin changes.
+Quote Result Display
+After clicking “Generate Quote,” the result appears below the form (or in a panel) showing:
+Shipper Rate (large, prominent) — this is the price to quote the customer.
+Confidence Badge (HIGH/MEDIUM/LOW with color coding).
+Margin Breakdown: carrier cost estimate, fuel surcharge, margin dollars, margin percentage.
+Rate Source: which data source provided the rate (e.g., “DAT RateView — 47 transactions, updated 2 hours ago”).
+Rate Range: low to high carrier cost range shown as a bar visualization.
+Distance and drive time.
+Action buttons: “Book Load” (converts quote to load), “Send to Shipper” (emails quote), “Save Draft,” “Adjust Margin” (re-renders with new margin).
+8.2 Quote History Page
+A table view of all generated quotes with columns for: reference, shipper name, lane (origin → destination), shipper rate, status (draft/sent/accepted/declined/expired), confidence, source, date. Filterable by status, date range, and confidence. Shows conversion rate metrics at the top: total quotes, quotes sent, quotes accepted, acceptance rate.
+8.3 Settings > Integrations Page
+Card-based layout. Each integration (DAT, Truckstop, AI Provider, Mapbox) is a card showing:
+Provider name and logo
+Status indicator (green dot = connected, red dot = disconnected or not configured)
+API key input field (masked, with show/hide toggle)
+Last successful call timestamp
+Test Connection button
+Enable/Disable toggle
+8.4 Settings > Rate Management Page
+Table of all manually cached rates. Columns: origin region, destination region, equipment type, rate per mile, total rate, source, last updated, freshness indicator. Actions: add new rate, edit, delete, bulk CSV import. Summary stats at top: total lanes cached, average freshness, stale rate count.
+9. Learning Feedback Loop
+The quoting engine gets smarter with every completed load. This section defines how actual transaction data feeds back into the system.
+Automatic Feedback
+When a load that originated from a quote transitions to “delivered” status, the system automatically:
+Computes quote accuracy: accuracy = 1 - abs(estimated_carrier_cost - actual_carrier_cost) / actual_carrier_cost.
+Stores the accuracy on the quote record.
+Updates the aggregate accuracy metrics per source (e.g., DAT quotes average 94% accuracy, AI quotes average 87%).
+The actual carrier cost becomes a historical data point for future quotes on this lane.
+Correction Factors
+Over time, if a specific data source consistently over- or under-estimates on certain corridors, the system applies a correction factor:
+// If DAT consistently underestimates Toronto-Sudbury by 5%:
+correction_factor = avg(actual_cost / estimated_cost) for lane over last 20 loads
+adjusted_rate = dat_rate × correction_factor
+This is stored per source + lane combination in a quote_corrections table and applied silently during rate lookup.
+Reporting Dashboard
+The TMS should include a Quote Analytics section showing: average quote accuracy by source, accuracy trend over time, most-quoted lanes, win rate (quotes that became booked loads), margin realization (actual vs. quoted margin), and source utilization (percentage of quotes from each cascade level).
+10. Implementation Priority for Claude Code
+Feed these tasks into Claude Code in this sequence. Each builds on the previous.
+ 
+Sprint Order
+This is designed for a 2-day focused build within your existing TMS codebase. Day 1 focuses on the core calculation pipeline and database. Day 2 focuses on the UI, integrations settings, and AI estimation.
+Task 1: Database Migrations
+Create the quotes, integrations, distance_cache, and fuel_index tables. Add the quote_id reference column to the loads table. Seed the fuel_index with current Canadian diesel price. Seed the benchmark rate table as a constants file.
+Task 2: Distance Service
+Build the distance calculation module: geocoding via Mapbox, driving distance via Mapbox Directions API, caching in distance_cache table. This is a dependency for everything else.
+Task 3: Rate Lookup Cascade
+Implement the cascade function from Section 5, Step 3. Start with Sources 4 (manual cache) and 6 (benchmark) since they require no API keys. Wire up the fuel surcharge calculation. Test end-to-end: given origin + destination, return a carrier cost estimate.
+Task 4: Quote API Endpoint
+Implement POST /api/v1/quotes with the full pipeline: distance → rate lookup → fuel → margin → assemble → store. Implement GET /api/v1/quotes for listing. Implement POST /api/v1/quotes/:id/book for conversion to load.
+Task 5: TMS Quote Form UI
+Build the quote form page with address autocomplete, equipment selector, margin slider, and result display panel. Wire to the API endpoint. Show confidence badges and source attribution.
+Task 6: Integrations Settings Page
+Build the settings page for API key management. Store keys encrypted. Implement the test connection buttons. Build the rate management page for manual cache CRUD and CSV import.
+Task 7: DAT/Truckstop Integration
+Implement Sources 2 and 3 in the cascade. Build the API client modules with OAuth2 token management (DAT) and API key auth (Truckstop). Implement caching. These only activate when keys are configured in Settings.
+Task 8: AI Estimation Integration
+Implement Source 5. Build the prompt template, API client for Claude/OpenAI, response parsing, and caching. Implement the nearby lanes context gathering. Wire into cascade.
+Task 9: Feedback Loop
+Implement the automatic accuracy computation when loads complete. Build the quote analytics dashboard. Implement correction factors per source per lane.
+11. File Structure
+Recommended file organization within the existing TMS codebase:
+/packages/api/src/
+  /modules/
+    /quoting/
+      index.ts               // Quote service orchestrator
+      calculator.ts           // Core pricing formula
+      cascade.ts              // Rate source cascade logic
+      confidence.ts           // Confidence scoring
+      margin.ts               // Margin rules engine
+      feedback.ts             // Learning loop + corrections
+    /rates/
+      dat-client.ts           // DAT API integration
+      truckstop-client.ts     // Truckstop API integration
+      ai-estimator.ts         // AI rate estimation
+      benchmark.ts            // Hardcoded benchmark table
+      fuel-index.ts           // Fuel surcharge module
+    /geo/
+      distance-service.ts     // Mapbox distance + geocoding
+      region-mapper.ts        // Coordinates to named region
+  /routes/
+    quotes.ts                 // POST/GET/PATCH quote endpoints
+    integrations.ts           // Settings CRUD for API keys
+    rates.ts                  // Manual rate cache CRUD + CSV import
+/apps/tms/src/routes/
+  /quotes/
+    +page.svelte              // Quote form + result display
+    [id]/+page.svelte         // Quote detail view
+  /settings/
+    integrations/+page.svelte // API key management
+    rates/+page.svelte        // Manual rate cache management
+  /analytics/
+    quotes/+page.svelte       // Quote performance dashboard
+— End of Specification —
