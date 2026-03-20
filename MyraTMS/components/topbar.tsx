@@ -129,7 +129,7 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{truncatedDesc}</p>
                           <p className="text-[10px] text-muted-foreground/60 mt-1">
-                            {timeAgo(n.created_at)}
+                            {timeAgo(n.timestamp)}
                           </p>
                         </div>
                         {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent" />}
