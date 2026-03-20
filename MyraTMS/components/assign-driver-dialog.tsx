@@ -45,7 +45,7 @@ function statusLabel(status: string): string {
   return status
 }
 
-export default function AssignDriverDialog({
+export function AssignDriverDialog({
   loadId, carrierId, currentDriverId, open, onOpenChange, onSuccess,
 }: AssignDriverDialogProps) {
   const [drivers, setDrivers] = useState<Driver[]>([])
@@ -53,12 +53,10 @@ export default function AssignDriverDialog({
   const [saving, setSaving] = useState(false)
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(currentDriverId ?? null)
 
-  // Sync selection when dialog opens or currentDriverId changes
   useEffect(() => {
     if (open) setSelectedDriverId(currentDriverId ?? null)
   }, [open, currentDriverId])
 
-  // Fetch drivers when dialog opens
   useEffect(() => {
     if (!open) return
     const controller = new AbortController()
@@ -66,7 +64,6 @@ export default function AssignDriverDialog({
     async function fetchDrivers() {
       setLoading(true)
       try {
-        // GET /api/drivers reads carrier_id (snake_case) as the query param
         const qs = carrierId ? "?carrier_id=" + encodeURIComponent(carrierId) : ""
         const res = await fetch("/api/drivers" + qs, { signal: controller.signal })
         if (!res.ok) throw new Error("Failed to load drivers (" + String(res.status) + ")")
@@ -91,7 +88,6 @@ export default function AssignDriverDialog({
       const res = await fetch("/api/loads/" + loadId, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        // PATCH whitelist maps camelCase driverId -> snake_case driver_id
         body: JSON.stringify({ driverId: selectedDriverId ?? null }),
       })
 
@@ -100,7 +96,6 @@ export default function AssignDriverDialog({
         throw new Error(body?.error ?? "Request failed (" + String(res.status) + ")")
       }
 
-      // Invalidate all loads SWR cache keys
       mutate(
         (key: unknown) => typeof key === "string" && key.startsWith("/api/loads"),
         undefined,
