@@ -156,7 +156,7 @@ export async function estimateRateWithAI(
       system: SYSTEM_PROMPT,
       prompt: userPrompt,
       temperature: 0.3,
-      maxTokens: 500,
+      maxOutputTokens: 500,
     })
 
     // Parse JSON response

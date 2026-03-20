@@ -111,7 +111,7 @@ export async function POST(
     const load = loads[0]
 
     // IDOR check: only the assigned driver may upload POD
-    if (user.role === "driver" && load.driver_id !== user.id) {
+    if (user.role === "driver" && load.driver_id !== (user as any).id) {
       return apiError("Forbidden", 403)
     }
 

@@ -54,10 +54,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   // IDOR check: only admins/dispatchers can access any load
   if (user.role !== "admin" && user.role !== "dispatcher") {
-    if (user.role === "shipper" && load.shipper_id !== user.id) {
+    if (user.role === "shipper" && load.shipper_id !== (user as any).id) {
       return apiError("Forbidden", 403)
     }
-    if (user.role === "carrier" && load.carrier_id !== user.id) {
+    if (user.role === "carrier" && load.carrier_id !== (user as any).id) {
       return apiError("Forbidden", 403)
     }
   }
@@ -93,10 +93,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const existingLoad = existing[0]
   if (user.role !== "admin" && user.role !== "dispatcher") {
-    if (user.role === "shipper" && existingLoad.shipper_id !== user.id) {
+    if (user.role === "shipper" && existingLoad.shipper_id !== (user as any).id) {
       return apiError("Forbidden", 403)
     }
-    if (user.role === "carrier" && existingLoad.carrier_id !== user.id) {
+    if (user.role === "carrier" && existingLoad.carrier_id !== (user as any).id) {
       return apiError("Forbidden", 403)
     }
   }

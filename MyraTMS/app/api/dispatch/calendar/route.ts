@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
     WHERE assigned_rep IS NOT NULL AND assigned_rep != ''
     ORDER BY assigned_rep
   `
-  const availableReps = reps.map((r: { assigned_rep: string }) => r.assigned_rep)
+  const availableReps = reps.map((r: Record<string, any>) => r.assigned_rep as string)
 
   return NextResponse.json({ events, availableReps })
 }
