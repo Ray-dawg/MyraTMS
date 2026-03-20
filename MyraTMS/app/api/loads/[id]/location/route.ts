@@ -54,7 +54,7 @@ export async function POST(
   const load = loads[0]
 
   // IDOR check: only the assigned driver may submit GPS pings for this load
-  if (user.role === "driver" && load.driver_id !== user.id) {
+  if (user.role === "driver" && load.driver_id !== user.userId) {
     return apiError("Forbidden", 403)
   }
 
