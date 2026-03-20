@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/exception-detect",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 12 * * *"
     },
     {
       "path": "/api/cron/shipper-reports",

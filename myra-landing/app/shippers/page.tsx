@@ -11,8 +11,8 @@ export default function ShippersPage() {
 
       <section className="content-section" style={{ textAlign: 'center' }}>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap', marginBottom: '24px' }}>
-          <a href="#" className="btn-primary-lg">Post Your First Load Free</a>
-          <a href="#" className="btn-ghost-lg">Already shipping? Talk to our team &rarr;</a>
+          <a href="/get-started" className="btn-primary-lg">Post Your First Load Free</a>
+          <a href="/get-started" className="btn-ghost-lg">Already shipping? Talk to our team &rarr;</a>
         </div>
       </section>
 
@@ -127,7 +127,7 @@ export default function ShippersPage() {
             </div>
             <div style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '12px' }}>Best for: Occasional shippers, first-time loads.</div>
             <div style={{ marginTop: '16px' }}>
-              <a href="#" className="btn-primary-lg" style={{ fontSize: '14px', padding: '12px 28px' }}>Ship Your First Load</a>
+              <a href="/get-started" className="btn-primary-lg" style={{ fontSize: '14px', padding: '12px 28px' }}>Ship Your First Load</a>
             </div>
           </div>
 
@@ -140,7 +140,7 @@ export default function ShippersPage() {
             </div>
             <div style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '12px' }}>Best for: Logistics managers shipping multiple loads per month.</div>
             <div style={{ marginTop: '16px' }}>
-              <a href="#" className="btn-primary-lg" style={{ fontSize: '14px', padding: '12px 28px' }}>Talk to Our Team</a>
+              <a href="/get-started" className="btn-primary-lg" style={{ fontSize: '14px', padding: '12px 28px' }}>Talk to Our Team</a>
             </div>
           </div>
         </div>
@@ -155,8 +155,8 @@ export default function ShippersPage() {
           Post it now. Carrier confirmed in 30 minutes. Your freight, tracked live, delivered on time.
         </p>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <a href="#" className="btn-primary-lg">Post Your First Load — Free</a>
-          <a href="#" className="btn-ghost-lg">See How Matching Works &rarr;</a>
+          <a href="/get-started" className="btn-primary-lg">Post Your First Load — Free</a>
+          <a href="/get-started" className="btn-ghost-lg">See How Matching Works &rarr;</a>
         </div>
       </section>
     </>

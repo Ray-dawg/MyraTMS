@@ -11,7 +11,7 @@ export default function PlatformPage() {
       />
 
       <section className="content-section" style={{ textAlign: 'center' }}>
-        <a href="#" className="btn-primary-lg">Request a Demo</a>
+        <a href="https://v0-enterprise-logistic-one-pager.vercel.app/track/demo0000000000000000000000000000000000000000000000000000000000aa" className="btn-primary-lg" target="_blank" rel="noopener noreferrer">See Live Tracking Demo</a>
       </section>
 
       <section className="content-section">
@@ -136,8 +136,8 @@ export default function PlatformPage() {
           Book a 20-minute demo. We&apos;ll run a live match on a real lane.
         </p>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <a href="#" className="btn-primary-lg">Book a Demo</a>
-          <a href="#" className="btn-ghost-lg">Read the Docs &rarr;</a>
+          <a href="https://v0-enterprise-logistic-one-pager.vercel.app/track/demo0000000000000000000000000000000000000000000000000000000000aa" className="btn-primary-lg" target="_blank" rel="noopener noreferrer">See Live Tracking Demo</a>
+          <a href="/api-docs" className="btn-ghost-lg">Read the Docs &rarr;</a>
         </div>
       </section>
     </>

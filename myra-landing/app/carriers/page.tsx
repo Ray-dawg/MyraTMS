@@ -187,7 +187,7 @@ export default function CarriersPage() {
           Myra has loads that fit your lane today. Join the network. We&apos;ll handle the rest.
         </p>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <a href="#" className="btn-primary-lg">Join the Carrier Network</a>
+          <a href="/get-started" className="btn-primary-lg">Join the Carrier Network</a>
           <a href="#" className="btn-ghost-lg">Talk to Our Team &rarr;</a>
         </div>
         <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '16px' }}>

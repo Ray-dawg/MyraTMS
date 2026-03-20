@@ -17,15 +17,15 @@
   "footerLinks": {
     "resources": [
       { "label": "Platform", "href": "/platform" },
-      { "label": "Carrier Portal", "href": "#" },
-      { "label": "Shipper Dashboard", "href": "#" },
+      { "label": "Carrier Login", "href": "https://myra-driver-app.vercel.app/login" },
+      { "label": "Tracking Demo", "href": "https://v0-enterprise-logistic-one-pager.vercel.app/track/demo0000000000000000000000000000000000000000000000000000000000aa" },
       { "label": "API Docs", "href": "/api-docs" },
       { "label": "Help Center", "href": "/help" }
     ],
     "company": [
       { "label": "About", "href": "/about" },
       { "label": "Careers", "href": "/careers" },
-      { "label": "Press", "href": "#" },
+      { "label": "Admin Portal", "href": "https://myratms.vercel.app/login" },
       { "label": "Privacy Policy", "href": "/privacy" },
       { "label": "Terms of Service", "href": "/terms" }
     ]
