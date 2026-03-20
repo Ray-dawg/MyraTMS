@@ -26,8 +26,8 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
       AND user_id IS NULL
   `
   const settingsMap = Object.fromEntries(
-    settingsRows.map((r: { settings_key: string; settings_value: unknown }) => [
-      r.settings_key,
+    settingsRows.map((r) => [
+      String(r.settings_key),
       String(r.settings_value).replace(/^"|"$/g, ""),
     ])
   )
