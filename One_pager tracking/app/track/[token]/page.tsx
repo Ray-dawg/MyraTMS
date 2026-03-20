@@ -1,6 +1,15 @@
 import { notFound } from "next/navigation"
 import { TrackingClient } from "./tracking-client"
 
+interface TrackingDocument {
+  id: string
+  name: string
+  type: string
+  uploadDate: string | null
+  blobUrl: string | null
+  fileSize: number | null
+}
+
 interface TrackingAPIResponse {
   loadNumber: string
   referenceNumber: string | null
@@ -256,25 +265,39 @@ export default async function TrackingTokenPage({
   const { token } = await params
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"
 
+  // Fetch load data and documents in parallel
+  const [loadResult, docsResult] = await Promise.allSettled([
+    fetch(`${apiUrl}/api/tracking/${token}`, { cache: "no-store" }),
+    fetch(`${apiUrl}/api/tracking/${token}/documents`, { cache: "no-store" }),
+  ])
+
+  // Handle load result — required
   let data: TrackingAPIResponse
-
-  try {
-    const res = await fetch(`${apiUrl}/api/tracking/${token}`, {
-      cache: "no-store",
-    })
-
-    if (res.status === 404 || res.status === 410) {
-      notFound()
-    }
-
-    if (!res.ok) {
-      throw new Error(`API responded with ${res.status}`)
-    }
-
-    data = await res.json()
-  } catch (err) {
-    console.error("[tracking] Failed to fetch tracking data:", err)
+  if (loadResult.status === "rejected") {
+    console.error("[tracking] Failed to fetch tracking data:", loadResult.reason)
     notFound()
+  }
+
+  const loadRes = loadResult.value
+  if (loadRes.status === 404 || loadRes.status === 410) {
+    notFound()
+  }
+  if (!loadRes.ok) {
+    console.error("[tracking] API responded with", loadRes.status)
+    notFound()
+  }
+
+  data = await loadRes.json()
+
+  // Handle documents result — optional, default to empty
+  let documents: TrackingDocument[] = []
+  if (docsResult.status === "fulfilled" && docsResult.value.ok) {
+    try {
+      const docsJson = await docsResult.value.json()
+      documents = docsJson.documents || []
+    } catch {
+      // Documents fetch failed, continue without them
+    }
   }
 
   // Map API response to the MOCK_SHIPMENT shape
@@ -345,6 +368,7 @@ export default async function TrackingTokenPage({
       shipment={shipment}
       token={token}
       apiUrl={apiUrl}
+      documents={documents}
     />
   )
 }

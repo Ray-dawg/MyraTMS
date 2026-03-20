@@ -14,7 +14,9 @@ import {
   Copy,
   CheckCircle2,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
+import { hapticSuccess } from '@/lib/haptics'
+import { SlideToConfirm } from '@/components/slide-to-confirm'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { StatusStepper } from '@/components/status-stepper'
@@ -48,6 +50,23 @@ const nextStatusLabels: Partial<Record<LoadStatus, string>> = {
 
 export function LoadDetailsScreen({ load, onBack, onStatusUpdate }: LoadDetailsScreenProps) {
   const [copied, setCopied] = useState<string | null>(null)
+  const [statusUpdating, setStatusUpdating] = useState(false)
+  const [showStatusSuccess, setShowStatusSuccess] = useState(false)
+
+  const handleStatusTap = useCallback(
+    (loadId: string, newStatus: LoadStatus) => {
+      hapticSuccess()
+      setStatusUpdating(true)
+      setShowStatusSuccess(true)
+      // Brief celebration, then update
+      setTimeout(() => {
+        onStatusUpdate(loadId, newStatus)
+        setStatusUpdating(false)
+      }, 400)
+      setTimeout(() => setShowStatusSuccess(false), 1200)
+    },
+    [onStatusUpdate]
+  )
 
   if (!load) {
     return (
@@ -344,17 +363,22 @@ export function LoadDetailsScreen({ load, onBack, onStatusUpdate }: LoadDetailsS
         </section>
       </div>
 
-      {/* Status update CTA */}
+      {/* Status update CTA — Slide to confirm */}
       {nextStatus && nextLabel && (
         <div className="safe-bottom fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-card px-4 pb-4 pt-3">
-          <div className="mb-16">
-            <button
-              onClick={() => onStatusUpdate(load.id, nextStatus)}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary py-3.5 text-sm font-bold text-primary-foreground shadow-lg transition-all hover:bg-primary/90 active:scale-[0.98]"
-            >
-              <CheckCircle2 className="size-4" />
-              {nextLabel}
-            </button>
+          <div className="mb-16 relative">
+            {showStatusSuccess ? (
+              <div className="flex h-14 items-center justify-center rounded-xl bg-success animate-in zoom-in duration-300">
+                <CheckCircle2 className="size-5 text-success-foreground mr-2" />
+                <span className="text-sm font-bold text-success-foreground">Updated!</span>
+              </div>
+            ) : (
+              <SlideToConfirm
+                label={nextLabel}
+                onConfirm={() => handleStatusTap(load.id, nextStatus)}
+                disabled={statusUpdating}
+              />
+            )}
           </div>
         </div>
       )}

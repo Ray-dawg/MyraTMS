@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@/hooks/use-auth'
-import { LogOut, User, Phone, Mail, Truck, Shield, Bell, MapPin, ChevronRight } from 'lucide-react'
+import { LogOut, User, Phone, Mail, Truck, Shield, Bell, MapPin, ChevronRight, Sun, Moon } from 'lucide-react'
+import { hapticLight } from '@/lib/haptics'
 
 interface ProfileScreenProps {
   onLogout: () => void
@@ -13,6 +14,51 @@ export function ProfileScreen({ onLogout }: ProfileScreenProps) {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [notifications, setNotifications] = useState(true)
   const [gpsTracking, setGpsTracking] = useState(true)
+  const [themeMode, setThemeMode] = useState<'auto' | 'dark' | 'light'>('auto')
+
+  // Theme management
+  useEffect(() => {
+    const stored = localStorage.getItem('driver-theme')
+    if (stored === 'dark' || stored === 'light') setThemeMode(stored)
+  }, [])
+
+  const cycleTheme = useCallback(() => {
+    hapticLight()
+    const next = themeMode === 'auto' ? 'light' : themeMode === 'light' ? 'dark' : 'auto'
+    setThemeMode(next)
+    localStorage.setItem('driver-theme', next)
+
+    const html = document.documentElement
+    if (next === 'light') {
+      html.classList.add('light')
+    } else if (next === 'dark') {
+      html.classList.remove('light')
+    } else {
+      // Auto: check time of day
+      const hour = new Date().getHours()
+      if (hour >= 6 && hour < 18) {
+        html.classList.add('light')
+      } else {
+        html.classList.remove('light')
+      }
+    }
+  }, [themeMode])
+
+  // Apply auto theme on mount
+  useEffect(() => {
+    if (themeMode === 'auto') {
+      const hour = new Date().getHours()
+      if (hour >= 6 && hour < 18) {
+        document.documentElement.classList.add('light')
+      } else {
+        document.documentElement.classList.remove('light')
+      }
+    } else if (themeMode === 'light') {
+      document.documentElement.classList.add('light')
+    } else {
+      document.documentElement.classList.remove('light')
+    }
+  }, [themeMode])
 
   const initials = driver
     ? `${driver.firstName.charAt(0)}${driver.lastName.charAt(0)}`
@@ -71,6 +117,22 @@ export function ProfileScreen({ onLogout }: ProfileScreenProps) {
               value={gpsTracking}
               onChange={setGpsTracking}
             />
+            <button
+              onClick={cycleTheme}
+              className="flex w-full items-center gap-3 px-4 py-3 transition-colors hover:bg-secondary/50"
+            >
+              {themeMode === 'light' ? (
+                <Sun className="size-4 text-primary" />
+              ) : themeMode === 'dark' ? (
+                <Moon className="size-4 text-accent" />
+              ) : (
+                <Sun className="size-4 text-muted-foreground" />
+              )}
+              <span className="flex-1 text-left text-xs text-foreground">Appearance</span>
+              <span className="rounded-md bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground uppercase">
+                {themeMode}
+              </span>
+            </button>
           </div>
         </div>
 

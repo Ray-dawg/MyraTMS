@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
 import { getCurrentUser, requireRole } from "@/lib/auth"
+import { apiError } from "@/lib/api-error"
 import crypto from "crypto"
 
 export async function GET(req: NextRequest) {
@@ -47,6 +48,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  if (!["admin", "dispatcher"].includes(user.role)) {
+    return apiError("Forbidden", 403)
+  }
+
   try {
     const body = await req.json()
     const { carrierId, firstName, lastName, phone, email, appPin } = body
@@ -73,7 +78,8 @@ export async function POST(req: NextRequest) {
       WHERE d.id = ${id}
     `
 
-    return NextResponse.json(rows[0], { status: 201 })
+    const { app_pin, ...safeDriver } = rows[0] as any
+    return NextResponse.json(safeDriver, { status: 201 })
   } catch (error) {
     console.error("Create driver error:", error)
     return NextResponse.json(

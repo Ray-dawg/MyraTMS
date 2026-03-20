@@ -1,119 +1,135 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
+import crypto from "crypto"
 
 // ---------------------------------------------------------------------------
-// GET /api/cron/invoice-alerts
+// POST /api/cron/invoice-alerts
 //
 // Vercel Cron job (daily at 08:00 UTC) that finds overdue invoices,
-// updates their status to 'Overdue', recalculates days_outstanding,
-// and creates notifications for the ops team.
+// updates days_outstanding, and creates deduplicated notifications.
+//
+// Auth: x-cron-secret header must match CRON_SECRET env var.
+//       In development (NODE_ENV !== 'production') the check is skipped.
 // ---------------------------------------------------------------------------
 
-export async function GET(req: NextRequest) {
-  // Verify cron secret
-  const authHeader = req.headers.get("authorization")
+export async function POST(request: NextRequest) {
+  // 1. Verify cron secret
   const cronSecret = process.env.CRON_SECRET
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const isDevelopment = process.env.NODE_ENV !== "production"
+
+  if (!isDevelopment) {
+    const incoming = request.headers.get("x-cron-secret")
+    if (!cronSecret || incoming !== cronSecret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
   }
 
   const sql = getDb()
-  let overdueCount = 0
+  let processed = 0
   let notificationsCreated = 0
-  let errors = 0
 
   try {
-    // 1. Find 'Pending' invoices past due date
-    const pendingOverdue = await sql`
-      SELECT id, load_id, shipper_name, amount, due_date
+    // 2. Find overdue invoices (not Paid / Cancelled, past due date)
+    const overdueInvoices = await sql`
+      SELECT
+        invoices.id,
+        invoices.load_id,
+        invoices.shipper_name,
+        invoices.amount,
+        invoices.status,
+        invoices.due_date,
+        loads.reference_number,
+        shippers.company AS shipper_company
       FROM invoices
-      WHERE status = 'Pending'
-        AND due_date < NOW()
+      LEFT JOIN loads    ON invoices.load_id     = loads.id
+      LEFT JOIN shippers ON invoices.shipper_name = shippers.company
+      WHERE invoices.status NOT IN ('Paid', 'paid', 'Cancelled', 'cancelled')
+        AND invoices.due_date IS NOT NULL
+        AND invoices.due_date < NOW()
+      LIMIT 100
     `
 
-    for (const invoice of pendingOverdue) {
+    // 3. Process each overdue invoice
+    for (const invoice of overdueInvoices) {
       try {
-        const daysOutstanding = Math.floor(
-          (Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)
+        // a. Calculate days overdue
+        const daysOverdue = Math.floor(
+          (Date.now() - new Date(invoice.due_date).getTime()) / 86400000
         )
 
-        // Update invoice to Overdue
+        // b. Update days_outstanding on the invoice
         await sql`
           UPDATE invoices
-          SET status = 'Overdue',
-              days_outstanding = ${daysOutstanding},
-              updated_at = NOW()
+          SET days_outstanding = ${daysOverdue}
           WHERE id = ${invoice.id}
         `
 
-        // Create notification
+        processed++
+
+        // c. Dedup check — skip if a notification for this invoice was already created in the last 24 hours
+        const existing = await sql`
+          SELECT id FROM notifications
+          WHERE title LIKE ${"%" + invoice.id + "%"}
+            AND created_at > NOW() - INTERVAL '24 hours'
+          LIMIT 1
+        `
+
+        if (existing.length > 0) {
+          continue
+        }
+
+        // d. Insert notification
+        const shipperName =
+          invoice.shipper_company || invoice.shipper_name || "Unknown"
         const amount = Number(invoice.amount || 0).toLocaleString("en-US", {
           style: "currency",
           currency: "USD",
         })
-        await sql`
-          INSERT INTO notifications (title, description, type, read, created_at)
-          VALUES (
-            ${"Invoice Overdue: " + invoice.id},
-            ${"Invoice " + invoice.id + " for " + (invoice.shipper_name || "Unknown Shipper") + " (" + amount + ") is " + daysOutstanding + " days past due. Load: " + (invoice.load_id || "N/A")},
-            'warning',
-            false,
-            NOW()
-          )
-        `
-
-        overdueCount++
-        notificationsCreated++
-      } catch (err) {
-        console.error(`[cron/invoice-alerts] Error processing pending invoice ${invoice.id}:`, err)
-        errors++
-      }
-    }
-
-    // 2. Find 'Sent' invoices past due date
-    const sentOverdue = await sql`
-      SELECT id, load_id, shipper_name, amount, due_date
-      FROM invoices
-      WHERE status = 'Sent'
-        AND due_date < NOW()
-    `
-
-    for (const invoice of sentOverdue) {
-      try {
-        const daysOutstanding = Math.floor(
-          (Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)
-        )
-
-        // Update invoice to Overdue
-        await sql`
-          UPDATE invoices
-          SET status = 'Overdue',
-              days_outstanding = ${daysOutstanding},
-              updated_at = NOW()
-          WHERE id = ${invoice.id}
-        `
-
-        // Create notification
-        const amount = Number(invoice.amount || 0).toLocaleString("en-US", {
-          style: "currency",
-          currency: "USD",
+        const dueDate = new Date(invoice.due_date).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
         })
+
+        const notifId = `NTF-${Date.now().toString(36).toUpperCase()}-${crypto
+          .randomUUID()
+          .slice(0, 6)
+          .toUpperCase()}`
+        const title = `Overdue Invoice — ${invoice.id} — ${daysOverdue} days`
+        const body = `Invoice for ${shipperName} — ${amount} was due ${dueDate}`
+
         await sql`
-          INSERT INTO notifications (title, description, type, read, created_at)
-          VALUES (
-            ${"Invoice Overdue: " + invoice.id},
-            ${"Invoice " + invoice.id + " for " + (invoice.shipper_name || "Unknown Shipper") + " (" + amount + ") is " + daysOutstanding + " days past due. Load: " + (invoice.load_id || "N/A")},
-            'warning',
-            false,
+          INSERT INTO notifications (
+            id,
+            user_id,
+            type,
+            title,
+            description,
+            body,
+            link,
+            load_id,
+            read,
+            created_at
+          ) VALUES (
+            ${notifId},
+            ${null},
+            ${"invoice_overdue"},
+            ${title},
+            ${body},
+            ${body},
+            ${"/invoices"},
+            ${invoice.load_id ?? null},
+            ${false},
             NOW()
           )
         `
 
-        overdueCount++
         notificationsCreated++
       } catch (err) {
-        console.error(`[cron/invoice-alerts] Error processing sent invoice ${invoice.id}:`, err)
-        errors++
+        console.error(
+          `[cron/invoice-alerts] Error processing invoice ${invoice.id}:`,
+          err
+        )
       }
     }
   } catch (err) {
@@ -122,11 +138,8 @@ export async function GET(req: NextRequest) {
   }
 
   console.log(
-    `[cron/invoice-alerts] Done: overdue=${overdueCount} notifications=${notificationsCreated} errors=${errors}`
+    `[cron/invoice-alerts] Done: processed=${processed} notifications_created=${notificationsCreated}`
   )
-  return NextResponse.json({
-    overdueCount,
-    notificationsCreated,
-    errors,
-  })
+
+  return NextResponse.json({ processed, notifications_created: notificationsCreated })
 }

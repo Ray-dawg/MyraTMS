@@ -6,7 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
-import { Loader2, Truck } from "lucide-react"
+import { Loader2 } from "lucide-react"
+import Image from "next/image"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -46,9 +47,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Branding */}
         <div className="mb-8 flex flex-col items-center gap-2">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <Truck className="h-6 w-6" />
-          </div>
+          <Image src="/logo.png" alt="Myra" width={64} height={64} className="rounded-xl" />
           <h1 className="text-2xl font-bold tracking-tight">Myra Logistics</h1>
           <p className="text-sm text-muted-foreground">Transportation Management System</p>
         </div>

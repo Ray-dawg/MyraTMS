@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
 import { getCurrentUser } from "@/lib/auth"
+import { apiError } from "@/lib/api-error"
 import { put } from "@vercel/blob"
 import { attachDocument } from "@/lib/documents"
 import { createNotification } from "@/lib/notifications"
+import { generateRatingToken } from "@/lib/rating-token"
+import { buildDeliveryConfirmationHtml } from "@/lib/email-templates/delivery-confirmation"
+import { sendGenericEmail } from "@/lib/email"
 import nodemailer from "nodemailer"
 
 async function sendFactoringEmail(load: Record<string, unknown>, invoiceId: string, podUrl: string) {
@@ -96,7 +100,7 @@ export async function POST(
 
     // Fetch full load details
     const loads = await sql`
-      SELECT id, reference_number, origin, destination, shipper_id, shipper_name,
+      SELECT id, driver_id, reference_number, origin, destination, shipper_id, shipper_name,
              carrier_id, carrier_name, revenue, carrier_cost, status
       FROM loads WHERE id = ${loadId} LIMIT 1
     `
@@ -105,6 +109,11 @@ export async function POST(
     }
 
     const load = loads[0]
+
+    // IDOR check: only the assigned driver may upload POD
+    if (user.role === "driver" && load.driver_id !== user.id) {
+      return apiError("Forbidden", 403)
+    }
 
     // Upload to Vercel Blob
     const filename = `pod/${loadId}/${Date.now()}-${file.name}`
@@ -199,6 +208,60 @@ export async function POST(
     sendFactoringEmail(load, invoiceId, blob.url).catch(() => {
       // Already logged inside the function
     })
+
+    // Send delivery confirmation email to shipper (fire-and-forget)
+    ;(async () => {
+      try {
+        if (!load.shipper_id) return
+
+        const shipperRows = await sql`
+          SELECT contact_email, contact_name FROM shippers WHERE id = ${load.shipper_id} LIMIT 1
+        `
+        if (shipperRows.length === 0 || !shipperRows[0].contact_email) return
+
+        const shipperEmail = shipperRows[0].contact_email as string
+        const shipperContactName = shipperRows[0].contact_name as string | undefined
+
+        // Get company name from settings
+        const settingsRows = await sql`
+          SELECT value FROM settings WHERE key = 'company_name' LIMIT 1
+        `
+        const companyName = settingsRows.length > 0
+          ? (settingsRows[0].value as string)
+          : "Myra Logistics"
+
+        const ratingToken = generateRatingToken(loadId, load.shipper_id as string)
+        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
+        const ratingUrl = `${baseUrl}/rate/${ratingToken}`
+
+        const deliveredAt = new Date().toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        })
+
+        const html = buildDeliveryConfirmationHtml({
+          loadRef: refNum,
+          origin: load.origin as string,
+          destination: load.destination as string,
+          deliveredAt,
+          podUrl: blob.url,
+          ratingUrl,
+          recipientName: shipperContactName,
+          companyName,
+        })
+
+        await sendGenericEmail(
+          shipperEmail,
+          `Delivery Confirmation — ${refNum}`,
+          html
+        )
+      } catch (err) {
+        console.error("[pod] Failed to send delivery confirmation email:", err)
+      }
+    })()
 
     return NextResponse.json({
       podUrl: blob.url,

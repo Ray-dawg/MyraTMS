@@ -1,0 +1,19 @@
+{
+  "openPositions": [],
+  "noOpeningsMessage": "We're growing fast and always looking for exceptional people. If you're passionate about logistics, AI, or building products that matter — we'd love to hear from you.",
+  "contactEmail": "careers@myra-ai.com",
+  "values": [
+    {
+      "title": "Build What Matters",
+      "description": "We solve real problems for real operators. Every feature ships with a reason."
+    },
+    {
+      "title": "Move Fast, Stay Honest",
+      "description": "Speed matters in freight and in product. But never at the cost of trust."
+    },
+    {
+      "title": "Operators First",
+      "description": "Every decision is measured by whether it makes a carrier's or shipper's day better."
+    }
+  ]
+}

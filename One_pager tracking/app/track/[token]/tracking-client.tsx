@@ -7,6 +7,7 @@ import { TrackingMap } from "@/components/tracking/tracking-map"
 import { ShipmentDetails } from "@/components/tracking/shipment-details"
 import { ActivityTimeline } from "@/components/tracking/activity-timeline"
 import { PODSection } from "@/components/tracking/pod-section"
+import { DocumentsSection, TrackingDocument } from "@/components/tracking/documents-section"
 import { TrackingFooter } from "@/components/tracking/tracking-footer"
 import { RefreshCw, Shield } from "lucide-react"
 
@@ -66,9 +67,10 @@ interface TrackingClientProps {
   shipment: ShipmentData
   token: string
   apiUrl: string
+  documents: TrackingDocument[]
 }
 
-export function TrackingClient({ shipment: initialShipment, token, apiUrl }: TrackingClientProps) {
+export function TrackingClient({ shipment: initialShipment, token, apiUrl, documents }: TrackingClientProps) {
   const [shipment, setShipment] = useState(initialShipment)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -230,6 +232,8 @@ export function TrackingClient({ shipment: initialShipment, token, apiUrl }: Tra
               deliveredAt={undefined}
               signedBy={undefined}
             />
+
+            <DocumentsSection documents={documents} />
 
             {/* Carrier Card */}
             <div className="rounded-xl border border-border bg-card overflow-hidden">

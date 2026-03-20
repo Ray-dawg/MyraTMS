@@ -1,6 +1,7 @@
 import { streamText, convertToModelMessages, tool, stepCountIs } from "ai"
 import { z } from "zod"
 import { getDb } from "@/lib/db"
+import { escapeLikeMeta } from "@/lib/escape-like"
 
 export async function POST(req: Request) {
   const { messages } = await req.json()
@@ -43,11 +44,11 @@ Guidelines:
         execute: async ({ status, search }) => {
           let rows
           if (status && search) {
-            rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads WHERE status = ${status} AND (origin ILIKE ${"%" + search + "%"} OR destination ILIKE ${"%" + search + "%"}) LIMIT 10`
+            rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads WHERE status = ${status} AND (origin ILIKE ${`%${escapeLikeMeta(search)}%`} OR destination ILIKE ${`%${escapeLikeMeta(search)}%`}) LIMIT 10`
           } else if (status) {
             rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads WHERE status = ${status} LIMIT 10`
           } else if (search) {
-            rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads WHERE origin ILIKE ${"%" + search + "%"} OR destination ILIKE ${"%" + search + "%"} OR shipper_name ILIKE ${"%" + search + "%"} LIMIT 10`
+            rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads WHERE origin ILIKE ${`%${escapeLikeMeta(search)}%`} OR destination ILIKE ${`%${escapeLikeMeta(search)}%`} OR shipper_name ILIKE ${`%${escapeLikeMeta(search)}%`} LIMIT 10`
           } else {
             rows = await sql`SELECT id, origin, destination, shipper_name, status, revenue, margin FROM loads ORDER BY created_at DESC LIMIT 10`
           }

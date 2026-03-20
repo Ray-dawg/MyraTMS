@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       SELECT d.*, c.company as carrier_name
       FROM drivers d
       JOIN carriers c ON d.carrier_id = c.id
-      WHERE (c.id = ${carrierCode} OR c.mc_number = ${carrierCode})
+      WHERE (LOWER(c.id) = LOWER(${carrierCode}) OR LOWER(c.mc_number) = LOWER(${carrierCode}))
         AND d.app_pin IS NOT NULL
         AND (d.invite_status IN ('active', 'pending_invite') OR d.invite_status IS NULL)
     `

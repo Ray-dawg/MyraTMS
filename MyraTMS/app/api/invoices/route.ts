@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
+import { executeWorkflows } from "@/lib/workflow-engine"
 
 export async function GET(req: NextRequest) {
   const sql = getDb()
@@ -27,6 +28,13 @@ export async function POST(req: NextRequest) {
     INSERT INTO invoices (id, load_id, shipper_name, amount, status, issue_date, due_date, factoring_status, days_outstanding)
     VALUES (${id}, ${body.loadId}, ${body.shipperName || ""}, ${body.amount || 0}, ${body.status || "Pending"}, ${body.issueDate || null}, ${body.dueDate || null}, ${body.factoringStatus || "N/A"}, ${body.daysOutstanding || 0})
   `
+
+  // Fire workflow engine for new invoice (non-blocking)
+  executeWorkflows("invoice_created", {
+    loadId: body.loadId,
+    invoiceId: id,
+    amount: body.amount || 0,
+  }).catch((err) => console.error("[invoices POST] workflow error:", err))
 
   return NextResponse.json({ id }, { status: 201 })
 }

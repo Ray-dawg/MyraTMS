@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
+import { getCurrentUser } from "@/lib/auth"
+import { apiError } from "@/lib/api-error"
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const user = getCurrentUser(_req)
+  if (!user) return apiError("Unauthorized", 401)
   const { id } = await params
   const sql = getDb()
   const rows = await sql`SELECT * FROM shippers WHERE id = ${id} LIMIT 1`
@@ -10,6 +14,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const user = getCurrentUser(req)
+  if (!user) return apiError("Unauthorized", 401)
   const { id } = await params
   const body = await req.json()
   const sql = getDb()

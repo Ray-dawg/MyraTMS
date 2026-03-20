@@ -6,6 +6,63 @@ import type { NextRequest } from "next/server"
 // cannot use standard @/lib imports)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// JWT verification using Web Crypto API (Edge-runtime compatible).
+// jsonwebtoken cannot run in Edge runtime; we verify the HMAC-SHA256 signature
+// here so that role extraction for RBAC is cryptographically trusted.
+//
+// SECURITY FIX: The previous implementation decoded the JWT payload with
+// atob(token.split('.')[1]) WITHOUT verifying the signature. This allowed
+// an attacker to craft a token with any role claim (e.g. role:"admin") and
+// bypass RBAC entirely. This function performs a full HMAC-SHA256 signature
+// check using JWT_SECRET before trusting any claim in the payload.
+// ---------------------------------------------------------------------------
+
+async function verifyJwtEdge(token: string): Promise<Record<string, unknown> | null> {
+  try {
+    const secret = process.env.JWT_SECRET
+    if (!secret) return null
+
+    const parts = token.split(".")
+    if (parts.length !== 3) return null
+
+    const [headerB64, payloadB64, signatureB64] = parts
+
+    // Import the HMAC-SHA256 key
+    const encoder = new TextEncoder()
+    const keyData = encoder.encode(secret)
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      keyData,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    )
+
+    // Decode the signature (base64url -> Uint8Array)
+    const signaturePadded = signatureB64.replace(/-/g, "+").replace(/_/g, "/")
+    const signatureBytes = Uint8Array.from(atob(signaturePadded), (c) => c.charCodeAt(0))
+
+    // Verify signature over header.payload
+    const signingInput = encoder.encode(headerB64 + "." + payloadB64)
+    const valid = await crypto.subtle.verify("HMAC", cryptoKey, signatureBytes, signingInput)
+    if (!valid) return null
+
+    // Signature is valid -- safe to decode the payload
+    const payloadJson = atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/"))
+    const payload = JSON.parse(payloadJson) as Record<string, unknown>
+
+    // Check token expiry (exp claim is in seconds)
+    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) {
+      return null
+    }
+
+    return payload
+  } catch {
+    return null
+  }
+}
+
 const ALLOWED_ORIGINS = [
   process.env.NEXT_PUBLIC_APP_URL,
   process.env.NEXT_PUBLIC_DRIVER_APP_URL,
@@ -60,7 +117,7 @@ function withCors(request: NextRequest, response: NextResponse): NextResponse {
 // Route protection middleware
 // ---------------------------------------------------------------------------
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Handle CORS preflight (OPTIONS) requests first
@@ -68,9 +125,22 @@ export function middleware(request: NextRequest) {
     return handleCorsPreflight(request)
   }
 
-  // Public routes -- no auth needed
-  const publicPaths = ["/login", "/api/auth/login", "/api/auth/driver-login", "/api/drivers/invite/", "/api/drivers/accept-invite"]
-  const isPublic = publicPaths.some((p) => pathname.startsWith(p))
+  // Public routes -- no auth needed.
+  // SECURITY NOTE: use exact equality or tightly scoped prefixes. An overly
+  // broad startsWith (e.g. "/api/drivers/") would accidentally bypass auth on
+  // all driver resource routes. The invite path is intentionally path-scoped.
+  const publicPaths = [
+    "/login",
+    "/api/auth/login",
+    "/api/auth/driver-login",
+    "/api/drivers/invite/",       // invite token lookup -- intentionally path-scoped
+    "/api/drivers/accept-invite", // exact prefix, no trailing slash needed
+    "/rate/",                     // public shipper delivery rating page
+    "/api/rate/",                 // public rating submission endpoint
+    "/invite/",                   // public invite acceptance page
+    "/api/auth/accept-invite",    // public invite validation + account creation
+  ]
+  const isPublic = publicPaths.some((p) => pathname === p || pathname.startsWith(p))
 
   // Tracking routes -- token-based auth, not cookie
   const isTracking = pathname.startsWith("/api/tracking/")
@@ -102,33 +172,40 @@ export function middleware(request: NextRequest) {
   // ---------------------------------------------------------------------------
   // Role-Based Access Control (RBAC)
   // Driver JWTs can only access driver-specific API routes.
-  // We decode the JWT payload (base64) without verifying signature here —
-  // full verification happens in getCurrentUser() inside the route handler.
+  //
+  // SECURITY FIX: replaced atob(token.split('.')[1]) with verifyJwtEdge().
+  // The old code decoded the payload without checking the signature, so any
+  // attacker-crafted JWT with role:"admin" would have passed this check.
+  // verifyJwtEdge() performs a full HMAC-SHA256 signature verification using
+  // JWT_SECRET before trusting any payload claim.
   // ---------------------------------------------------------------------------
   if (pathname.startsWith("/api/")) {
-    try {
-      const payloadB64 = token.split(".")[1]
-      if (payloadB64) {
-        const payload = JSON.parse(atob(payloadB64))
-        if (payload.role === "driver") {
-          // Drivers can ONLY access these API paths
-          const driverAllowed = [
-            "/api/drivers/me",
-            "/api/loads/",           // GET single load + PATCH status + POST location/pod/events
-            "/api/auth/logout",
-            "/api/auth/me",
-          ]
-          const isAllowed = driverAllowed.some((p) => pathname.startsWith(p))
-          if (!isAllowed) {
-            return withCors(
-              request,
-              NextResponse.json({ error: "Forbidden" }, { status: 403 })
-            )
-          }
-        }
+    const payload = await verifyJwtEdge(token)
+
+    // Reject tokens that fail signature verification or are expired, rather
+    // than silently falling through to the route handler.
+    if (!payload) {
+      return withCors(
+        request,
+        NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      )
+    }
+
+    if (payload.role === "driver") {
+      // Drivers can ONLY access these API paths
+      const driverAllowed = [
+        "/api/drivers/me",
+        "/api/loads/",           // GET single load + PATCH status + POST location/pod/events
+        "/api/auth/logout",
+        "/api/auth/me",
+      ]
+      const isAllowed = driverAllowed.some((p) => pathname.startsWith(p))
+      if (!isAllowed) {
+        return withCors(
+          request,
+          NextResponse.json({ error: "Forbidden" }, { status: 403 })
+        )
       }
-    } catch {
-      // If JWT decode fails, let the route handler deal with it
     }
   }
 
@@ -137,5 +214,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\..*).*))"],
 }

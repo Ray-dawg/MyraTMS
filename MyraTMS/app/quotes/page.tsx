@@ -95,7 +95,7 @@ export default function QuotesPage() {
     return d.toISOString().split("T")[0]
   })
   const [commodity, setCommodity] = useState("")
-  const [shipperId, setShipperId] = useState("")
+  const [shipperId, setShipperId] = useState("none")
   const [targetMargin, setTargetMargin] = useState([15])
 
   const handleGenerate = async () => {
@@ -114,7 +114,7 @@ export default function QuotesPage() {
         weightLbs,
         pickupDate,
         commodity: commodity.trim(),
-        shipperId: shipperId || undefined,
+        shipperId: shipperId !== "none" ? shipperId : undefined,
         shipperName,
         targetMargin: targetMargin[0] / 100,
       })
@@ -259,7 +259,7 @@ export default function QuotesPage() {
                   <SelectValue placeholder="Optional — select shipper" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
                   {(shippers || []).map((s: { id: string; company: string }) => (
                     <SelectItem key={s.id} value={s.id}>{s.company}</SelectItem>
                   ))}

@@ -1,3 +1,5 @@
+"use client"
+
 import dynamic from "next/dynamic"
 
 const GlobalMap = dynamic(() => import("@/components/global-load-map"), {

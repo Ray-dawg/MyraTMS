@@ -1,5 +1,6 @@
 import type { NeonQueryFunction } from "@neondatabase/serverless"
 import { extractRegion } from "../regions"
+import { escapeLikeMeta } from "@/lib/escape-like"
 
 export interface RateResult {
   score: number
@@ -30,8 +31,8 @@ export async function scoreRate(
     SELECT AVG(carrier_cost) as avg_rate
     FROM loads
     WHERE carrier_id = ${carrierId}
-      AND LOWER(origin) LIKE ${"%" + originRegion + "%"}
-      AND LOWER(destination) LIKE ${"%" + destRegion + "%"}
+      AND LOWER(origin) LIKE ${`%${escapeLikeMeta(originRegion)}%`}
+      AND LOWER(destination) LIKE ${`%${escapeLikeMeta(destRegion)}%`}
       AND status IN ('Delivered', 'Invoiced', 'Closed')
       AND carrier_cost > 0
       AND created_at > NOW() - INTERVAL '90 days'

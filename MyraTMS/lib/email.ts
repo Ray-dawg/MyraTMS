@@ -134,3 +134,34 @@ export async function sendTrackingEmail(
     return false
   }
 }
+
+/**
+ * Send a generic HTML email.
+ * Returns true if sent, false if SMTP is not configured or send fails.
+ */
+export async function sendGenericEmail(
+  to: string,
+  subject: string,
+  html: string
+): Promise<boolean> {
+  const transporter = getTransporter()
+  if (!transporter) {
+    console.log("[email] SMTP not configured — skipping generic email send")
+    return false
+  }
+
+  const fromEmail = process.env.FROM_EMAIL || "noreply@myralogistics.com"
+
+  try {
+    await transporter.sendMail({
+      from: `"Myra AI" <${fromEmail}>`,
+      to,
+      subject,
+      html,
+    })
+    return true
+  } catch (err) {
+    console.error("[email] Failed to send generic email:", err)
+    return false
+  }
+}

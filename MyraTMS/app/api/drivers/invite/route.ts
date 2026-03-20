@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
 import { getCurrentUser } from "@/lib/auth"
+import { apiError } from "@/lib/api-error"
 import crypto from "crypto"
 
 export async function POST(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  if (!["admin", "dispatcher"].includes(user.role)) {
+    return apiError("Forbidden", 403)
   }
 
   try {
@@ -21,6 +26,18 @@ export async function POST(req: NextRequest) {
     }
 
     const sql = getDb()
+
+    // Validate load exists and belongs to the specified carrier
+    const loadRows = await sql`SELECT id, carrier_id FROM loads WHERE id = ${loadId}`
+    if (loadRows.length === 0) {
+      return apiError("Load not found", 404)
+    }
+    const load = loadRows[0] as any
+    // Non-admin users may only invite drivers for loads assigned to their carrier
+    if (user.role !== "admin" && load.carrier_id && load.carrier_id !== carrierId) {
+      return apiError("Forbidden: load does not belong to this carrier", 403)
+    }
+
     const driverId = crypto.randomUUID()
 
     // Create driver with pending_invite status

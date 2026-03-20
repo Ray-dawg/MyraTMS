@@ -42,6 +42,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const user = getCurrentUser(request)
+  if (!user) return apiError("Unauthorized", 401)
+
   const body = await request.json()
   const { userId, type, title, body: notifBody, link, loadId } = body
 

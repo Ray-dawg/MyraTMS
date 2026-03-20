@@ -210,9 +210,10 @@ export function useTrackingPositions() {
 }
 
 // --- Drivers ---
-export function useDrivers(carrierId?: string) {
+export function useDrivers(params?: { carrierId?: string; search?: string }) {
   const query = new URLSearchParams()
-  if (carrierId) query.set("carrierId", carrierId)
+  if (params?.carrierId) query.set("carrierId", params.carrierId)
+  if (params?.search) query.set("search", params.search)
   const qs = query.toString()
   return useSWR(`/api/drivers${qs ? `?${qs}` : ""}`, fetcher, swrDefaults)
 }
@@ -289,4 +290,34 @@ export function useFuelIndex() {
 // --- Quote Analytics ---
 export function useQuoteAnalytics() {
   return useSWR("/api/quotes/analytics", fetcher, { ...swrDefaults, dedupingInterval: 30000 })
+}
+
+// --- Invoice from Load ---
+export async function createInvoiceFromLoad(loadId: string, data: {
+  amount: number
+  shipperName?: string
+  issueDate?: string
+  dueDate?: string
+  notes?: string
+}) {
+  const res = await fetch(`/api/loads/${loadId}/invoice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error("Failed to create invoice from load")
+  mutate((key: string) => typeof key === "string" && key.startsWith("/api/invoices"), undefined, { revalidate: true })
+  return res.json()
+}
+
+// --- Assign Driver to Load ---
+export async function assignDriverToLoad(loadId: string, driverId: string | null) {
+  const res = await fetch(`/api/loads/${loadId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ driverId }),
+  })
+  if (!res.ok) throw new Error("Failed to assign driver to load")
+  mutate((key: string) => typeof key === "string" && key.startsWith(`/api/loads/${loadId}`), undefined, { revalidate: true })
+  return res.json()
 }

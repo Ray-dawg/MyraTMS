@@ -110,8 +110,8 @@ export default function NotificationsPage() {
                     </p>
                     {!n.read && <span className="h-2 w-2 shrink-0 rounded-full bg-accent" />}
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">{n.description}</p>
-                  <p className="text-[11px] text-muted-foreground/60 mt-1">{timeAgo(n.timestamp)}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{n.body}</p>
+                  <p className="text-[11px] text-muted-foreground/60 mt-1">{timeAgo(n.created_at)}</p>
                 </div>
                 {!n.read && (
                   <Button

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
+import { getCurrentUser } from "@/lib/auth"
+import { apiError } from "@/lib/api-error"
 import { executeWorkflows } from "@/lib/workflow-engine"
 import { processQuoteFeedback } from "@/lib/quoting/feedback"
 
@@ -39,15 +41,34 @@ const ALLOWED_COLUMNS: Record<string, string> = {
   referenceNumber: "reference_number",
 }
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const user = getCurrentUser(req)
+  if (!user) return apiError("Unauthorized", 401)
+
   const { id } = await params
   const sql = getDb()
   const rows = await sql`SELECT * FROM loads WHERE id = ${id} LIMIT 1`
   if (rows.length === 0) return NextResponse.json({ error: "Not found" }, { status: 404 })
-  return NextResponse.json(rows[0])
+
+  const load = rows[0]
+
+  // IDOR check: only admins/dispatchers can access any load
+  if (user.role !== "admin" && user.role !== "dispatcher") {
+    if (user.role === "shipper" && load.shipper_id !== user.id) {
+      return apiError("Forbidden", 403)
+    }
+    if (user.role === "carrier" && load.carrier_id !== user.id) {
+      return apiError("Forbidden", 403)
+    }
+  }
+
+  return NextResponse.json(load)
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const user = getCurrentUser(req)
+  if (!user) return apiError("Unauthorized", 401)
+
   const { id } = await params
   const body = await req.json()
   const sql = getDb()
@@ -64,6 +85,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   if (setClauses.length === 0) {
     return NextResponse.json({ error: "No valid fields to update" }, { status: 400 })
+  }
+
+  // IDOR check: fetch the load first and verify the caller has access to it
+  const existing = await sql`SELECT shipper_id, carrier_id FROM loads WHERE id = ${id} LIMIT 1`
+  if (existing.length === 0) return NextResponse.json({ error: "Not found" }, { status: 404 })
+
+  const existingLoad = existing[0]
+  if (user.role !== "admin" && user.role !== "dispatcher") {
+    if (user.role === "shipper" && existingLoad.shipper_id !== user.id) {
+      return apiError("Forbidden", 403)
+    }
+    if (user.role === "carrier" && existingLoad.carrier_id !== user.id) {
+      return apiError("Forbidden", 403)
+    }
   }
 
   // Capture old status before update (for workflow triggers)

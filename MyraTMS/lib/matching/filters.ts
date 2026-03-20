@@ -1,4 +1,5 @@
 import type { NeonQueryFunction } from "@neondatabase/serverless"
+import { escapeLikeMeta } from "@/lib/escape-like"
 
 export interface EligibleCarrier {
   id: string
@@ -52,7 +53,7 @@ export async function getEligibleCarriers(
         ce.equipment_type = ${normalizedEquip}
         OR c.id IN (
           SELECT DISTINCT carrier_id FROM loads
-          WHERE equipment ILIKE ${"%" + normalizedEquip + "%"}
+          WHERE equipment ILIKE ${`%${escapeLikeMeta(normalizedEquip)}%`}
           AND carrier_id IS NOT NULL
         )
       )

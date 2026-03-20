@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/fmcsa-reverify",
-      "schedule": "0 6 * * *"
+      "schedule": "0 2 * * *"
     },
     {
       "path": "/api/cron/invoice-alerts",
@@ -11,6 +11,10 @@
     {
       "path": "/api/cron/exception-detect",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/shipper-reports",
+      "schedule": "0 6 1 * *"
     }
   ]
 }

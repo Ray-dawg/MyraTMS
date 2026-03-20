@@ -16,6 +16,7 @@ import {
   Moon,
   Sun,
   ChevronsUpDown,
+  Calendar,
   ClipboardList,
   Megaphone,
   BarChart3,
@@ -48,6 +49,7 @@ import { useWorkspace } from "@/lib/workspace-context"
 const adminNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
+  { name: "Calendar", href: "/dispatch/calendar", icon: Calendar },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
@@ -67,6 +69,7 @@ const adminNavigation = [
 const opsNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
+  { name: "Calendar", href: "/dispatch/calendar", icon: Calendar },
   { name: "Load Board", href: "/loadboard", icon: Globe },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
@@ -107,7 +110,7 @@ export function AppSidebar({
             onClick={onToggle}
             className="flex items-center gap-2 text-sidebar-foreground hover:opacity-80 transition-opacity"
           >
-            <Image src="/myra-logo-192.png" alt="Myra" width={28} height={28} className="rounded-md" />
+            <Image src="/logo.png" alt="Myra" width={28} height={28} className="rounded-md" />
             {!collapsed && (
               <span className="text-base font-semibold tracking-tight text-sidebar-foreground">
                 Myra
@@ -244,7 +247,15 @@ export function AppSidebar({
             <DropdownMenuContent side="top" align="start" className="w-48">
               <DropdownMenuItem onClick={() => router.push("/profile")}>Profile</DropdownMenuItem>
               <DropdownMenuItem onClick={() => router.push("/settings")}>Account Settings</DropdownMenuItem>
-              <DropdownMenuItem>Sign Out</DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={async () => {
+                  await fetch("/api/auth/logout", { method: "POST" })
+                  router.push("/login")
+                }}
+                className="text-destructive focus:text-destructive"
+              >
+                Sign Out
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

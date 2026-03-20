@@ -4,7 +4,7 @@ import { createNotification } from "@/lib/notifications"
 // ---------------------------------------------------------------------------
 // Exception Detection Engine
 //
-// Runs 7 detection rules against the database. For each rule:
+// Runs 8 detection rules against the database. For each rule:
 // 1. Query for matching loads/carriers
 // 2. Deduplicate — skip if an ACTIVE exception of same type+load_id exists
 // 3. Insert new exceptions, flag loads.has_exception = true
@@ -26,6 +26,31 @@ export async function runExceptionDetection(): Promise<DetectionResult> {
   const sql = getDb()
   let created = 0
   let resolved = 0
+
+  // ── Fetch check-call reminder settings ──────────────────────────────────
+  let checkcallThresholdHours = 4
+  let checkcallEnabled = true
+  {
+    const thresholdRow = await sql`
+      SELECT settings_value FROM settings
+      WHERE user_id IS NULL AND settings_key = 'checkcall_threshold_hours'
+      LIMIT 1
+    `
+    if (thresholdRow.length > 0) {
+      const parsed = parseInt(String(thresholdRow[0].settings_value), 10)
+      if (!isNaN(parsed) && parsed > 0) checkcallThresholdHours = parsed
+    }
+
+    const enabledRow = await sql`
+      SELECT settings_value FROM settings
+      WHERE user_id IS NULL AND settings_key = 'notif_checkcall_enabled'
+      LIMIT 1
+    `
+    if (enabledRow.length > 0) {
+      const val = enabledRow[0].settings_value
+      checkcallEnabled = val === true || val === "true"
+    }
+  }
 
   // ── Rule 1: Unassigned Urgent ──────────────────────────────────────────
   {
@@ -411,6 +436,97 @@ export async function runExceptionDetection(): Promise<DetectionResult> {
         LIMIT 1
       `
       if (still.length === 0) {
+        await resolveException(sql, exc)
+        resolved++
+      }
+    }
+  }
+
+  // ── Rule 8: Missing Check-Call ─────────────────────────────────────────
+  if (checkcallEnabled) {
+    const inTransit = await sql`
+      SELECT id, reference_number, assigned_rep, current_lat, current_lng
+      FROM loads
+      WHERE status = 'In Transit'
+    `
+    for (const load of inTransit) {
+      const lastGps = await sql`
+        SELECT MAX(recorded_at) as last_ping FROM location_pings WHERE load_id = ${load.id}
+      `
+      const lastCall = await sql`
+        SELECT MAX(created_at) as last_call FROM check_calls WHERE load_id = ${load.id}
+      `
+      const lastPingTime = lastGps[0]?.last_ping ? new Date(lastGps[0].last_ping).getTime() : 0
+      const lastCallTime = lastCall[0]?.last_call ? new Date(lastCall[0].last_call).getTime() : 0
+      const lastContactTime = Math.max(lastPingTime, lastCallTime)
+      const hoursElapsed = lastContactTime > 0
+        ? (Date.now() - lastContactTime) / (1000 * 60 * 60)
+        : Infinity
+
+      if (hoursElapsed > checkcallThresholdHours) {
+        const exists = await sql`
+          SELECT 1 FROM exceptions
+          WHERE type = 'missing_checkcall' AND load_id = ${load.id} AND status = 'active'
+          LIMIT 1
+        `
+        if (exists.length === 0) {
+          // Look up user ID from assigned_rep name
+          let userId: string | null = null
+          if (load.assigned_rep) {
+            const userRows = await sql`
+              SELECT id FROM users
+              WHERE CONCAT(first_name, ' ', last_name) = ${load.assigned_rep}
+              LIMIT 1
+            `
+            if (userRows.length > 0) userId = userRows[0].id
+          }
+
+          const hourLabel = hoursElapsed === Infinity
+            ? "no contact recorded"
+            : `${Math.round(hoursElapsed)}h since last contact`
+
+          await sql`
+            INSERT INTO exceptions (load_id, carrier_id, type, severity, title, detail)
+            VALUES (
+              ${load.id}, NULL, 'missing_checkcall', 'medium',
+              ${"No Contact \u2014 " + load.reference_number},
+              ${hourLabel}
+            )
+          `
+          await sql`UPDATE loads SET has_exception = true WHERE id = ${load.id}`
+          await createNotification({
+            userId,
+            type: "missing_checkcall",
+            title: "No Contact \u2014 " + load.reference_number,
+            body: `Load ${load.reference_number} — ${hourLabel}`,
+            link: `/loads/${load.id}`,
+            loadId: load.id,
+          })
+          created++
+        }
+      }
+    }
+    // Auto-resolve
+    const active = await sql`
+      SELECT id, load_id FROM exceptions
+      WHERE type = 'missing_checkcall' AND status = 'active'
+    ` as ExceptionRow[]
+    for (const exc of active) {
+      if (!exc.load_id) continue
+      const lastGps = await sql`
+        SELECT MAX(recorded_at) as last_ping FROM location_pings WHERE load_id = ${exc.load_id}
+      `
+      const lastCall = await sql`
+        SELECT MAX(created_at) as last_call FROM check_calls WHERE load_id = ${exc.load_id}
+      `
+      const lastPingTime = lastGps[0]?.last_ping ? new Date(lastGps[0].last_ping).getTime() : 0
+      const lastCallTime = lastCall[0]?.last_call ? new Date(lastCall[0].last_call).getTime() : 0
+      const lastContactTime = Math.max(lastPingTime, lastCallTime)
+      const hoursElapsed = lastContactTime > 0
+        ? (Date.now() - lastContactTime) / (1000 * 60 * 60)
+        : Infinity
+
+      if (hoursElapsed <= checkcallThresholdHours) {
         await resolveException(sql, exc)
         resolved++
       }

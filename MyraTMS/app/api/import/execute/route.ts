@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server"
 import { neon } from "@neondatabase/serverless"
+import { getCurrentUser } from "@/lib/auth"
 import type { ImportType, ImportResult } from "@/lib/import/types"
+import { sanitizeRecord } from "@/lib/sanitize-csv"
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getCurrentUser(req)
+    const assignedRep = user ? `${user.firstName} ${user.lastName}` : "Unknown"
+
     const body = await req.json()
     const { import_type, rows } = body as {
       import_type: ImportType
@@ -37,7 +42,7 @@ export async function POST(req: NextRequest) {
     if (import_type === "carriers") {
       for (const row of rows) {
         try {
-          const d = row.data
+          const d = sanitizeRecord(row.data as Record<string, unknown>) as Record<string, string>
           const id = `CAR-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`
 
           await sql`
@@ -72,7 +77,7 @@ export async function POST(req: NextRequest) {
     } else if (import_type === "shippers") {
       for (const row of rows) {
         try {
-          const d = row.data
+          const d = sanitizeRecord(row.data as Record<string, unknown>) as Record<string, string>
           const id = `SHP-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`
 
           await sql`
@@ -106,7 +111,7 @@ export async function POST(req: NextRequest) {
 
       for (const row of rows) {
         try {
-          const d = row.data
+          const d = sanitizeRecord(row.data as Record<string, unknown>) as Record<string, string>
           const id = `LD-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`
 
           // Match shipper by name (case-insensitive)
@@ -182,7 +187,7 @@ export async function POST(req: NextRequest) {
               ${d.delivery_date?.trim() || null},
               ${equipment},
               ${d.weight?.trim() || ""},
-              ${"Sarah Chen"}
+              ${assignedRep}
             )
           `
           result.created++

@@ -98,10 +98,10 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
               ) : (
                 <div className="divide-y divide-border">
                   {displayNotifications.map((n) => {
-                    const Icon = iconMap[n.type]
-                    const truncatedDesc = n.description.length > 80
-                      ? n.description.slice(0, 80) + "..."
-                      : n.description
+                    const Icon = iconMap[n.type as keyof typeof iconMap] || Info
+                    const truncatedDesc = (n.body || "").length > 80
+                      ? (n.body || "").slice(0, 80) + "..."
+                      : (n.body || "")
                     return (
                       <div
                         key={n.id}
@@ -112,7 +112,7 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                         onClick={() => handleNotificationClick(n)}
                       >
                         <div className="mt-0.5 shrink-0">
-                          <Icon className={cn("h-4 w-4", colorMap[n.type])} />
+                          <Icon className={cn("h-4 w-4", colorMap[n.type as keyof typeof colorMap] || "text-accent")} />
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-start justify-between gap-2">
@@ -128,7 +128,7 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                           </div>
                           <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{truncatedDesc}</p>
                           <p className="text-[10px] text-muted-foreground/60 mt-1">
-                            {timeAgo(n.timestamp)}
+                            {timeAgo(n.created_at)}
                           </p>
                         </div>
                         {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent" />}

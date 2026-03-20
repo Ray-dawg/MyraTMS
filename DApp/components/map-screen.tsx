@@ -9,7 +9,9 @@ import {
   MapPin,
   Clock,
   Truck,
+  Menu,
 } from 'lucide-react'
+import { hapticLight } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { StatusStepper } from '@/components/status-stepper'
@@ -20,9 +22,11 @@ interface MapScreenProps {
   activeLoad: Load | undefined
   onViewDetails: () => void
   driverPosition?: { latitude: number; longitude: number } | null
+  immersive?: boolean
+  onToggleImmersive?: () => void
 }
 
-export function MapScreen({ activeLoad, onViewDetails, driverPosition }: MapScreenProps) {
+export function MapScreen({ activeLoad, onViewDetails, driverPosition, immersive, onToggleImmersive }: MapScreenProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<unknown>(null)
   const mbRef = useRef<typeof import('mapbox-gl').default | null>(null)
@@ -201,13 +205,38 @@ export function MapScreen({ activeLoad, onViewDetails, driverPosition }: MapScre
 
   return (
     <div className="relative flex h-full flex-col">
+      {/* Immersive mode restore button */}
+      {immersive && (
+        <button
+          onClick={() => { hapticLight(); onToggleImmersive?.() }}
+          className="safe-top absolute top-3 left-4 z-20 flex size-10 items-center justify-center rounded-full bg-card/80 shadow-lg backdrop-blur-md transition-all active:scale-90 animate-in fade-in slide-in-from-left-4 duration-300"
+          aria-label="Exit immersive mode"
+        >
+          <Menu className="size-5 text-foreground" />
+        </button>
+      )}
+
       {/* Top bar */}
-      <div className="safe-top absolute top-0 left-0 right-0 z-10 flex items-center justify-between bg-gradient-to-b from-background/90 to-transparent px-4 pb-6 pt-3">
-        <div>
-          <h1 className="text-lg font-bold text-foreground">DriverPulse</h1>
-          <p className="text-xs text-muted-foreground">
-            {activeLoad ? `Active: ${activeLoad.id}` : 'No active load'}
-          </p>
+      <div
+        className={cn(
+          'safe-top absolute top-0 left-0 right-0 z-10 flex items-center justify-between bg-gradient-to-b from-background/90 to-transparent px-4 pb-6 pt-3 transition-all duration-500',
+          immersive && '-translate-y-full opacity-0'
+        )}
+      >
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { hapticLight(); onToggleImmersive?.() }}
+            className="flex size-9 items-center justify-center rounded-full bg-card/60 backdrop-blur-md transition-all active:scale-90"
+            aria-label="Enter immersive mode"
+          >
+            <Menu className="size-4 text-foreground" />
+          </button>
+          <div>
+            <h1 className="text-lg font-bold text-foreground">DriverPulse</h1>
+            <p className="text-xs text-muted-foreground">
+              {activeLoad ? `Active: ${activeLoad.id}` : 'No active load'}
+            </p>
+          </div>
         </div>
         {activeLoad && (
           <Badge className="bg-primary text-primary-foreground">
@@ -220,10 +249,10 @@ export function MapScreen({ activeLoad, onViewDetails, driverPosition }: MapScre
       <div ref={mapContainer} className="flex-1" />
 
       {/* Floating pill to restore panel when hidden */}
-      {activeLoad && panelState === 'hidden' && (
+      {activeLoad && panelState === 'hidden' && !immersive && (
         <button
           onClick={() => setPanelState('collapsed')}
-          className="absolute bottom-22 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-card/95 px-4 py-2.5 shadow-lg backdrop-blur-md transition-all active:scale-95"
+          className="absolute bottom-22 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-card/95 px-4 py-2.5 shadow-lg backdrop-blur-md transition-all active:scale-95 animate-in fade-in slide-in-from-bottom-4 duration-300"
           aria-label="Show load panel"
         >
           <ChevronUp className="size-4 text-primary" />
@@ -234,9 +263,9 @@ export function MapScreen({ activeLoad, onViewDetails, driverPosition }: MapScre
       )}
 
       {/* Bottom panel */}
-      {activeLoad && panelState !== 'hidden' && (
+      {activeLoad && panelState !== 'hidden' && !immersive && (
         <div
-          className="absolute bottom-0 left-0 right-0 z-10 rounded-t-2xl border-t border-border bg-card/95 pb-20 backdrop-blur-md transition-all duration-300"
+          className="absolute bottom-0 left-0 right-0 z-10 rounded-t-2xl border-t border-border bg-card/95 pb-20 backdrop-blur-md transition-all duration-300 animate-in fade-in slide-in-from-bottom-8"
         >
           {/* Drag handle area with swipe-down to hide */}
           <div className="flex items-center justify-between px-4 pt-2 pb-0">
@@ -365,7 +394,7 @@ export function MapScreen({ activeLoad, onViewDetails, driverPosition }: MapScre
       )}
 
       {/* No active load state */}
-      {!activeLoad && (
+      {!activeLoad && !immersive && (
         <div className="absolute bottom-0 left-0 right-0 z-10 rounded-t-2xl border-t border-border bg-card/95 px-4 pb-20 pt-6 text-center backdrop-blur-md">
           <Truck className="mx-auto mb-2 size-10 text-muted-foreground" />
           <p className="text-sm font-medium text-foreground">No Active Load</p>

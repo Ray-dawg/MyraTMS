@@ -41,7 +41,7 @@ export async function POST(
 
   // Verify load exists and get destination coords
   const loads = await sql`
-    SELECT id, dest_lat, dest_lng, delivery_date, status, origin_lat, origin_lng, updated_at
+    SELECT id, driver_id, dest_lat, dest_lng, delivery_date, status, origin_lat, origin_lng, updated_at
     FROM loads
     WHERE id = ${id}
     LIMIT 1
@@ -52,6 +52,12 @@ export async function POST(
   }
 
   const load = loads[0]
+
+  // IDOR check: only the assigned driver may submit GPS pings for this load
+  if (user.role === "driver" && load.driver_id !== user.id) {
+    return apiError("Forbidden", 403)
+  }
+
   const driverId = user.userId
   const pingId = crypto.randomUUID()
 
@@ -99,7 +105,9 @@ export async function POST(
       const notifId = crypto.randomUUID()
       await sql`
         INSERT INTO notifications (id, user_id, title, message, type, metadata)
-        SELECT ${notifId}, u.id, ${`Load ${id}: ${exc.type}`}, ${exc.message},
+        SELECT ${notifId}, u.id, ${
+          `Load ${id}: ${exc.type}`
+        }, ${exc.message},
                ${exc.severity === "critical" ? "error" : "warning"},
                ${JSON.stringify({ loadId: id, exceptionType: exc.type })}
         FROM users u

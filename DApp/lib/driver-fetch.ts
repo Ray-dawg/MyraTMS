@@ -1,4 +1,6 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+// Use empty string (same-origin) so requests go through Next.js rewrites,
+// which proxy to MyraTMS. This avoids CORS issues entirely.
+const API_URL = ''
 
 function getStoredToken(): string | null {
   if (typeof window === 'undefined') return null

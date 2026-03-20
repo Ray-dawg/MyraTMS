@@ -7,7 +7,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MapSidebar, type MapLoad, type MapFilters, type MapSummary } from "@/components/map-sidebar"
 
-mapboxgl.accessToken = "pk.eyJ1IjoicmF5ODgxNiIsImEiOiJjbThlbnUyOWYwM2Z0MmtxMWxpbDl4aTR0In0.by1iUYheNxA294wLpJUyXw"
+mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ""
 
 const ALL_STATUSES = ["Booked", "Dispatched", "In Transit", "Delivered", "Invoiced"]
 

@@ -39,35 +39,51 @@ export function StatusStepper({ status, className }: StatusStepperProps) {
               {i > 0 && (
                 <div
                   className={cn(
-                    'h-0.5 flex-1 rounded-full transition-colors',
+                    'h-0.5 flex-1 rounded-full transition-all duration-700 ease-out',
                     isCompleted ? 'bg-primary' : 'bg-border'
                   )}
+                  style={{
+                    transitionDelay: isCompleted ? `${i * 80}ms` : '0ms',
+                  }}
                 />
               )}
               <div
                 className={cn(
-                  'flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold transition-all',
-                  isCompleted && 'bg-primary text-primary-foreground',
-                  isCurrent && 'bg-primary text-primary-foreground ring-2 ring-primary/30',
-                  !isCompleted && !isCurrent && 'bg-border text-muted-foreground'
+                  'flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold transition-all duration-500',
+                  isCompleted && 'bg-primary text-primary-foreground scale-100',
+                  isCurrent && 'bg-primary text-primary-foreground ring-2 ring-primary/30 scale-110',
+                  !isCompleted && !isCurrent && 'bg-border text-muted-foreground scale-100'
                 )}
+                style={{
+                  transitionDelay: `${i * 80}ms`,
+                }}
               >
-                {isCompleted ? <Check className="size-3" /> : i + 1}
+                {isCompleted ? (
+                  <Check className="size-3 animate-in zoom-in duration-300" />
+                ) : (
+                  i + 1
+                )}
               </div>
               {i < steps.length - 1 && (
                 <div
                   className={cn(
-                    'h-0.5 flex-1 rounded-full transition-colors',
+                    'h-0.5 flex-1 rounded-full transition-all duration-700 ease-out',
                     isCompleted ? 'bg-primary' : 'bg-border'
                   )}
+                  style={{
+                    transitionDelay: isCompleted ? `${i * 80}ms` : '0ms',
+                  }}
                 />
               )}
             </div>
             <span
               className={cn(
-                'text-center text-[9px] leading-tight',
+                'text-center text-[9px] leading-tight transition-all duration-300',
                 isCurrent ? 'font-semibold text-primary' : 'text-muted-foreground'
               )}
+              style={{
+                transitionDelay: `${i * 80}ms`,
+              }}
             >
               {step.label}
             </span>

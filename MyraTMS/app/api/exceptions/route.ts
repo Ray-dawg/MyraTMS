@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
       status !== "all" && severity
         ? await sql`
             SELECT e.*,
-                   l.reference_number, l.origin_city, l.destination_city AS dest_city,
+                   l.reference_number, l.origin_city, l.dest_city,
                    c.company AS carrier_name
             FROM exceptions e
             LEFT JOIN loads l ON e.load_id = l.id
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
         : status !== "all"
           ? await sql`
               SELECT e.*,
-                     l.reference_number, l.origin_city, l.destination_city AS dest_city,
+                     l.reference_number, l.origin_city, l.dest_city,
                      c.company AS carrier_name
               FROM exceptions e
               LEFT JOIN loads l ON e.load_id = l.id
@@ -60,7 +60,7 @@ export async function GET(req: NextRequest) {
           : severity
             ? await sql`
                 SELECT e.*,
-                       l.reference_number, l.origin_city, l.destination_city AS dest_city,
+                       l.reference_number, l.origin_city, l.dest_city,
                        c.company AS carrier_name
                 FROM exceptions e
                 LEFT JOIN loads l ON e.load_id = l.id
@@ -76,7 +76,7 @@ export async function GET(req: NextRequest) {
               `
             : await sql`
                 SELECT e.*,
-                       l.reference_number, l.origin_city, l.destination_city AS dest_city,
+                       l.reference_number, l.origin_city, l.dest_city,
                        c.company AS carrier_name
                 FROM exceptions e
                 LEFT JOIN loads l ON e.load_id = l.id

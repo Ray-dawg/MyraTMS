@@ -42,6 +42,8 @@ import { ActivityNotes, type ActivityNote } from "@/components/activity-notes"
 import { DocumentVault } from "@/components/document-vault"
 import { MatchPanel } from "@/components/carrier-matching/match-panel"
 import { CarrierRating } from "@/components/carrier-matching/carrier-rating"
+import { CreateInvoiceDialog } from "@/components/create-invoice-dialog"
+import { AssignDriverDialog } from "@/components/assign-driver-dialog"
 import { useLoad, useDocuments, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import { LoadMap } from "@/components/load-map-dynamic"
@@ -63,7 +65,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   const { data: rawShippers = [] } = useShippers()
   const { data: rawCarriers = [] } = useCarriers()
   const { data: rawNotes = [] } = useNotes("Load", id)
-  const { data: rawDrivers = [] } = useDrivers(rawLoad?.carrier_id as string | undefined)
+  const { data: rawDrivers = [] } = useDrivers({ carrierId: rawLoad?.carrier_id as string | undefined })
 
   // Map load from DB row
   const load = rawLoad ? {
@@ -152,6 +154,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
 
   // Driver assignment state
   const [driverAssigning, setDriverAssigning] = useState(false)
+  const [driverDialogOpen, setDriverDialogOpen] = useState(false)
 
   // Tracking email state
   const [trackingEmail, setTrackingEmail] = useState("")
@@ -159,6 +162,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
 
   // Invoice creation state
   const [creatingInvoice, setCreatingInvoice] = useState(false)
+  const [invoiceDialogOpen, setInvoiceDialogOpen] = useState(false)
 
   // Driver invite state
   const [showInviteForm, setShowInviteForm] = useState(false)
@@ -702,12 +706,23 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
               <Upload className="h-3.5 w-3.5" />
               Upload Doc
             </Button>
-            <Button size="sm" className="h-8 text-xs gap-1.5" onClick={handleCreateInvoice} disabled={creatingInvoice}>
-              {creatingInvoice ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
-              {creatingInvoice ? "Creating..." : "Create Invoice"}
+            <Button size="sm" className="h-8 text-xs gap-1.5" onClick={() => setInvoiceDialogOpen(true)}>
+              <FileText className="h-3.5 w-3.5" />
+              Create Invoice
             </Button>
           </div>
         </div>
+        <CreateInvoiceDialog
+          loadId={load.id}
+          loadRevenue={Number(load.revenue ?? 0)}
+          shipperId={load.shipperId}
+          shipperName={load.shipper ?? ''}
+          referenceNumber={load.referenceNumber ?? load.id}
+          carrierId={load.carrierId}
+          open={invoiceDialogOpen}
+          onOpenChange={setInvoiceDialogOpen}
+          onSuccess={() => setInvoiceDialogOpen(false)}
+        />
 
         {/* Progress Bar */}
         <div className="flex items-center gap-0 mt-2">
@@ -918,7 +933,15 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
             {/* Carrier Info */}
             <Card className="border-border bg-card">
               <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium">Carrier</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm font-medium">Carrier</CardTitle>
+                  {load.carrierId && (
+                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setDriverDialogOpen(true)}>
+                      <Truck className="h-3 w-3" />
+                      Assign Driver
+                    </Button>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm font-medium text-foreground">{load.carrier}</p>
@@ -954,6 +977,15 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
                 )}
               </CardContent>
             </Card>
+
+            <AssignDriverDialog
+              loadId={load.id}
+              carrierId={load.carrierId}
+              currentDriverId={load.driverId}
+              open={driverDialogOpen}
+              onOpenChange={setDriverDialogOpen}
+              onSuccess={() => { setDriverDialogOpen(false); revalidateLoad() }}
+            />
 
             {/* Carrier Matching Engine — show for unassigned loads */}
             {!load.carrierId && (

@@ -1,9 +1,10 @@
 /**
- * AI-powered rate estimation — Source 5 in the cascade.
- * Uses configured AI provider to estimate carrier cost based on lane context.
+ * AI-powered rate estimation -- Source 5 in the cascade.
+ * Uses Vercel AI SDK with xai/grok-3-mini-fast to estimate carrier cost based on lane context.
  * Caches results in rate_cache (24-hour TTL).
  */
 
+import { generateText } from "ai"
 import { getDb } from "@/lib/db"
 import { getLatestFuelPrice } from "./fuel-index"
 
@@ -29,15 +30,15 @@ function buildUserPrompt(params: {
   dayType: string
 }): string {
   const laneContext = params.nearbyLanes.length > 0
-    ? params.nearbyLanes.map((l) => `  ${l.origin_region} → ${l.dest_region}: $${l.rate_per_mile}/mi (${l.source})`).join("\n")
+    ? params.nearbyLanes.map((l) => `  ${l.origin_region} -> ${l.dest_region}: ${l.rate_per_mile}/mi (${l.source})`).join("\n")
     : "  No nearby lane data available"
 
   return `Estimate the carrier cost for this shipment:
 
-Lane: ${params.originCity} → ${params.destCity}
+Lane: ${params.originCity} -> ${params.destCity}
 Distance: ${params.distanceMiles.toFixed(0)} miles / ${params.distanceKm.toFixed(0)} km
 Equipment: ${params.equipmentType}
-Current Diesel: $${params.dieselPrice.toFixed(2)} CAD/litre
+Current Diesel: ${params.dieselPrice.toFixed(2)} CAD/litre
 Season: ${params.season}
 Day Type: ${params.dayType}
 
@@ -53,6 +54,19 @@ function getSeason(date: Date): string {
   if (month >= 5 && month <= 7) return "summer"
   if (month >= 8 && month <= 10) return "fall"
   return "winter"
+}
+
+/**
+ * Derive confidence from the spread of the AI rate range estimate.
+ * A tighter range (rangeLow/rangeHigh ratio closer to 1) implies more certainty.
+ * Clamps to [0.40, 0.75] -- AI estimates always carry some uncertainty.
+ */
+function deriveConfidenceFromRange(rangeLow: number, rangeHigh: number, hasNearbyLanes: boolean): number {
+  if (rangeHigh <= 0 || rangeLow <= 0) return 0.50
+  const spreadRatio = (rangeHigh - rangeLow) / rangeHigh
+  const fromSpread = Math.max(0.40, 0.70 - spreadRatio * 0.75)
+  const bonus = hasNearbyLanes ? 0.05 : 0
+  return Math.min(0.75, fromSpread + bonus)
 }
 
 export interface AIRateResult {
@@ -91,13 +105,15 @@ export async function estimateRateWithAI(
   if (cached.length > 0) {
     const c = cached[0]
     const detail = c.source_detail || {}
+    const rangeLow = Number(detail.rangeLow || c.rate_per_mile * 0.85 * distanceMiles)
+    const rangeHigh = Number(detail.rangeHigh || c.rate_per_mile * 1.15 * distanceMiles)
     return {
       ratePerMile: Number(c.rate_per_mile),
       totalRate: Number(c.total_rate || c.rate_per_mile * distanceMiles),
-      confidence: 0.55,
+      confidence: deriveConfidenceFromRange(rangeLow, rangeHigh, Boolean(detail.hadNearbyLanes)),
       reasoning: String(detail.reasoning || "Cached AI estimate"),
-      rangeLow: Number(detail.rangeLow || c.rate_per_mile * 0.85 * distanceMiles),
-      rangeHigh: Number(detail.rangeHigh || c.rate_per_mile * 1.15 * distanceMiles),
+      rangeLow,
+      rangeHigh,
     }
   }
 
@@ -114,6 +130,7 @@ export async function estimateRateWithAI(
     const fuel = await getLatestFuelPrice()
     const now = new Date()
     const dayType = [0, 6].includes(now.getDay()) ? "weekend" : "weekday"
+    const hasNearbyLanes = nearbyLanes.length > 0
 
     const userPrompt = buildUserPrompt({
       originCity: originRegion,
@@ -132,62 +149,18 @@ export async function estimateRateWithAI(
       dayType,
     })
 
-    // Use XAI_API_KEY (existing env var per CLAUDE.md) for Grok
-    const config = integration[0].config || {}
-    const provider = config.provider || "xai"
-
-    let responseText: string
-
-    if (provider === "xai") {
-      // Use existing XAI setup (same as AI chat in the app)
-      const apiKey = process.env.XAI_API_KEY || integration[0].api_key
-      if (!apiKey) return null
-
-      const res = await fetch("https://api.x.ai/v1/chat/completions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "grok-3-mini-fast",
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.3,
-          max_tokens: 500,
-        }),
-      })
-      if (!res.ok) throw new Error(`XAI API returned ${res.status}`)
-      const data = await res.json()
-      responseText = data.choices?.[0]?.message?.content || ""
-    } else {
-      // Generic OpenAI-compatible endpoint
-      const apiKey = integration[0].api_key
-      if (!apiKey) return null
-
-      const baseUrl = provider === "claude"
-        ? "https://api.anthropic.com/v1/messages"
-        : "https://api.openai.com/v1/chat/completions"
-
-      const res = await fetch(baseUrl, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: config.model || "gpt-4o-mini",
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.3,
-          max_tokens: 500,
-        }),
-      })
-      if (!res.ok) throw new Error(`AI API returned ${res.status}`)
-      const data = await res.json()
-      responseText = data.choices?.[0]?.message?.content || ""
-    }
+    // Use Vercel AI SDK with xai/grok-3-mini-fast (same model as the rest of the app).
+    // XAI_API_KEY is picked up automatically from the environment.
+    const { text } = await generateText({
+      model: "xai/grok-3-mini-fast",
+      system: SYSTEM_PROMPT,
+      prompt: userPrompt,
+      temperature: 0.3,
+      maxTokens: 500,
+    })
 
     // Parse JSON response
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error("AI did not return valid JSON")
 
     const parsed = JSON.parse(jsonMatch[0])
@@ -195,20 +168,23 @@ export async function estimateRateWithAI(
       throw new Error("AI response missing ratePerMile")
     }
 
+    const rangeLow: number = parsed.rangeLow || parsed.ratePerMile * 0.85 * distanceMiles
+    const rangeHigh: number = parsed.rangeHigh || parsed.ratePerMile * 1.15 * distanceMiles
+
     const result: AIRateResult = {
       ratePerMile: parsed.ratePerMile,
       totalRate: parsed.totalRate || parsed.ratePerMile * distanceMiles,
-      confidence: 0.55,
+      confidence: deriveConfidenceFromRange(rangeLow, rangeHigh, hasNearbyLanes),
       reasoning: parsed.reasoning || "AI estimation",
-      rangeLow: parsed.rangeLow || parsed.ratePerMile * 0.85 * distanceMiles,
-      rangeHigh: parsed.rangeHigh || parsed.ratePerMile * 1.15 * distanceMiles,
+      rangeLow,
+      rangeHigh,
     }
 
     // Cache the result (24-hour TTL)
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     await sql`
       INSERT INTO rate_cache (origin_region, dest_region, equipment_type, rate_per_mile, total_rate, source, source_detail, expires_at)
-      VALUES (${originRegion}, ${destRegion}, ${equipmentType}, ${result.ratePerMile}, ${result.totalRate}, 'ai', ${JSON.stringify({ reasoning: result.reasoning, rangeLow: result.rangeLow, rangeHigh: result.rangeHigh })}, ${expiresAt})
+      VALUES (${originRegion}, ${destRegion}, ${equipmentType}, ${result.ratePerMile}, ${result.totalRate}, 'ai', ${JSON.stringify({ reasoning: result.reasoning, rangeLow: result.rangeLow, rangeHigh: result.rangeHigh, hadNearbyLanes: hasNearbyLanes })}, ${expiresAt})
     `
 
     await sql`UPDATE integrations SET last_success_at = NOW() WHERE provider = 'ai'`

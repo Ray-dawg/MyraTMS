@@ -21,8 +21,8 @@ export async function createNotification({
   const id = `NTF-${Date.now().toString(36).toUpperCase()}`
 
   const rows = await sql`
-    INSERT INTO notifications (id, user_id, type, title, description, body, link, load_id, read, created_at)
-    VALUES (${id}, ${userId}, ${type}, ${title}, ${body}, ${body}, ${link}, ${loadId}, false, NOW())
+    INSERT INTO notifications (id, user_id, type, title, body, link, load_id, read, created_at)
+    VALUES (${id}, ${userId}, ${type}, ${title}, ${body}, ${link}, ${loadId}, false, NOW())
     RETURNING *
   `
 

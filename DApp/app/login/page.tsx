@@ -67,7 +67,7 @@ export default function LoginPage() {
             id="carrier-code"
             type="text"
             value={carrierCode}
-            onChange={(e) => setCarrierCode(e.target.value.toUpperCase())}
+            onChange={(e) => setCarrierCode(e.target.value)}
             placeholder="e.g. MC-884721"
             className="w-full rounded-xl border border-border bg-card px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
             autoComplete="username"

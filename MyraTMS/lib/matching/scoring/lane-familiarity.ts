@@ -1,5 +1,6 @@
 import type { NeonQueryFunction } from "@neondatabase/serverless"
 import { extractRegion } from "../regions"
+import { escapeLikeMeta } from "@/lib/escape-like"
 
 export interface LaneFamiliarityResult {
   score: number
@@ -31,8 +32,8 @@ export async function scoreLaneFamiliarity(
            MAX(created_at) as most_recent
     FROM loads
     WHERE carrier_id = ${carrierId}
-      AND LOWER(origin) LIKE ${"%" + originRegion + "%"}
-      AND LOWER(destination) LIKE ${"%" + destRegion + "%"}
+      AND LOWER(origin) LIKE ${`%${escapeLikeMeta(originRegion)}%`}
+      AND LOWER(destination) LIKE ${`%${escapeLikeMeta(destRegion)}%`}
       AND status IN ('Delivered', 'Invoiced', 'Closed')
       AND created_at > NOW() - INTERVAL '180 days'
   `
@@ -46,8 +47,8 @@ export async function scoreLaneFamiliarity(
     FROM loads
     WHERE carrier_id = ${carrierId}
       AND (
-        (LOWER(origin) LIKE ${"%" + destRegion + "%"} AND LOWER(destination) LIKE ${"%" + originRegion + "%"})
-        OR LOWER(origin) LIKE ${"%" + originRegion.split(",")[0]?.trim() + "%"}
+        (LOWER(origin) LIKE ${`%${escapeLikeMeta(destRegion)}%`} AND LOWER(destination) LIKE ${`%${escapeLikeMeta(originRegion)}%`})
+        OR LOWER(origin) LIKE ${`%${escapeLikeMeta(originRegion.split(",")[0]?.trim() ?? "")}%`}
       )
       AND status IN ('Delivered', 'Invoiced', 'Closed')
       AND created_at > NOW() - INTERVAL '180 days'

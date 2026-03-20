@@ -14,6 +14,7 @@ import {
   type ValidatedRow,
   type ValidationResult,
 } from "@/lib/import/types"
+import { sanitizeRecord } from "@/lib/sanitize-csv"
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB
 const MAX_ROWS = 5000
@@ -110,6 +111,14 @@ export async function POST(req: NextRequest) {
         validateLoadRow(row, i + 1)
       )
     }
+
+    // Sanitize all string fields in each row to prevent CSV formula injection.
+    // This ensures preview data and the data later submitted to /api/import/execute
+    // cannot contain spreadsheet formula payloads (=, +, -, @).
+    validatedRows = validatedRows.map((row) => ({
+      ...row,
+      data: sanitizeRecord(row.data as Record<string, unknown>) as Record<string, string>,
+    }))
 
     const result: ValidationResult = {
       import_type: importType,

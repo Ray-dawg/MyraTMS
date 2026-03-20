@@ -1,0 +1,33 @@
+{
+  "company": {
+    "name": "Myra AI",
+    "legalName": "Myra AI, Inc.",
+    "tagline": "AI-powered freight brokerage platform. Smarter matching, faster booking, complete visibility.",
+    "phone": "1-800-MYRA-AI",
+    "email": "dispatch@myra-ai.com",
+    "brokerAuthority": "#12847",
+    "copyrightYear": "2025"
+  },
+  "socialLinks": {
+    "linkedin": "",
+    "twitter": "",
+    "github": "",
+    "youtube": ""
+  },
+  "footerLinks": {
+    "resources": [
+      { "label": "Platform", "href": "/platform" },
+      { "label": "Carrier Portal", "href": "#" },
+      { "label": "Shipper Dashboard", "href": "#" },
+      { "label": "API Docs", "href": "/api-docs" },
+      { "label": "Help Center", "href": "/help" }
+    ],
+    "company": [
+      { "label": "About", "href": "/about" },
+      { "label": "Careers", "href": "/careers" },
+      { "label": "Press", "href": "#" },
+      { "label": "Privacy Policy", "href": "/privacy" },
+      { "label": "Terms of Service", "href": "/terms" }
+    ]
+  }
+}

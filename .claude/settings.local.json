@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash scripts/start-server.sh --project-dir \"C:\\\\Users\\\\patri\\\\OneDrive\\\\Desktop\\\\M1\")",
+      "Read(//c/Users/patri/OneDrive/Desktop/**)",
+      "Bash(npx create-next-app@latest myra-landing --ts --app --no-tailwind --eslint --no-src-dir --import-alias=\"@/*\" --use-pnpm)",
+      "Bash(pnpm install:*)",
+      "Bash(sed -n '10,703p' \"C:/Users/patri/OneDrive/Desktop/M1/myra-landing-v6.html\")",
+      "Read(//tmp/**)",
+      "Bash(pnpm run:*)",
+      "Bash(for f:*)",
+      "Bash(do sed:*)",
+      "Bash(echo \"Fixed $f\")",
+      "Bash(done)",
+      "mcp__plugin_playwright_playwright__browser_navigate",
+      "mcp__plugin_playwright_playwright__browser_take_screenshot",
+      "mcp__plugin_playwright_playwright__browser_evaluate",
+      "Bash(cp \"C:/Users/patri/Downloads/BF44F36C-0F39-4C1B-97EB-D893C6244931.png\" \"C:/Users/patri/OneDrive/Desktop/M1/myra-landing/public/myra-mascot.png\")",
+      "Bash(cp \"C:/Users/patri/Downloads/BF44F36C-0F39-4C1B-97EB-D893C6244931.png\" \"C:/Users/patri/OneDrive/Desktop/M1/myra-landing/app/icon.png\")",
+      "Bash(pnpm add:*)",
+      "Bash(taskkill //F //IM node.exe)",
+      "Bash(rm -rf .next)",
+      "Bash(npx sanity:*)",
+      "Bash(SANITY_AUTH_TOKEN=\"skQwrAOt3b77EcqsRTFltoBXabtWSsKAdQmxpYIq1kCX45WqlSAa55Kvghvk34HbpK3WmRAV0YvjNDjrtDqAw6RXgOqfoQevqSLlDE4qIt3c5xxmOIL2GppzVYRxDu047u9fqNeQzXPj3A2VsYTrJ4inzqIUVk8V1Z12OhtcujDMsctOmlF8\" npx sanity cors add http://localhost:3000 --no-credentials)",
+      "Bash(vercel teams:*)",
+      "Bash(vercel inspect:*)",
+      "Bash(netstat -ano)",
+      "Bash(npx next:*)",
+      "mcp__plugin_playwright_playwright__browser_snapshot",
+      "Bash(npx tsc:*)",
+      "Bash(curl:*)",
+      "mcp__plugin_playwright_playwright__browser_fill_form",
+      "mcp__plugin_playwright_playwright__browser_click"
+    ]
+  }
+}

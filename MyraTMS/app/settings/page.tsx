@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { Settings, User, Bell, Shield, Palette, Building2, Loader2, FileSpreadsheet, Plug, DollarSign } from "lucide-react"
+import { Settings, User, Bell, Shield, Palette, Building2, Loader2, FileSpreadsheet, Plug, DollarSign, Users, Mail, Copy, Check, Clock, UserPlus } from "lucide-react"
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -71,6 +71,10 @@ export default function SettingsPage() {
   // ----- Notification settings -----
   const [notifSettings, setNotifSettings] = useState<Record<string, boolean>>({ ...NOTIFICATION_DEFAULTS })
 
+  // ----- Check-call reminder settings (global scope) -----
+  const [checkcallThreshold, setCheckcallThreshold] = useState("4")
+  const [checkcallEnabled, setCheckcallEnabled] = useState(true)
+
   // ----- Brokerage settings -----
   const [brokerageSettings, setBrokerageSettings] = useState<Record<string, string>>({ ...BROKERAGE_DEFAULTS })
 
@@ -131,6 +135,23 @@ export default function SettingsPage() {
         // Sync dark mode from DB if it was stored
         if (s.dark_mode !== undefined) {
           setTheme(s.dark_mode ? "dark" : "light")
+        }
+
+        // Fetch global check-call settings
+        try {
+          const globalRes = await fetch("/api/settings?scope=global")
+          if (globalRes.ok) {
+            const globalData = await globalRes.json()
+            const gs = globalData.settings || {}
+            if (gs.checkcall_threshold_hours !== undefined) {
+              setCheckcallThreshold(String(gs.checkcall_threshold_hours))
+            }
+            if (gs.notif_checkcall_enabled !== undefined) {
+              setCheckcallEnabled(gs.notif_checkcall_enabled === true || gs.notif_checkcall_enabled === "true")
+            }
+          }
+        } catch {
+          // Keep defaults
         }
       } catch {
         // Network error — keep defaults
@@ -198,6 +219,33 @@ export default function SettingsPage() {
 
   const handleSaveNotifications = () => {
     saveSettings(notifSettings, "Notification preferences")
+  }
+
+  const handleSaveCheckcall = async () => {
+    setSaving("Check-call reminders")
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: "global",
+          settings: {
+            checkcall_threshold_hours: checkcallThreshold,
+            notif_checkcall_enabled: checkcallEnabled,
+          },
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || "Failed to save")
+      }
+      toast.success("Check-call reminders saved successfully")
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save"
+      toast.error(message)
+    } finally {
+      setSaving(null)
+    }
   }
 
   const handleSaveBrokerage = () => {
@@ -288,6 +336,10 @@ export default function SettingsPage() {
           <TabsTrigger value="security" className="gap-1.5 text-xs">
             <Shield className="h-3.5 w-3.5" />
             Security
+          </TabsTrigger>
+          <TabsTrigger value="team" className="gap-1.5 text-xs">
+            <Users className="h-3.5 w-3.5" />
+            Team
           </TabsTrigger>
           <TabsTrigger value="integrations" className="gap-1.5 text-xs" asChild>
             <Link href="/settings/integrations">
@@ -410,6 +462,55 @@ export default function SettingsPage() {
                 >
                   {saving === "Notification preferences" && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />}
                   Save Preferences
+                </Button>
+              </div>
+
+              <Separator />
+
+              <div>
+                <p className="text-sm font-medium text-card-foreground">Check-Call Reminders</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Automatically flag in-transit loads when no GPS ping or check-call has been received within the configured window.
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-card-foreground">Enable Check-Call Alerts</p>
+                  <p className="text-xs text-muted-foreground">Generate exceptions for missing contact on in-transit loads</p>
+                </div>
+                <Switch
+                  checked={checkcallEnabled}
+                  onCheckedChange={setCheckcallEnabled}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Alert Threshold (hours without contact)</Label>
+                <Select
+                  value={checkcallThreshold}
+                  onValueChange={setCheckcallThreshold}
+                >
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2">2 hours</SelectItem>
+                    <SelectItem value="3">3 hours</SelectItem>
+                    <SelectItem value="4">4 hours</SelectItem>
+                    <SelectItem value="6">6 hours</SelectItem>
+                    <SelectItem value="8">8 hours</SelectItem>
+                    <SelectItem value="12">12 hours</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  size="sm"
+                  className="text-xs"
+                  onClick={handleSaveCheckcall}
+                  disabled={saving === "Check-call reminders"}
+                >
+                  {saving === "Check-call reminders" && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />}
+                  Save Check-Call Settings
                 </Button>
               </div>
             </CardContent>
@@ -622,7 +723,230 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
         </TabsContent>
+        {/* ---- Team Tab ---- */}
+        <TabsContent value="team">
+          <TeamInviteSection />
+        </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+// ===== Team Invite Section (separate component to keep settings page manageable) =====
+
+function TeamInviteSection() {
+  const [inviteEmail, setInviteEmail] = useState("")
+  const [inviteRole, setInviteRole] = useState("broker")
+  const [inviteFirstName, setInviteFirstName] = useState("")
+  const [inviteLastName, setInviteLastName] = useState("")
+  const [sending, setSending] = useState(false)
+  const [lastInviteUrl, setLastInviteUrl] = useState("")
+  const [copied, setCopied] = useState(false)
+  const [invites, setInvites] = useState<Array<{
+    id: string; email: string; role: string; display_status: string;
+    expires_at: string; created_at: string; first_name: string | null; last_name: string | null
+  }>>([])
+  const [loadingInvites, setLoadingInvites] = useState(true)
+
+  useEffect(() => {
+    fetch("/api/auth/invite")
+      .then(res => res.ok ? res.json() : { invites: [] })
+      .then(data => setInvites(data.invites || []))
+      .catch(() => {})
+      .finally(() => setLoadingInvites(false))
+  }, [])
+
+  async function handleSendInvite() {
+    if (!inviteEmail) {
+      toast.error("Email is required")
+      return
+    }
+    setSending(true)
+    setLastInviteUrl("")
+
+    try {
+      const res = await fetch("/api/auth/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: inviteEmail,
+          role: inviteRole,
+          firstName: inviteFirstName || undefined,
+          lastName: inviteLastName || undefined,
+        }),
+      })
+      const data = await res.json()
+
+      if (res.ok) {
+        toast.success(`Invitation sent to ${inviteEmail}`)
+        setLastInviteUrl(data.invite.inviteUrl)
+        if (!data.invite.emailSent) {
+          toast.info("SMTP not configured — copy the invite link below to share manually")
+        }
+        setInviteEmail("")
+        setInviteFirstName("")
+        setInviteLastName("")
+        // Refresh invite list
+        const listRes = await fetch("/api/auth/invite")
+        if (listRes.ok) {
+          const listData = await listRes.json()
+          setInvites(listData.invites || [])
+        }
+      } else {
+        toast.error(data.error || "Failed to send invitation")
+      }
+    } catch {
+      toast.error("Network error")
+    } finally {
+      setSending(false)
+    }
+  }
+
+  function copyInviteUrl() {
+    navigator.clipboard.writeText(lastInviteUrl)
+    setCopied(true)
+    toast.success("Invite link copied!")
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const statusColors: Record<string, string> = {
+    pending: "bg-amber-500/15 text-amber-600",
+    accepted: "bg-green-500/15 text-green-600",
+    expired: "bg-zinc-500/15 text-zinc-500",
+    revoked: "bg-red-500/15 text-red-600",
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Send Invite Card */}
+      <Card className="border-border bg-card">
+        <CardHeader>
+          <CardTitle className="text-sm text-card-foreground flex items-center gap-2">
+            <UserPlus className="h-4 w-4" />
+            Invite Team Member
+          </CardTitle>
+          <CardDescription className="text-xs">
+            Send an invite to add a new broker or admin. They&apos;ll receive an email with a link to create their account.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">First Name</Label>
+              <Input
+                placeholder="Jane"
+                value={inviteFirstName}
+                onChange={(e) => setInviteFirstName(e.target.value)}
+                className="text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Last Name</Label>
+              <Input
+                placeholder="Smith"
+                value={inviteLastName}
+                onChange={(e) => setInviteLastName(e.target.value)}
+                className="text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">Email Address</Label>
+            <Input
+              type="email"
+              placeholder="jane@company.com"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              className="text-sm"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">Role</Label>
+            <Select value={inviteRole} onValueChange={setInviteRole}>
+              <SelectTrigger className="text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="broker">Broker</SelectItem>
+                <SelectItem value="admin">Admin</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <Button
+            size="sm"
+            className="text-xs w-full"
+            onClick={handleSendInvite}
+            disabled={sending || !inviteEmail}
+          >
+            {sending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+            ) : (
+              <Mail className="h-3.5 w-3.5 mr-1.5" />
+            )}
+            Send Invitation
+          </Button>
+
+          {lastInviteUrl && (
+            <div className="rounded-lg border border-border bg-muted/50 p-3">
+              <p className="text-xs font-medium mb-1.5">Invite Link</p>
+              <div className="flex gap-2">
+                <Input
+                  value={lastInviteUrl}
+                  readOnly
+                  className="text-xs font-mono bg-background"
+                />
+                <Button size="sm" variant="outline" onClick={copyInviteUrl}>
+                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Pending Invites Card */}
+      <Card className="border-border bg-card">
+        <CardHeader>
+          <CardTitle className="text-sm text-card-foreground">Invitations</CardTitle>
+          <CardDescription className="text-xs">Track sent invitations and their status.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loadingInvites ? (
+            <div className="flex justify-center py-6">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : invites.length === 0 ? (
+            <p className="text-xs text-muted-foreground text-center py-6">No invitations sent yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {invites.map((inv) => (
+                <div
+                  key={inv.id}
+                  className="flex items-center justify-between rounded-lg border border-border px-3 py-2"
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{inv.email}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusColors[inv.display_status] || statusColors.pending}`}>
+                        {inv.display_status}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <span className="capitalize">{inv.role}</span>
+                      <span>·</span>
+                      <Clock className="h-3 w-3" />
+                      <span>{new Date(inv.created_at).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
