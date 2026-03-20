@@ -1,7 +1,20 @@
 "use client"
 
 import { useState } from "react"
-import { useWorkspace, type Notification } from "@/lib/workspace-context"
+import { useWorkspace } from "@/lib/workspace-context"
+
+interface AppNotification {
+  id: string
+  title: string
+  body?: string
+  description?: string
+  type: string
+  read: boolean
+  created_at?: string
+  timestamp?: string
+  link?: string | null
+  load_id?: string | null
+}
 import { Button } from "@/components/ui/button"
 import { CheckCheck, AlertTriangle, Info, CheckCircle, XCircle, Bell } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -41,7 +54,7 @@ export default function NotificationsPage() {
     ? notifications.filter((n) => !n.read)
     : notifications
 
-  const handleClick = (n: Notification) => {
+  const handleClick = (n: AppNotification) => {
     if (!n.read) markRead(n.id)
     if (n.link) router.push(n.link)
   }
@@ -110,8 +123,8 @@ export default function NotificationsPage() {
                     </p>
                     {!n.read && <span className="h-2 w-2 shrink-0 rounded-full bg-accent" />}
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">{n.body}</p>
-                  <p className="text-[11px] text-muted-foreground/60 mt-1">{timeAgo(n.created_at)}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{n.description}</p>
+                  <p className="text-[11px] text-muted-foreground/60 mt-1">{timeAgo(n.timestamp)}</p>
                 </div>
                 {!n.read && (
                   <Button

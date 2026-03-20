@@ -99,9 +99,10 @@ export function Topbar({ onOpenCommand, onOpenAI }: { onOpenCommand: () => void;
                 <div className="divide-y divide-border">
                   {displayNotifications.map((n) => {
                     const Icon = iconMap[n.type as keyof typeof iconMap] || Info
-                    const truncatedDesc = (n.body || "").length > 80
-                      ? (n.body || "").slice(0, 80) + "..."
-                      : (n.body || "")
+                    const desc = n.description || ""
+                    const truncatedDesc = desc.length > 80
+                      ? desc.slice(0, 80) + "..."
+                      : desc
                     return (
                       <div
                         key={n.id}
