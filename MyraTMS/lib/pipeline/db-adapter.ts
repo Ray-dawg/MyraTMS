@@ -1,7 +1,8 @@
 import { neon } from '@neondatabase/serverless';
 
-// Neon's runtime supports both tagged-template and function-call form, but the
-// declared types only model the tagged-template overload — cast through `any`.
+// Neon serverless v1 splits the API: `sql\`...\`` is the tagged-template form,
+// `sql.query(text, params)` is the conventional parameterized form. We expose
+// both on `db` so prebuilt Engine 2 workers (Pattern B) stay untouched.
 const sql: any = neon(process.env.DATABASE_URL!);
 
 export interface QueryResult<T = any> {
@@ -13,7 +14,7 @@ async function query<T = any>(
   text: string,
   params: unknown[] = [],
 ): Promise<QueryResult<T>> {
-  const rows = (await sql(text, params)) as T[];
+  const rows = (await sql.query(text, params)) as T[];
   return { rows, rowCount: rows.length };
 }
 
