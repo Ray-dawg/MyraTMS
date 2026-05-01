@@ -95,6 +95,195 @@ export class ScannerService {
   }
 
   /**
+   * CSV / manual ingestion entrypoint. Used by `POST /api/pipeline/import`
+   * and by future shadow-mode batch loaders. Validates, normalizes, dedupes
+   * via the unique (load_id, load_board_source) key, inserts, and enqueues
+   * to qualify-queue. Returns counts plus per-row errors so the caller can
+   * display a results report.
+   *
+   * Loads board scraper integration (DAT / Truckstop / 123LB) is the
+   * separate `scanAllSources` flow which is still TODO.
+   */
+  public async ingestRawLoads(
+    rawLoads: Array<Partial<RawLoad>>,
+    source: RawLoad['loadBoardSource'] = 'manual',
+  ): Promise<{
+    received: number;
+    inserted: number;
+    duplicates: number;
+    invalid: number;
+    errors: Array<{ index: number; error: string }>;
+    insertedIds: number[];
+  }> {
+    const errors: Array<{ index: number; error: string }> = [];
+    const valid: RawLoad[] = [];
+
+    rawLoads.forEach((row, idx) => {
+      const filled: RawLoad = {
+        loadId: row.loadId ?? '',
+        loadBoardSource: (row.loadBoardSource ?? source) as RawLoad['loadBoardSource'],
+        sourceUrl: row.sourceUrl ?? null,
+        originCity: row.originCity ?? '',
+        originState: row.originState ?? '',
+        originCountry: row.originCountry ?? 'US',
+        originLat: row.originLat ?? null,
+        originLng: row.originLng ?? null,
+        destinationCity: row.destinationCity ?? '',
+        destinationState: row.destinationState ?? '',
+        destinationCountry: row.destinationCountry ?? 'US',
+        destinationLat: row.destinationLat ?? null,
+        destinationLng: row.destinationLng ?? null,
+        equipmentType: this.normalizeEquipmentType(row.equipmentType ?? 'dry_van'),
+        commodity: row.commodity ?? null,
+        weightLbs: row.weightLbs ?? null,
+        distanceMiles: row.distanceMiles ?? null,
+        pickupDate: row.pickupDate ?? '',
+        pickupTimeWindow: row.pickupTimeWindow ?? null,
+        deliveryDate: row.deliveryDate ?? null,
+        deliveryTimeWindow: row.deliveryTimeWindow ?? null,
+        postedRate: row.postedRate ?? null,
+        postedRateCurrency: row.postedRateCurrency ?? 'USD',
+        rateType: row.rateType ?? 'all_in',
+        shipperCompany: row.shipperCompany ?? null,
+        shipperContactName: row.shipperContactName ?? null,
+        shipperPhone: row.shipperPhone ?? null,
+        shipperEmail: row.shipperEmail ?? null,
+        postedAt: row.postedAt ?? new Date().toISOString(),
+        expiresAt: row.expiresAt ?? null,
+        scannedAt: new Date().toISOString(),
+      };
+
+      const validation = this.validateRawLoad(filled);
+      if (validation) {
+        errors.push({ index: idx, error: validation });
+      } else {
+        valid.push(filled);
+      }
+    });
+
+    let inserted = 0;
+    let duplicates = 0;
+    const insertedIds: number[] = [];
+
+    for (let i = 0; i < valid.length; i++) {
+      const load = valid[i];
+      try {
+        const res = await db.query<{ id: number }>(
+          `INSERT INTO pipeline_loads (
+             load_id, load_board_source,
+             origin_city, origin_state, origin_country,
+             destination_city, destination_state, destination_country,
+             pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
+             distance_miles,
+             shipper_company, shipper_contact_name, shipper_phone, shipper_email,
+             posted_rate, posted_rate_currency, rate_type,
+             stage, stage_updated_at, created_by
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+             $15, $16, $17, $18, $19, $20, $21,
+             'scanned', NOW(), 'scanner-csv-v1'
+           )
+           ON CONFLICT (load_id, load_board_source) DO NOTHING
+           RETURNING id`,
+          [
+            load.loadId,
+            load.loadBoardSource,
+            load.originCity,
+            load.originState,
+            load.originCountry,
+            load.destinationCity,
+            load.destinationState,
+            load.destinationCountry,
+            load.pickupDate,
+            load.deliveryDate,
+            load.equipmentType,
+            load.commodity,
+            load.weightLbs,
+            load.distanceMiles,
+            load.shipperCompany,
+            load.shipperContactName,
+            load.shipperPhone,
+            load.shipperEmail,
+            load.postedRate,
+            load.postedRateCurrency,
+            load.rateType,
+          ],
+        );
+
+        if (res.rows.length === 0) {
+          duplicates++;
+          continue;
+        }
+
+        const pipelineLoadId = res.rows[0].id;
+        inserted++;
+        insertedIds.push(pipelineLoadId);
+
+        await this.qualifyQueue.add(
+          'qualify',
+          {
+            pipelineLoadId,
+            loadId: load.loadId,
+            loadBoardSource: load.loadBoardSource,
+            enqueuedAt: new Date().toISOString(),
+            priority: load.postedRate ? Math.round(load.postedRate) : 0,
+            origin: {
+              city: load.originCity,
+              state: load.originState,
+              country: load.originCountry,
+            },
+            destination: {
+              city: load.destinationCity,
+              state: load.destinationState,
+              country: load.destinationCountry,
+            },
+            equipmentType: load.equipmentType,
+            postedRate: load.postedRate,
+            postedRateCurrency: load.postedRateCurrency,
+            distanceMiles: load.distanceMiles ?? 0,
+            pickupDate: load.pickupDate,
+            shipperPhone: load.shipperPhone,
+          },
+          { priority: load.postedRate ? Math.round(load.postedRate) : 0 },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push({ index: i, error: `insert_failed: ${msg}` });
+      }
+    }
+
+    logger.info(
+      `[Scanner] CSV ingest from source=${source}: received=${rawLoads.length}, inserted=${inserted}, duplicates=${duplicates}, invalid=${errors.length}`,
+    );
+
+    return {
+      received: rawLoads.length,
+      inserted,
+      duplicates,
+      invalid: errors.length,
+      errors,
+      insertedIds,
+    };
+  }
+
+  /**
+   * Per-row validation. Returns null if valid, error message if not.
+   */
+  private validateRawLoad(load: RawLoad): string | null {
+    if (!load.loadId) return 'missing loadId';
+    if (!load.originCity || !load.originState) return 'missing origin city/state';
+    if (!load.destinationCity || !load.destinationState) return 'missing destination city/state';
+    if (!load.pickupDate) return 'missing pickupDate';
+    if (load.originCountry && !['CA', 'US'].includes(load.originCountry)) {
+      return `unsupported origin country: ${load.originCountry}`;
+    }
+    if (load.destinationCountry && !['CA', 'US'].includes(load.destinationCountry)) {
+      return `unsupported destination country: ${load.destinationCountry}`;
+    }
+    return null;
+  }
+
+  /**
    * Main scanner orchestration - called by the cron endpoint
    * Returns: { totalScanned, totalNew, sources }
    */

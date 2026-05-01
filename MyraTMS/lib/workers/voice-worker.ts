@@ -1,339 +1,307 @@
 /**
  * AGENT 6 - VOICE AGENT WORKER (RETELL AI)
  *
- * Initiates phone calls via Retell AI. Receives a negotiation brief from Agent 5,
- * injects it as dynamic context into the Retell agent, and initiates the call.
- * Handles non-conversation outcomes (no answer, voicemail, etc.) with retry logic.
+ * Initiates phone calls via Retell. Receives a precompiled NegotiationBrief
+ * + RetellCreatePhoneCallPayload from Agent 5 (Compiler) and POSTs it to
+ * Retell's /v2/create-phone-call API. The voice agent itself runs on Retell
+ * — this worker just dials.
  *
- * The actual call happens asynchronously via Retell - this worker just initiates it.
- * Call results come back via webhook (/api/webhooks/retell-callback) and are processed
- * by a separate webhook handler that advances the pipeline.
+ * Call results return asynchronously via webhook
+ * (POST /api/webhooks/retell-callback) and are processed by the prebuilt
+ * handleRetellWebhook in lib/pipeline/retell-webhook.ts.
  *
- * Input: call-queue with CallJobPayload
- * Output: Call initiated on Retell, call_id stored, call_attempts incremented
- * Next Stage: Webhook handles result (booked/declined/callback/etc.)
+ * Kill switches enforced before any outbound dial:
+ *   - PIPELINE_ENABLED=false           → skip every job
+ *   - MAX_CONCURRENT_CALLS=0           → shadow mode (build the payload but
+ *                                        never call Retell)
+ *
+ * Pre-call rechecks (point-in-time, not the brief's frozen moment):
+ *   - DNC list query
+ *   - Calling-hours window (8am–8pm shipper local)
+ *   - Active concurrent call count
+ *
+ * Input:  call-queue with CallJobPayload
+ * Output: Retell call initiated, agent_calls row created with the Retell
+ *         call_id, pipeline_loads.stage advanced to 'calling'.
+ *         BaseWorker auto-stage-advance is bypassed — this worker writes
+ *         the stage update + agent_calls row in one updatePipelineLoad call.
  */
 
-import { Job } from 'bullmq';
 import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import type {
+  RetellCreatePhoneCallPayload,
+  NegotiationBrief,
+} from '@/lib/pipeline/negotiation-brief';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
-/**
- * Call job payload - received from Agent 5 (Compiler)
- */
 export interface CallJobPayload extends BaseJobPayload {
   briefId: number;
-  brief: any; // NegotiationBrief - complete JSON
-  retellAgentId: string;
-  phoneNumber: string;
-  language: string;
+  retellPayload: RetellCreatePhoneCallPayload;
 }
 
-/**
- * Voice worker - Retell AI call initiation
- */
+interface RetellCreatePhoneCallResponse {
+  call_id: string;
+  call_status?: string;
+  agent_id?: string;
+  from_number?: string;
+  to_number?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export class VoiceWorker extends BaseWorker<CallJobPayload> {
   private retellApiKey: string;
-  private outboundNumbers: string[]; // Rotating phone numbers
+  private retellBaseUrl: string;
 
-  constructor(redis: Redis, retellApiKey: string, outboundNumbers: string[]) {
+  constructor(redis: Redis, opts: { retellApiKey?: string; retellBaseUrl?: string } = {}) {
     const config: WorkerConfig = {
       queueName: 'call-queue',
       expectedStage: 'briefed',
-      nextStage: 'calling',
-      concurrency: 100, // Retell supports many concurrent calls
+      // nextStage left undefined — updatePipelineLoad does its own stage write
+      // because we also need to insert into agent_calls atomically with the
+      // stage transition.
+      nextStage: undefined,
+      concurrency: 100,
       retryConfig: {
-        attempts: 1, // No retry on voice calls - calls fail for business reasons, not transient errors
-        backoff: {
-          type: 'fixed',
-          delay: 0,
-        },
+        // Voice calls don't get auto-retried — non-conversation outcomes
+        // (no_answer/voicemail/busy) come back as webhook events and are
+        // routed to call-queue with a delay by the webhook handler.
+        attempts: 1,
+        backoff: { type: 'fixed', delay: 0 },
       },
       redis,
     };
-
     super(config);
-    this.retellApiKey = retellApiKey;
-    this.outboundNumbers = outboundNumbers;
+
+    this.retellApiKey = opts.retellApiKey ?? process.env.RETELL_API_KEY ?? '';
+    this.retellBaseUrl = opts.retellBaseUrl ?? 'https://api.retellai.com';
+
+    if (!this.retellApiKey) {
+      logger.warn('[Voice] RETELL_API_KEY not set — calls will fail with 401');
+    }
   }
 
-  /**
-   * Main voice call initiation logic
-   */
   public async process(payload: CallJobPayload): Promise<ProcessResult> {
-    const { pipelineLoadId, briefId, brief, phoneNumber, retellAgentId, language } = payload;
-    logger.debug(`[Voice] Initiating call for load ${pipelineLoadId}, brief ${briefId}`);
+    const { pipelineLoadId, briefId, retellPayload } = payload;
+    const phone = retellPayload.to_number;
+    const masked = logger.maskPhone(phone);
 
-    try {
-      // Check rate limiting per area code
-      await this.checkAreaCodeRateLimit(phoneNumber);
+    logger.debug(`[Voice] call-queue job for load ${pipelineLoadId}, brief ${briefId}, to ${masked}`);
 
-      // Initiate Retell call with dynamic context injection
-      const callId = await this.initiateRetellCall({
-        brief,
-        retellAgentId,
-        phoneNumber,
-        language,
-        metadata: {
-          pipelineLoadId,
-          briefId,
-          persona: brief.persona.personaName,
-          language,
-          currency: brief.rates.currency,
-        },
-      });
+    if (process.env.PIPELINE_ENABLED !== 'true') {
+      logger.info(`[Voice] PIPELINE_ENABLED=false — skipping load ${pipelineLoadId}`);
+      return this.skipResult(pipelineLoadId, 'pipeline_disabled');
+    }
 
+    const maxConcurrent = Number(process.env.MAX_CONCURRENT_CALLS ?? '1');
+    if (maxConcurrent <= 0) {
       logger.info(
-        `[Voice] Call initiated for load ${pipelineLoadId}. Retell call_id: ${callId}, to: ${phoneNumber}`
+        `[Voice] MAX_CONCURRENT_CALLS=${maxConcurrent} — shadow mode, not dialing load ${pipelineLoadId}`,
       );
-
-      return {
-        success: true,
-        pipelineLoadId,
-        stage: this.config.expectedStage,
-        duration: 0,
-        details: {
-          callId,
-          phoneNumber,
-          persona: brief.persona.personaName,
-          strategy: brief.strategy.approach,
-        },
-      };
-    } catch (error) {
-      logger.error(`[Voice] Error initiating call for load ${pipelineLoadId}:`, error);
-      throw error;
+      return this.skipResult(pipelineLoadId, 'shadow_mode');
     }
-  }
 
-  /**
-   * Initiate a call via Retell AI API
-   */
-  private async initiateRetellCall(params: {
-    brief: any;
-    retellAgentId: string;
-    phoneNumber: string;
-    language: string;
-    metadata: any;
-  }): Promise<string> {
-    try {
-      // TODO: Select a rotating outbound number (load balance across available numbers)
-      const outboundNumber = this.selectOutboundNumber();
-
-      // TODO: Build dynamic variables from brief
-      // These are injected into the Retell agent prompt via {{variable_name}} syntax
-      const dynamicVariables = this.buildDynamicVariables(params.brief);
-
-      // Call Retell API to initiate phone call
-      const response = await fetch('https://api.retellai.com/v2/create-phone-call', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.retellApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from_number: outboundNumber,
-          to_number: params.phoneNumber,
-          agent_id: params.retellAgentId,
-          retell_llm_dynamic_variables: dynamicVariables,
-          metadata: params.metadata,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(`Retell API error: ${JSON.stringify(error)}`);
-      }
-
-      const data = await response.json();
-      return data.call_id;
-    } catch (error) {
-      logger.error('[Voice] Failed to initiate Retell call:', error);
-      throw error;
+    const compliance = await this.recheckCompliance(phone, retellPayload);
+    if (!compliance.allowed) {
+      logger.warn(
+        `[Voice] Compliance recheck blocked load ${pipelineLoadId}: ${compliance.reason}`,
+      );
+      return this.skipResult(pipelineLoadId, `compliance_block:${compliance.reason}`);
     }
-  }
 
-  /**
-   * Build dynamic variables to inject into Retell agent prompt
-   * These are {{variable_name}} placeholders in the agent prompt template
-   */
-  private buildDynamicVariables(brief: any): Record<string, string> {
-    // TODO: Extract all necessary fields from brief
-    // See T-09 Section 2 for complete list
+    const activeCalls = await this.countActiveCalls();
+    if (activeCalls >= maxConcurrent) {
+      logger.warn(
+        `[Voice] Concurrency cap reached (${activeCalls}/${maxConcurrent}); deferring load ${pipelineLoadId}`,
+      );
+      return this.skipResult(pipelineLoadId, 'concurrency_cap');
+    }
+
+    const callId = await this.dialRetell(retellPayload);
+
+    logger.info(
+      `[Voice] Call initiated for load ${pipelineLoadId}. retell_call_id=${callId}, persona=${retellPayload.metadata.persona}, to=${masked}`,
+    );
 
     return {
-      agent_name: 'Sarah', // Consistent human-sounding name
-      brokerage_name: 'Myra Logistics',
-      load_id: brief.load.loadId,
-      load_board_source: brief.load.loadBoardSource,
-      pickup_city: brief.load.origin.city,
-      pickup_state: brief.load.origin.state,
-      delivery_city: brief.load.destination.city,
-      delivery_state: brief.load.destination.state,
-      pickup_date: brief.load.pickupDate,
-      delivery_date: brief.load.deliveryDate || 'flexible',
-      equipment_type: brief.load.equipmentType,
-      initial_rate: brief.negotiation.initialOffer.toString(),
-      concession_step_1: brief.negotiation.concessionStep1.toString(),
-      concession_step_2: brief.negotiation.concessionStep2.toString(),
-      final_offer: brief.negotiation.finalOffer.toString(),
-      min_acceptable_rate: brief.negotiation.walkAwayRate.toString(),
-      floor_rate: brief.rates.marketRateFloor.toString(),
-      mid_rate: brief.rates.marketRateMid.toString(),
-      best_rate: brief.rates.marketRateBest.toString(),
-      currency: brief.rates.currency,
-      strategy: brief.strategy.approach,
-      walk_away_script: brief.negotiation.walkAwayScript,
-      disclosure_script: brief.compliance.disclosureScript || '',
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: {
+        callId,
+        retellAgentId: retellPayload.agent_id,
+        phone: masked,
+        persona: retellPayload.metadata.persona,
+        briefId,
+      },
+    };
+  }
+
+  private skipResult(pipelineLoadId: number, reason: string): ProcessResult {
+    return {
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: { skipped: true, reason },
     };
   }
 
   /**
-   * Select an outbound phone number (rotate to avoid carrier ID fatigue)
+   * Real-time compliance recheck. The brief's compliance block is a point-in-
+   * time snapshot from when Agent 5 ran; by the time we dial that may be hours
+   * stale. We recheck the gates that can flip (DNC adds, time-of-day) but trust
+   * the brief for jurisdictional notes and consent type.
    */
-  private selectOutboundNumber(): string {
-    // TODO: Implement round-robin or random selection from outboundNumbers array
-    return this.outboundNumbers[Math.floor(Math.random() * this.outboundNumbers.length)];
+  private async recheckCompliance(
+    phone: string,
+    retellPayload: RetellCreatePhoneCallPayload,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    if (!phone) return { allowed: false, reason: 'no_phone' };
+
+    const dnc = await db.query<{ id: number }>(
+      `SELECT id FROM dnc_list WHERE phone = $1 LIMIT 1`,
+      [phone],
+    );
+    if (dnc.rows.length > 0) return { allowed: false, reason: 'dnc_added' };
+
+    // Calling hours: 08:00–20:00 in shipper's local timezone.
+    const tz = (retellPayload.metadata as any).timezone || 'America/Toronto';
+    const hour = this.localHour(new Date(), tz);
+    if (hour < 8 || hour >= 20) {
+      return { allowed: false, reason: `outside_calling_hours_local_${hour}h` };
+    }
+
+    return { allowed: true };
   }
 
-  /**
-   * Check rate limiting - don't call the same area code too frequently
-   */
-  private async checkAreaCodeRateLimit(phoneNumber: string): Promise<void> {
-    // TODO: Extract area code from phoneNumber
-    // Check how many calls to this area code in the last 5 minutes
-    // If > 10 calls/5min, throw error to trigger backoff retry
-
-    // Placeholder implementation:
-    const areaCode = phoneNumber.slice(0, 3); // Simplified
-
-    // Query recent calls to same area code
-    // const recentCalls = await db.query(`
-    //   SELECT COUNT(*) FROM agent_calls
-    //   WHERE phone_number_called LIKE $1
-    //   AND call_initiated_at > NOW() - INTERVAL '5 minutes'
-    // `, [`${areaCode}%`]);
-
-    // if (parseInt(recentCalls.rows[0].count) > 10) {
-    //   throw new Error('RATE_LIMIT_AREA'); // BullMQ retries with backoff
-    // }
-  }
-
-  /**
-   * Override updatePipelineLoad to track call initiation
-   */
-  protected async updatePipelineLoad(pipelineLoadId: number, result: any): Promise<void> {
+  private localHour(now: Date, timeZone: string): number {
     try {
-      const { callId } = result.details;
-
-      await db.query(
-        `UPDATE pipeline_loads
-         SET stage = 'calling',
-             stage_updated_at = NOW(),
-             call_attempts = call_attempts + 1,
-             last_call_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1`,
-        [pipelineLoadId]
-      );
-
-      // Also insert into agent_calls table with pending status
-      // (webhook will update when call completes)
-      await db.query(
-        `INSERT INTO agent_calls (
-          pipeline_load_id, call_id, call_type, retell_call_id,
-          call_initiated_at, created_at
-        ) VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-        [pipelineLoadId, callId, 'outbound', callId]
-      );
-
-      logger.debug(`[Voice] Pipeline load ${pipelineLoadId} advanced to 'calling'`);
-    } catch (error) {
-      logger.error(`[Voice] Failed to update pipeline load ${pipelineLoadId}:`, error);
-      throw error;
+      const fmt = new Intl.DateTimeFormat('en-US', {
+        hour: 'numeric',
+        hour12: false,
+        timeZone,
+      });
+      const parts = fmt.formatToParts(now);
+      const h = parts.find((p) => p.type === 'hour')?.value;
+      const n = h ? parseInt(h, 10) : now.getUTCHours();
+      // Intl returns "24" for midnight in some locales; normalize.
+      return n === 24 ? 0 : n;
+    } catch {
+      return now.getHours();
     }
   }
-}
 
-/**
- * Webhook handler for Retell call completion
- * This is NOT a worker - it's an API route handler
- * Receives POST from Retell when call completes
- */
-export async function handleRetellCallback(payload: any): Promise<void> {
-  // TODO: Implement complete webhook handler
-  // Steps:
-  // 1. Verify Retell signature
-  // 2. Parse call outcome from transcript (using Claude API)
-  // 3. Update agent_calls table with result
-  // 4. Update shipper_preferences from call outcome
-  // 5. Update persona metrics for Thompson Sampling
-  // 6. Advance pipeline based on call result
-  //    - booked: enqueue to dispatch-queue OR escalation-queue (auto-book threshold)
-  //    - declined: set stage to 'declined'
-  //    - callback: enqueue to callback-queue with delayed time
-  //    - escalated: enqueue to escalation-queue for human review
-  //    - etc.
-
-  const { pipelineLoadId, briefId, call_status, transcript, metadata } = payload;
-
-  logger.info(
-    `[Voice Webhook] Received call result for load ${pipelineLoadId}. Status: ${call_status}`
-  );
-
-  // Handle non-conversation outcomes immediately
-  if (['no_answer', 'busy', 'voicemail'].includes(call_status)) {
-    await handleNonConversation(pipelineLoadId, call_status);
-    return;
+  /**
+   * How many calls are currently in 'calling' stage. We count pipeline_loads
+   * rather than agent_calls because the same load can have several agent_calls
+   * rows (retries) but only one at a time should be holding 'calling'.
+   */
+  private async countActiveCalls(): Promise<number> {
+    const r = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::int AS n FROM pipeline_loads WHERE stage = 'calling'`,
+    );
+    return Number(r.rows[0]?.n ?? 0);
   }
 
-  // For completed calls: parse transcript and determine outcome
-  // TODO: Use Claude API to parse transcript (see T-12)
-  // const callResult = await parseCallTranscript(transcript, brief);
+  /**
+   * POST to Retell. Throws on non-2xx so BullMQ logs the failure; calls don't
+   * auto-retry (per attempts:1 config) but the orchestrator above can decide
+   * whether to re-enqueue.
+   */
+  private async dialRetell(payload: RetellCreatePhoneCallPayload): Promise<string> {
+    const res = await fetch(`${this.retellBaseUrl}/v2/create-phone-call`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.retellApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
 
-  // Update agent_calls with parsed result
-  // Update pipeline_loads and advance based on outcome
-}
+    if (!res.ok) {
+      const body = await res.text().catch(() => '<unparseable>');
+      throw new Error(`Retell create-phone-call ${res.status}: ${body}`);
+    }
 
-/**
- * Handle non-conversation outcomes with retry logic
- */
-async function handleNonConversation(pipelineLoadId: number, callStatus: string): Promise<void> {
-  // TODO: Implement non-conversation handling
-  // For no_answer / busy / voicemail:
-  //   - Check call_attempts
-  //   - If < maxAttempts: re-enqueue to call-queue with delay
-  //   - If >= maxAttempts: mark as 'declined'
+    const data = (await res.json()) as RetellCreatePhoneCallResponse;
+    if (!data.call_id) {
+      throw new Error(`Retell response missing call_id: ${JSON.stringify(data)}`);
+    }
+    return data.call_id;
+  }
 
-  const maxAttempts = 2;
+  /**
+   * Override: write agent_calls row + advance pipeline_loads stage.
+   * Skip cases (kill-switch, compliance block, concurrency) leave stage at
+   * 'briefed' and don't insert an agent_calls row.
+   */
+  protected async updatePipelineLoad(pipelineLoadId: number, result: ProcessResult): Promise<void> {
+    if (result.details?.skipped) {
+      logger.debug(
+        `[Voice] Load ${pipelineLoadId} not advanced (skipped: ${result.details.reason})`,
+      );
+      return;
+    }
 
-  const load = await db.query('SELECT call_attempts FROM pipeline_loads WHERE id = $1', [
-    pipelineLoadId,
-  ]);
+    const callId = result.details?.callId as string | undefined;
+    const retellAgentId = result.details?.retellAgentId as string | undefined;
+    const briefId = result.details?.briefId as number | undefined;
+    if (!callId || !briefId) {
+      throw new Error(
+        `[Voice] Cannot persist call without callId+briefId. Got callId=${callId} briefId=${briefId}`,
+      );
+    }
 
-  const attempts = load.rows[0]?.call_attempts || 0;
-
-  if (attempts < maxAttempts) {
-    // Retry with delay
-    const delay = callStatus === 'no_answer' ? 3600000 : 1800000; // 1h or 30min
-    logger.info(
-      `[Voice] Retrying call for load ${pipelineLoadId} after ${delay}ms. Attempt ${attempts + 1}/${maxAttempts}`
+    const briefRow = await db.query<{ brief: NegotiationBrief }>(
+      `SELECT brief FROM negotiation_briefs WHERE id = $1`,
+      [briefId],
     );
-    // TODO: Re-enqueue to call-queue with delay
-    // await callQueue.add('retry-call', { pipelineLoadId }, { delay });
-  } else {
-    // Max attempts reached
-    logger.info(`[Voice] Max call attempts reached for load ${pipelineLoadId}. Marking as declined.`);
+    const brief = briefRow.rows[0]?.brief;
+
     await db.query(
-      `UPDATE pipeline_loads SET stage = 'declined', stage_updated_at = NOW() WHERE id = $1`,
-      [pipelineLoadId]
+      `INSERT INTO agent_calls (
+         pipeline_load_id, call_id, call_type, persona, language, currency,
+         retell_call_id, retell_agent_id, phone_number_called,
+         call_initiated_at, negotiation_brief_id,
+         initial_offer, min_acceptable_rate, target_rate,
+         outcome, created_at
+       ) VALUES (
+         $1, $2, 'outbound_shipper', $3, $4, $5,
+         $6, $7, $8,
+         NOW(), $9,
+         $10, $11, $12,
+         'in_progress', NOW()
+       )`,
+      [
+        pipelineLoadId,
+        callId,
+        brief?.persona?.personaName ?? null,
+        brief?.callConfig?.language ?? 'en',
+        brief?.rates?.currency ?? 'CAD',
+        callId,
+        retellAgentId ?? brief?.persona?.retellAgentId ?? null,
+        brief?.shipper?.phone ?? null,
+        briefId,
+        brief?.negotiation?.initialOffer ?? null,
+        brief?.negotiation?.walkAwayRate ?? null,
+        brief?.rates ? brief.rates.totalCost + brief.rates.targetMargin : null,
+      ],
     );
+
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'calling',
+           stage_updated_at = NOW(),
+           call_attempts = COALESCE(call_attempts, 0) + 1,
+           last_call_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [pipelineLoadId],
+    );
+
+    logger.debug(`[Voice] Load ${pipelineLoadId} → 'calling'; agent_calls row created`);
   }
 }
-
-// TODO: Export initialized worker
-// export const voiceWorker = new VoiceWorker(redisClient, process.env.RETELL_API_KEY, ['416-555-0001', '705-555-0001']);
-
-// TODO: Export webhook handler for API route
-// export { handleRetellCallback, handleNonConversation };
