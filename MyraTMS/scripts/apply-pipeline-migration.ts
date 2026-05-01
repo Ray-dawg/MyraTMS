@@ -20,7 +20,8 @@ async function main() {
     process.exit(1);
   }
 
-  const sqlPath = path.join(process.cwd(), 'scripts', 'pipeline_migrations.sql');
+  const fileArg = process.argv[2] || 'pipeline_migrations.sql';
+  const sqlPath = path.isAbsolute(fileArg) ? fileArg : path.join(process.cwd(), 'scripts', fileArg);
   const sql = fs.readFileSync(sqlPath, 'utf8');
   console.log(`Applying ${sqlPath} (${sql.length} bytes) to Neon...`);
 

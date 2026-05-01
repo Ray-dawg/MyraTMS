@@ -11,13 +11,16 @@
  * Next Stages: research-queue + match-queue (parallel) OR dead end
  *
  * No AI required. Pure SQL queries and deterministic logic.
- * Filter chain (in order): freshness → equipment match → lane coverage → margin viability → DNC → shipper fatigue
+ * Filter chain (in order): freshness → equipment match → lane coverage →
+ *                          margin viability → DNC → shipper fatigue
  */
 
-import { Job } from 'bullmq';
+import { Job, Queue } from 'bullmq';
 import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import { extractRegion } from '@/lib/matching/regions';
+import { getBenchmarkRate } from '@/lib/quoting/rates/benchmark';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
@@ -44,27 +47,46 @@ interface QualificationResult {
   estimatedMarginLow: number;
   estimatedMarginHigh: number;
   carrierMatchCount: number;
+  isRepeatShipper: boolean;
+}
+
+/**
+ * Normalize free-form equipment strings to the values stored in
+ * carrier_equipment.equipment_type. Mirrors lib/matching/filters.ts so
+ * Agent 2's eligibility check matches Agent 4's later eligibility check.
+ */
+function normalizeEquipment(equip: string): string {
+  const lower = (equip || '').toLowerCase().trim();
+  if (lower.includes('reefer') || lower.includes('refriger')) return 'Reefer';
+  if (lower.includes('flat')) return 'Flatbed';
+  if (lower.includes('step')) return 'Step Deck';
+  return 'Dry Van';
+}
+
+/**
+ * Format an origin/destination into the "City, ST" string the matching engine
+ * and quoting engine expect.
+ */
+function formatLocation(loc: { city: string; state: string }): string {
+  return `${loc.city}, ${loc.state}`;
 }
 
 /**
  * Qualifier worker - filters loads to eliminate unprofitable ones early
  */
 export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
-  private researchQueue: any; // TODO: Import Queue type properly
-  private matchQueue: any;
+  private researchQueue: Queue;
+  private matchQueue: Queue;
 
-  constructor(redis: Redis, researchQueue: any, matchQueue: any) {
+  constructor(redis: Redis, researchQueue: Queue, matchQueue: Queue) {
     const config: WorkerConfig = {
       queueName: 'qualify-queue',
       expectedStage: 'scanned',
-      nextStage: 'qualified', // Will be set conditionally
-      concurrency: 50, // High concurrency - pure SQL/logic, very fast
+      nextStage: 'qualified',
+      concurrency: 50, // pure SQL, very fast
       retryConfig: {
         attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 30000, // 30 seconds
-        },
+        backoff: { type: 'exponential', delay: 30000 },
       },
       redis,
     };
@@ -75,200 +97,210 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
   }
 
   /**
-   * Main qualification logic
-   * Implements the filter chain from T-05
+   * Main qualification logic. Implements the filter chain from T-05.
    */
   public async process(payload: QualifyJobPayload): Promise<ProcessResult> {
     const { pipelineLoadId } = payload;
     logger.debug(`[Qualifier] Processing load ${pipelineLoadId}`);
 
-    try {
-      const qualResult = await this.qualifyLoad(payload);
+    const qualResult = await this.qualifyLoad(payload);
 
-      if (qualResult.passed) {
-        // All filters passed - enqueue to parallel research and matching
-        logger.info(
-          `[Qualifier] Load ${pipelineLoadId} qualified. Priority: ${qualResult.priorityScore}, Margin: $${qualResult.estimatedMarginLow}-$${qualResult.estimatedMarginHigh}`
-        );
+    if (qualResult.passed) {
+      logger.info(`[Qualifier] Load ${pipelineLoadId} qualified`, {
+        priority: qualResult.priorityScore,
+        marginLow: qualResult.estimatedMarginLow,
+        marginHigh: qualResult.estimatedMarginHigh,
+        carriers: qualResult.carrierMatchCount,
+      });
 
-        // TODO: Build research and match payloads from qualifier result
-        // and enqueue to both queues
-        // const researchPayload = this.buildResearchPayload(payload, qualResult);
-        // const matchPayload = this.buildMatchPayload(payload);
-        // await this.researchQueue.add('research', researchPayload, { priority: qualResult.priorityScore });
-        // await this.matchQueue.add('match', matchPayload, { priority: qualResult.priorityScore });
+      // Fan out to Agent 3 (research) and Agent 4 (match) in parallel.
+      // Both jobs read pipeline_loads — qualifier's updatePipelineLoad will
+      // run AFTER process() returns, so we don't pre-update here.
+      const fanoutPayload = {
+        pipelineLoadId,
+        loadId: payload.loadId,
+        loadBoardSource: payload.loadBoardSource,
+        enqueuedAt: new Date().toISOString(),
+        priority: qualResult.priorityScore,
+      };
 
-        return {
-          success: true,
-          pipelineLoadId,
-          stage: this.config.expectedStage,
-          nextStage: 'qualified',
-          duration: 0,
-          details: {
-            passed: true,
-            priorityScore: qualResult.priorityScore,
-            estimatedMargin: {
-              low: qualResult.estimatedMarginLow,
-              high: qualResult.estimatedMarginHigh,
-            },
-            carrierMatchCount: qualResult.carrierMatchCount,
+      await Promise.all([
+        this.researchQueue.add('research', {
+          ...fanoutPayload,
+          qualifiedLoad: {
+            origin: payload.origin,
+            destination: payload.destination,
+            equipmentType: payload.equipmentType,
+            distanceMiles: payload.distanceMiles,
+            pickupDate: payload.pickupDate,
+            shipperPhone: payload.shipperPhone,
+            postedRate: payload.postedRate,
+            postedRateCurrency: payload.postedRateCurrency,
           },
-        };
-      } else {
-        // Filter failed - disqualify the load
-        logger.info(`[Qualifier] Load ${pipelineLoadId} disqualified: ${qualResult.reason}`);
-
-        // TODO: Update stage to 'disqualified' with reason
-        // This is a special case - overrides the normal nextStage update
-        // await db.query(
-        //   `UPDATE pipeline_loads SET
-        //     stage = 'disqualified',
-        //     stage_updated_at = NOW(),
-        //     qualification_reason = $2
-        //    WHERE id = $1`,
-        //   [pipelineLoadId, qualResult.reason]
-        // );
-
-        return {
-          success: true,
-          pipelineLoadId,
-          stage: this.config.expectedStage,
-          duration: 0,
-          details: {
-            passed: false,
-            reason: qualResult.reason,
+        }, { priority: qualResult.priorityScore }),
+        this.matchQueue.add('match', {
+          ...fanoutPayload,
+          qualifiedLoad: {
+            origin: payload.origin,
+            destination: payload.destination,
+            equipmentType: payload.equipmentType,
+            distanceMiles: payload.distanceMiles,
+            pickupDate: payload.pickupDate,
+            weightLbs: null,
           },
-        };
-      }
-    } catch (error) {
-      logger.error(`[Qualifier] Error processing load ${pipelineLoadId}:`, error);
-      throw error;
+        }, { priority: qualResult.priorityScore }),
+      ]);
+
+      return {
+        success: true,
+        pipelineLoadId,
+        stage: this.config.expectedStage,
+        nextStage: 'qualified',
+        duration: 0,
+        details: {
+          passed: true,
+          priorityScore: qualResult.priorityScore,
+          estimatedMargin: {
+            low: qualResult.estimatedMarginLow,
+            high: qualResult.estimatedMarginHigh,
+          },
+          carrierMatchCount: qualResult.carrierMatchCount,
+          isRepeatShipper: qualResult.isRepeatShipper,
+        },
+      };
     }
+
+    // Disqualified branch — updatePipelineLoad will set stage='disqualified'
+    logger.info(`[Qualifier] Load ${pipelineLoadId} disqualified: ${qualResult.reason}`);
+    return {
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: {
+        passed: false,
+        reason: qualResult.reason,
+      },
+    };
   }
 
   /**
-   * Run the complete qualification filter chain
-   * Returns immediately on first failure
+   * Run the complete qualification filter chain.
+   * Returns immediately on first failure.
    */
   private async qualifyLoad(payload: QualifyJobPayload): Promise<QualificationResult> {
-    // FILTER 1: Freshness check (< 1ms)
-    // Kill loads with pickup date in the past or within 4 hours
-    const pickupTime = new Date(payload.pickupDate).getTime();
-    const nowPlusFourHours = Date.now() + 4 * 3600000;
+    const fail = (reason: string): QualificationResult => ({
+      passed: false,
+      reason,
+      priorityScore: 0,
+      estimatedMarginLow: 0,
+      estimatedMarginHigh: 0,
+      carrierMatchCount: 0,
+      isRepeatShipper: false,
+    });
 
-    if (pickupTime < nowPlusFourHours) {
-      return {
-        passed: false,
-        reason: 'Pickup date is less than 4 hours away or in the past',
-        priorityScore: 0,
-        estimatedMarginLow: 0,
-        estimatedMarginHigh: 0,
-        carrierMatchCount: 0,
-      };
+    // FILTER 1: Freshness — reject pickups < 4h away (or in the past).
+    const pickupTime = new Date(payload.pickupDate).getTime();
+    if (pickupTime < Date.now() + 4 * 3600_000) {
+      return fail('Pickup is in the past or less than 4 hours away');
     }
 
-    // FILTER 2: Equipment match (1 SQL query, ~5ms)
-    // Do we have ANY carrier with this equipment type?
-    // TODO: Normalize equipment type for TMS
-    // const normalizedEquipment = normalizeEquipmentForTMS(payload.equipmentType);
-
-    const equipMatch = await db.query(
-      `SELECT COUNT(DISTINCT ce.carrier_id) as count
+    // FILTER 2: Equipment availability — at least one carrier with this equipment,
+    // active authority, valid insurance.
+    const normalizedEquip = normalizeEquipment(payload.equipmentType);
+    const equipMatch = await db.query<{ count: number }>(
+      `SELECT COUNT(DISTINCT ce.carrier_id)::int AS count
        FROM carrier_equipment ce
        JOIN carriers c ON ce.carrier_id = c.id
        WHERE ce.equipment_type = $1
-         AND c.status = 'Active'
-         AND c.authority_status IN ('Active', 'Verified')
-         AND c.insurance_status = 'Valid'`,
-      [payload.equipmentType]
+         AND c.authority_status = 'Active'
+         AND (c.insurance_expiry IS NULL OR c.insurance_expiry > CURRENT_DATE)`,
+      [normalizedEquip],
     );
-
-    if (parseInt(equipMatch.rows[0].count) === 0) {
-      return {
-        passed: false,
-        reason: `No active carriers with ${payload.equipmentType} equipment`,
-        priorityScore: 0,
-        estimatedMarginLow: 0,
-        estimatedMarginHigh: 0,
-        carrierMatchCount: 0,
-      };
+    if ((equipMatch.rows[0]?.count ?? 0) === 0) {
+      return fail(`No active insured carriers with ${normalizedEquip} equipment`);
     }
 
-    // FILTER 3: Lane coverage (1 SQL query, ~10ms)
-    // Do we have any carrier that runs near this origin?
-    // TODO: Implement region mapper from quoting engine
-    // const originRegion = resolveRegion(payload.origin.city, payload.origin.state);
-    // const destRegion = resolveRegion(payload.destination.city, payload.destination.state);
+    // FILTER 3: Lane coverage — carriers with history on this lane (origin region),
+    // tolerating dest-region misses (the carrier may still bid).
+    const originRegion = extractRegion(formatLocation(payload.origin));
+    const destRegion = extractRegion(formatLocation(payload.destination));
 
-    const laneMatch = await db.query(
-      `SELECT COUNT(DISTINCT cl.carrier_id) as count
+    const laneMatch = await db.query<{ count: number }>(
+      `SELECT COUNT(DISTINCT cl.carrier_id)::int AS count
        FROM carrier_lanes cl
        JOIN carriers c ON cl.carrier_id = c.id
-       WHERE c.status = 'Active'`,
-      []
+       WHERE c.authority_status = 'Active'
+         AND (c.insurance_expiry IS NULL OR c.insurance_expiry > CURRENT_DATE)
+         AND (LOWER(cl.origin_region) = $1 OR LOWER(cl.dest_region) = $2)`,
+      [originRegion, destRegion],
     );
+    const carrierMatchCount = laneMatch.rows[0]?.count ?? 0;
+    // Note: zero lane history isn't fatal — Agent 4 may still find proximity
+    // matches via home_lat/lng. We just record the count for priority scoring.
 
-    const carrierMatchCount = parseInt(laneMatch.rows[0].count);
-
-    // FILTER 4: Minimum rate viability (calculation, ~1ms)
-    // Use benchmark rates to estimate if margin is possible
-    // TODO: Implement benchmark rate lookup from quoting engine
-    // const benchmarkRate = getBenchmarkRate(payload.distanceMiles, payload.equipmentType);
-    // const estimatedCost = estimateCarrierCost(payload.distanceMiles, payload.origin.country);
-
-    const distanceKm = payload.distanceMiles * 1.60934;
-    const estimatedCost = this.estimateCarrierCost(payload.distanceMiles, payload.origin.country);
-    const postedRate = payload.postedRate || 2500; // Fallback to average
-    const estimatedMarginHigh = postedRate - estimatedCost;
-    const estimatedMarginLow = estimatedMarginHigh * 0.7; // Conservative
-
+    // FILTER 4: Rate viability via benchmark cascade.
+    // benchmark.ratePerMile is the *market revenue* midpoint (what shippers pay).
+    // Carrier cost ≈ 78% of that (broker keeps ~22% margin in the typical case).
+    const benchmark = getBenchmarkRate(payload.distanceMiles, payload.equipmentType, payload.pickupDate);
+    const benchmarkRevenueMid = benchmark.ratePerMile * payload.distanceMiles;
+    const expectedCarrierRate = benchmarkRevenueMid * 0.78;
+    const postedRate = payload.postedRate ?? benchmarkRevenueMid;
+    const estimatedMarginHigh = postedRate - expectedCarrierRate;
+    const estimatedMarginLow = estimatedMarginHigh * 0.7;
     const minMargin = payload.origin.country === 'CA' ? 270 : 200;
 
     if (estimatedMarginHigh < minMargin * 0.5) {
-      return {
-        passed: false,
-        reason: `Best-case margin $${estimatedMarginHigh.toFixed(0)} < 50% of minimum $${minMargin}`,
-        priorityScore: 0,
-        estimatedMarginLow: 0,
-        estimatedMarginHigh: 0,
-        carrierMatchCount: 0,
-      };
+      return fail(`Best-case margin $${estimatedMarginHigh.toFixed(0)} < 50% of minimum $${minMargin}`);
     }
 
-    // FILTER 5: DNC check (~2ms Redis or DB lookup)
+    // FILTER 5: DNC list.
     if (payload.shipperPhone) {
-      const isDNC = await db.query('SELECT 1 FROM dnc_list WHERE phone = $1', [
-        payload.shipperPhone,
-      ]);
-
-      if (isDNC.rows.length > 0) {
-        return {
-          passed: false,
-          reason: 'Shipper phone is on do-not-call list',
-          priorityScore: 0,
-          estimatedMarginLow: 0,
-          estimatedMarginHigh: 0,
-          carrierMatchCount: 0,
-        };
+      const dnc = await db.query(`SELECT 1 FROM dnc_list WHERE phone = $1`, [payload.shipperPhone]);
+      if (dnc.rows.length > 0) {
+        return fail('Shipper phone is on do-not-call list');
       }
     }
 
-    // FILTER 6: Shipper fatigue check (~3ms)
+    // FILTER 6: Shipper fatigue — too many recent contacts.
+    let isRepeatShipper = false;
     if (payload.shipperPhone) {
-      // TODO: Implement fatigue check from shipper_preferences or agent_calls history
-      // const fatigue = await checkShipperFatigue(payload.shipperPhone);
-      // if (!fatigue.canContact) {
-      //   return { passed: false, reason: fatigue.reason, ... };
-      // }
+      const fatigue = await db.query<{
+        recent_contacts: number;
+        total_calls: number;
+        last_outcome: string | null;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::int FROM agent_calls
+            WHERE phone_number_called = $1
+              AND call_initiated_at > NOW() - INTERVAL '14 days') AS recent_contacts,
+           (SELECT COUNT(*)::int FROM agent_calls
+            WHERE phone_number_called = $1) AS total_calls,
+           (SELECT outcome FROM agent_calls
+            WHERE phone_number_called = $1
+            ORDER BY call_initiated_at DESC NULLS LAST LIMIT 1) AS last_outcome`,
+        [payload.shipperPhone],
+      );
+      const f = fatigue.rows[0];
+      if (f) {
+        if ((f.recent_contacts ?? 0) >= 3) {
+          return fail(`Shipper contacted ${f.recent_contacts} times in last 14 days`);
+        }
+        if (f.last_outcome === 'declined' && (f.recent_contacts ?? 0) >= 1) {
+          return fail('Shipper declined within last 14 days');
+        }
+        isRepeatShipper = (f.total_calls ?? 0) > 0;
+      }
     }
 
-    // ALL FILTERS PASSED - compute priority score
+    // ALL PASSED — compute priority.
+    const daysUntilPickup = this.daysBetween(new Date(), new Date(payload.pickupDate));
     const priorityScore = this.computePriorityScore({
       estimatedMargin: estimatedMarginHigh,
       carrierMatchCount,
       hasPostedRate: payload.postedRate !== null,
-      daysUntilPickup: this.daysBetween(new Date(), new Date(payload.pickupDate)),
-      isRepeatShipper: false, // TODO: Check shipper_preferences
+      daysUntilPickup,
+      isRepeatShipper,
     });
 
     return {
@@ -278,12 +310,13 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       estimatedMarginLow,
       estimatedMarginHigh,
       carrierMatchCount,
+      isRepeatShipper,
     };
   }
 
   /**
-   * Compute priority score (0-1000) for ordering loads downstream
-   * Higher score = higher priority
+   * Compute priority score (0-1000) for ordering loads downstream.
+   * Higher score = higher priority.
    */
   private computePriorityScore(params: {
     estimatedMargin: number;
@@ -293,93 +326,57 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
     isRepeatShipper: boolean;
   }): number {
     let score = 0;
-
-    // Margin potential (0-400 points)
     score += Math.min(Math.round(params.estimatedMargin * 0.8), 400);
-
-    // Carrier coverage (0-200 points)
     score += Math.min(params.carrierMatchCount * 40, 200);
-
-    // Posted rate certainty (0-150 points)
     score += params.hasPostedRate ? 150 : 0;
-
-    // Urgency (0-150 points)
     if (params.daysUntilPickup <= 1) score += 150;
     else if (params.daysUntilPickup <= 3) score += 100;
     else if (params.daysUntilPickup <= 7) score += 50;
-
-    // Repeat shipper bonus (0-100 points)
     score += params.isRepeatShipper ? 100 : 0;
-
     return Math.min(score, 1000);
   }
 
-  /**
-   * Estimate carrier cost for this load
-   */
-  private estimateCarrierCost(distanceMiles: number, country: string): number {
-    const costPerMile = country === 'CA' ? 2.0 : 1.5;
-    const totalMiles = distanceMiles * 1.15; // 15% deadhead factor
-    return totalMiles * costPerMile + 62.5 + 75 + 35; // fuel + accessorials + admin
+  private daysBetween(a: Date, b: Date): number {
+    return Math.floor((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
   }
 
   /**
-   * Calculate days between two dates
-   */
-  private daysBetween(date1: Date, date2: Date): number {
-    const millisecondsPerDay = 1000 * 60 * 60 * 24;
-    return Math.floor((date2.getTime() - date1.getTime()) / millisecondsPerDay);
-  }
-
-  /**
-   * Override updatePipelineLoad to handle conditional stage advancement
-   * Qualified loads go to 'qualified', disqualified go to 'disqualified'
+   * Override updatePipelineLoad to handle conditional stage advancement.
+   * Qualified → 'qualified', Disqualified → 'disqualified'.
    */
   protected async updatePipelineLoad(pipelineLoadId: number, result: any): Promise<void> {
-    try {
-      if (result.details.passed) {
-        // Qualified - also store margin estimates and priority
-        await db.query(
-          `UPDATE pipeline_loads
-           SET stage = 'qualified',
-               stage_updated_at = NOW(),
-               has_carrier_match = true,
-               estimated_margin_low = $2,
-               estimated_margin_high = $3,
-               priority_score = $4,
-               carrier_match_count = $5,
-               updated_at = NOW()
-           WHERE id = $1`,
-          [
-            pipelineLoadId,
-            result.details.estimatedMargin.low,
-            result.details.estimatedMargin.high,
-            result.details.priorityScore,
-            result.details.carrierMatchCount,
-          ]
-        );
-      } else {
-        // Disqualified
-        await db.query(
-          `UPDATE pipeline_loads
-           SET stage = 'disqualified',
-               stage_updated_at = NOW(),
-               qualification_reason = $2,
-               updated_at = NOW()
-           WHERE id = $1`,
-          [pipelineLoadId, result.details.reason]
-        );
-      }
-
-      logger.debug(
-        `[Qualifier] Pipeline load ${pipelineLoadId} advanced to stage: ${result.details.passed ? 'qualified' : 'disqualified'}`
+    if (result.details?.passed) {
+      await db.query(
+        `UPDATE pipeline_loads
+         SET stage = 'qualified',
+             stage_updated_at = NOW(),
+             has_carrier_match = TRUE,
+             estimated_margin_low = $2,
+             estimated_margin_high = $3,
+             priority_score = $4,
+             carrier_match_count = $5,
+             qualification_reason = 'qualified',
+             updated_at = NOW()
+         WHERE id = $1`,
+        [
+          pipelineLoadId,
+          result.details.estimatedMargin.low,
+          result.details.estimatedMargin.high,
+          result.details.priorityScore,
+          result.details.carrierMatchCount,
+        ],
       );
-    } catch (error) {
-      logger.error(`[Qualifier] Failed to update pipeline load ${pipelineLoadId}:`, error);
-      throw error;
+    } else {
+      await db.query(
+        `UPDATE pipeline_loads
+         SET stage = 'disqualified',
+             stage_updated_at = NOW(),
+             qualification_reason = $2,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [pipelineLoadId, result.details?.reason ?? 'unspecified'],
+      );
     }
+    logger.debug(`[Qualifier] Pipeline load ${pipelineLoadId} → ${result.details?.passed ? 'qualified' : 'disqualified'}`);
   }
 }
-
-// TODO: Export initialized worker
-// export const qualifierWorker = new QualifierWorker(redisClient, researchQueue, matchQueue);

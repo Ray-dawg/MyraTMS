@@ -2,25 +2,25 @@
  * AGENT 4 - CARRIER RANKER WORKER
  *
  * Takes a qualified load and returns the top 3 carriers ranked by match score.
- * Wraps the existing 5-criteria matching engine as a standalone pipeline worker.
- * Runs in PARALLEL with Agent 3 (Researcher).
+ * Wraps the existing 5-criteria matching engine (lib/matching/index.ts) as a
+ * standalone pipeline worker. Runs in PARALLEL with Agent 3 (Researcher).
  *
  * Input: match-queue with MatchJobPayload
- * Output: Carrier stack written to pipeline_loads, carrier_match_count set
- * Next Stage: matched (only after Agent 3 also completes - completion gate)
- *
- * This agent is ~85% built. The matching engine exists and works.
- * The gap is extracting it from TMS API into a pipeline worker and adding the gate check.
+ * Output: Carrier stack written to pipeline_loads, carrier_match_count set,
+ *         match_results table populated, completion-gate triggered.
+ * Next Stage: matched (only after Agent 3 also completes — completion gate)
  */
 
-import { Job } from 'bullmq';
+import { Job, Queue } from 'bullmq';
 import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import { matchCarriers, storeMatchResults, type CarrierMatch, type MatchRequest } from '@/lib/matching';
+import { onRankerComplete, buildBriefPayload } from '@/lib/pipeline/gate';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
- * Ranker job payload - received from Agent 2 (Qualifier)
+ * Ranker job payload — received from Agent 2 (Qualifier).
  */
 export interface MatchJobPayload extends BaseJobPayload {
   qualifiedLoad: {
@@ -34,68 +34,42 @@ export interface MatchJobPayload extends BaseJobPayload {
 }
 
 /**
- * Carrier stack entry - one carrier in the matched stack
+ * Carrier stack entry (subset of CarrierMatch for downstream agents).
  */
 interface CarrierStackEntry {
   carrierId: string;
   companyName: string;
   contactName: string;
   contactPhone: string;
-  contactEmail: string | null;
-
-  // Match scoring
-  matchScore: number; // 0-1 from matching engine
-  matchGrade: string; // 'A' | 'B' | 'C' | 'D' | 'F'
-  breakdown: {
-    laneFamiliarity: number;
-    proximity: number;
-    rate: number;
-    reliability: number;
-    relationship: number;
-  };
-
-  // Rate
-  expectedRate: number;
-  rateCurrency: string;
-
-  // Reliability data
-  onTimePercentage: number | null;
-  communicationRating: number | null;
-  totalLoadsWithMyra: number;
-  veteranStatus: string; // 'NEW' | 'PROVEN' | 'VETERAN'
-
-  // Availability
+  matchScore: number;
+  matchGrade: string;
+  breakdown: CarrierMatch['breakdown'];
+  expectedRate: number | null;
+  homeCity: string | null;
   availabilityConfidence: 'high' | 'medium' | 'low';
-  equipmentConfirmed: boolean;
-  homeBaseCity: string;
-  homeBaseState: string;
-  estimatedDeadheadMiles: number | null;
-
-  // Preferences
-  paymentPreference: string;
-  preferredContactMethod: string;
 }
 
 type CarrierStack = CarrierStackEntry[];
 
+function formatLocation(loc: { city: string; state: string }): string {
+  return `${loc.city}, ${loc.state}`;
+}
+
 /**
- * Ranker worker - carrier matching and ranking
+ * Ranker worker — carrier matching and ranking.
  */
 export class RankerWorker extends BaseWorker<MatchJobPayload> {
-  private briefQueue: any; // TODO: Import Queue type
+  private briefQueue: Queue;
 
-  constructor(redis: Redis, briefQueue: any) {
+  constructor(redis: Redis, briefQueue: Queue) {
     const config: WorkerConfig = {
       queueName: 'match-queue',
       expectedStage: 'qualified',
-      nextStage: 'matched', // Set conditionally by completion gate
-      concurrency: 20, // Fast - mostly DB queries
+      nextStage: 'matched',
+      concurrency: 20,
       retryConfig: {
         attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 30000, // 30 seconds
-        },
+        backoff: { type: 'exponential', delay: 30000 },
       },
       redis,
     };
@@ -105,174 +79,165 @@ export class RankerWorker extends BaseWorker<MatchJobPayload> {
   }
 
   /**
-   * Main matching logic
+   * Main matching logic.
    */
   public async process(payload: MatchJobPayload): Promise<ProcessResult> {
     const { pipelineLoadId, qualifiedLoad } = payload;
     logger.debug(`[Ranker] Processing load ${pipelineLoadId}`);
 
-    try {
-      // TODO: Call the existing matching engine from lib/matching/
-      // const matchResults = await runMatchingEngine(qualifiedLoad);
-      // Get top 3 matches
+    // Pull the pipeline_loads row to get the carrier-cost target (set by Agent 2)
+    // and posted rate (revenue) — both feed the matching engine's rate scoring.
+    const plRow = await db.query<{
+      load_id: string;
+      posted_rate: number | null;
+      estimated_margin_high: number | null;
+    }>(
+      `SELECT load_id, posted_rate, estimated_margin_high FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId],
+    );
+    if (plRow.rows.length === 0) {
+      throw new Error(`pipeline_load ${pipelineLoadId} not found`);
+    }
+    const load = plRow.rows[0];
 
-      const carrierStack: CarrierStack = []; // TODO: Build from matching results
+    // Build the matching engine request. The engine accepts string origin/dest
+    // ("City, ST") and computes lane history + proximity internally.
+    const revenue = Number(load.posted_rate ?? 0);
+    const carrierCost = revenue > 0 ? revenue - Number(load.estimated_margin_high ?? 0) : 0;
+    const matchRequest: MatchRequest = {
+      loadId: load.load_id,
+      origin: formatLocation(qualifiedLoad.origin),
+      destination: formatLocation(qualifiedLoad.destination),
+      originLat: null,
+      originLng: null,
+      equipmentType: qualifiedLoad.equipmentType,
+      carrierCost,
+      revenue,
+      maxResults: 3,
+      excludeCarriers: [],
+    };
 
-      if (carrierStack.length === 0) {
-        // No viable carriers - disqualify the load
-        logger.warn(`[Ranker] Load ${pipelineLoadId} has no matching carriers. Disqualifying.`);
+    const matchResponse = await matchCarriers(db.sql, matchRequest);
+    const viable = matchResponse.matches.filter((m) => m.match_grade !== 'F');
 
-        // TODO: Update stage to 'disqualified'
-        // This is a special case - the load fails at matching
-
-        return {
-          success: true,
-          pipelineLoadId,
-          stage: this.config.expectedStage,
-          duration: 0,
-          details: {
-            matched: false,
-            reason: 'No carriers matched above F grade',
-            carrierCount: 0,
-          },
-        };
-      }
-
-      logger.info(
-        `[Ranker] Load ${pipelineLoadId} matched with ${carrierStack.length} carriers. Top: ${carrierStack[0].companyName} (${carrierStack[0].matchGrade})`
-      );
-
+    if (viable.length === 0) {
+      logger.warn(`[Ranker] Load ${pipelineLoadId} has no carriers above F-grade. Disqualifying.`);
       return {
         success: true,
         pipelineLoadId,
         stage: this.config.expectedStage,
         duration: 0,
         details: {
-          matched: true,
-          carrierCount: carrierStack.length,
-          topGrade: carrierStack[0].matchGrade,
-          carrierStack,
+          matched: false,
+          reason: 'No carriers matched above F grade',
+          carrierCount: 0,
         },
       };
-    } catch (error) {
-      logger.error(`[Ranker] Error processing load ${pipelineLoadId}:`, error);
-      throw error;
     }
+
+    // Persist to the audit table (existing pattern).
+    await storeMatchResults(db.sql, load.load_id, viable);
+
+    // Build the in-memory carrier stack for downstream agents.
+    const carrierStack: CarrierStack = await Promise.all(
+      viable.map(async (m) => ({
+        carrierId: m.carrier_id,
+        companyName: m.carrier_name,
+        contactName: m.contact.name,
+        contactPhone: m.contact.phone,
+        matchScore: m.match_score,
+        matchGrade: m.match_grade,
+        breakdown: m.breakdown,
+        expectedRate: m.breakdown.rate.carrier_avg_rate,
+        homeCity: null,
+        availabilityConfidence: await this.determineAvailability(m, qualifiedLoad),
+      })),
+    );
+
+    logger.info(
+      `[Ranker] Load ${pipelineLoadId} matched ${carrierStack.length} carriers; top: ${carrierStack[0].companyName} (${carrierStack[0].matchGrade})`,
+    );
+
+    return {
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: {
+        matched: true,
+        carrierCount: carrierStack.length,
+        topGrade: carrierStack[0].matchGrade,
+        topCarrierId: carrierStack[0].carrierId,
+        carrierStack,
+      },
+    };
   }
 
   /**
-   * Run the existing matching engine and build the carrier stack
+   * Determine availability confidence for a carrier.
+   *   high   — GPS ping < 24h ago near origin AND equipment confirmed
+   *   medium — home base in origin region OR has run this lane in last 30 days
+   *   low    — equipment match only, no proximity or recency data
    */
-  private async runMatching(pipelineLoadId: number, qualifiedLoad: any): Promise<CarrierStack> {
-    // TODO: Implement carrier matching
-    // Steps:
-    // 1. Call existing runMatchingEngine(qualifiedLoad) from lib/matching/
-    // 2. Filter results to exclude F-grade matches
-    // 3. Take top 3 results
-    // 4. For each match:
-    //    a. Query carriers table for full carrier data
-    //    b. Query carrier_lanes for lane history
-    //    c. Query location_pings for proximity data
-    //    d. Build CarrierStackEntry with all fields populated
-    // 5. Store in match_results table (existing pattern)
-    // 6. Return the carrier stack
+  private async determineAvailability(
+    match: CarrierMatch,
+    load: MatchJobPayload['qualifiedLoad'],
+  ): Promise<'high' | 'medium' | 'low'> {
+    const recentPing = await db.query<{ id: string }>(
+      `SELECT 1 AS id FROM location_pings
+       WHERE driver_id IN (SELECT id FROM drivers WHERE carrier_id = $1)
+         AND recorded_at > NOW() - INTERVAL '24 hours'
+       LIMIT 1`,
+      [match.carrier_id],
+    );
+    if (recentPing.rows.length > 0) return 'high';
 
-    return [];
+    if (match.breakdown.lane_familiarity.loads_on_lane > 0) return 'medium';
+
+    return 'low';
   }
 
   /**
-   * Determine availability confidence for a carrier
-   */
-  private determineAvailability(carrier: any, load: any): 'high' | 'medium' | 'low' {
-    // High: carrier has GPS ping within 24h near origin AND confirmed equipment
-    // Medium: carrier has home base in region OR has run this lane in last 30 days
-    // Low: carrier matches on equipment only, no proximity or recency data
-
-    // TODO: Implement availability check logic
-
-    return 'medium';
-  }
-
-  /**
-   * Override updatePipelineLoad to handle carrier stack storage and completion gate
+   * Override updatePipelineLoad to handle carrier stack storage and
+   * trigger the completion gate.
    */
   protected async updatePipelineLoad(pipelineLoadId: number, result: any): Promise<void> {
-    try {
-      const { matched, carrierCount, carrierStack } = result.details;
+    const { matched, carrierCount, carrierStack, topCarrierId, reason } = result.details ?? {};
 
-      if (!matched) {
-        // No viable carriers - disqualify
-        await db.query(
-          `UPDATE pipeline_loads
-           SET carrier_match_count = 0,
-               stage = 'disqualified',
-               stage_updated_at = NOW(),
-               qualification_reason = 'No carriers matched above F grade',
-               updated_at = NOW()
-           WHERE id = $1`,
-          [pipelineLoadId]
-        );
-
-        logger.debug(`[Ranker] Load ${pipelineLoadId} disqualified - no carrier matches`);
-        return;
-      }
-
-      // Store carrier stack and match results
+    if (!matched) {
       await db.query(
         `UPDATE pipeline_loads
-         SET carrier_match_count = $2,
-             top_carrier_id = $3,
+         SET carrier_match_count = 0,
+             stage = 'disqualified',
+             stage_updated_at = NOW(),
+             qualification_reason = $2,
              updated_at = NOW()
          WHERE id = $1`,
-        [
-          pipelineLoadId,
-          carrierStack.length,
-          parseInt(carrierStack[0].carrierId.replace('CAR-', '')),
-        ]
+        [pipelineLoadId, reason ?? 'no_carrier_matches'],
       );
+      logger.debug(`[Ranker] Load ${pipelineLoadId} disqualified — no carriers`);
+      return;
+    }
 
-      // TODO: Store match results in match_results table (existing pattern)
-      // for (const match of carrierStack) {
-      //   await db.query(`
-      //     INSERT INTO match_results (id, load_id, carrier_id, match_score, match_grade, breakdown, created_at)
-      //     VALUES ($1, $2, $3, $4, $5, $6, NOW())
-      //   `, [generateId('MR'), pipelineLoadId.toString(), match.carrierId, ...]);
-      // }
+    // Store carrier match count + top carrier (text id now, post 023 schema fix).
+    await db.query(
+      `UPDATE pipeline_loads
+       SET carrier_match_count = $2,
+           top_carrier_id = $3,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [pipelineLoadId, carrierCount, topCarrierId],
+    );
 
-      // COMPLETION GATE: Check if Agent 3 (Researcher) is also done
-      const check = await db.query(
-        'SELECT research_completed_at FROM pipeline_loads WHERE id = $1',
-        [pipelineLoadId]
-      );
-
-      if (check.rows[0]?.research_completed_at) {
-        // Both agents done - advance to 'matched'
-        await db.query(
-          "UPDATE pipeline_loads SET stage = 'matched', stage_updated_at = NOW() WHERE id = $1",
-          [pipelineLoadId]
-        );
-
-        // TODO: Enqueue to brief-queue
-        // const briefPayload = this.buildBriefPayload(pipelineLoadId, result);
-        // await this.briefQueue.add('brief', briefPayload, { priority: ... });
-
-        logger.info(
-          `[Ranker] Completion gate triggered. Load ${pipelineLoadId} advanced to 'matched' and enqueued to brief-queue.`
-        );
-      } else {
-        logger.debug(
-          `[Ranker] Agent 3 not yet done. Load ${pipelineLoadId} waiting for research to complete.`
-        );
-      }
-    } catch (error) {
-      logger.error(`[Ranker] Failed to update pipeline load ${pipelineLoadId}:`, error);
-      throw error;
+    // Completion gate: if Agent 3 (Researcher) is also done, advance and
+    // enqueue to brief-queue.
+    const gate = await onRankerComplete(db as any, pipelineLoadId);
+    if (gate.shouldEnqueue) {
+      const briefPayload = await buildBriefPayload(db as any, pipelineLoadId);
+      await this.briefQueue.add('compile', briefPayload, { priority: briefPayload.priority });
+      logger.info(`[Ranker] Gate opened for load ${pipelineLoadId} → brief-queue`);
+    } else {
+      logger.debug(`[Ranker] Gate not yet open for load ${pipelineLoadId}: ${gate.reason}`);
     }
   }
 }
-
-// TODO: Export initialized worker
-// export const rankerWorker = new RankerWorker(redisClient, briefQueue);
-
-// TODO: Import and use existing matching engine
-// import { runMatchingEngine } from '@/lib/matching';
