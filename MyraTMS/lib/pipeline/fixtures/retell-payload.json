@@ -1,0 +1,103 @@
+{
+  "from_number": "+17055551001",
+  "to_number": "+17055551234",
+  "agent_id": "agent_friendly_en_001",
+
+  "retell_llm_dynamic_variables": {
+    "agent_name": "Sarah",
+    "brokerage_name": "Myra Logistics",
+
+    "load_id": "DAT-89234571",
+    "load_board_source": "DAT",
+
+    "pickup_city": "Toronto",
+    "pickup_province": "ON",
+    "pickup_full": "Toronto, Ontario",
+    "delivery_city": "Sudbury",
+    "delivery_province": "ON",
+    "delivery_full": "Sudbury, Ontario",
+    "pickup_date": "Thursday April 17th",
+    "delivery_date": "Thursday April 17th",
+    "equipment_type": "flatbed",
+    "distance": "402 kilometres",
+    "commodity": "grinding media",
+    "weight": "42,000 lbs",
+
+    "shipper_company": "Northern Mine Supply Co",
+    "shipper_first_name": "Jean-Marc",
+    "shipper_is_repeat": "false",
+    "shipper_last_booked_rate": "none",
+    "shipper_known_objections": "none",
+    "shipper_notes": "",
+
+    "initial_rate": "2400",
+    "concession_step_1": "2310",
+    "concession_step_2": "2220",
+    "final_offer": "2120",
+    "min_acceptable_rate": "2120",
+    "currency": "CAD",
+    "currency_word": "Canadian dollars",
+
+    "floor_rate": "2100",
+    "mid_rate": "2450",
+    "best_rate": "2800",
+
+    "concession_ask_1": "flexibility on the pickup appointment time",
+    "concession_ask_2": "a commitment to weekly loads on this lane",
+    "concession_ask_3": "an extended delivery window to end of day",
+
+    "walk_away_script": "I appreciate your time. I can't quite make the numbers work at that rate for this load, but I'd love to help with your next one. Keep us in mind — we run this corridor every week.",
+
+    "strategy_approach": "standard",
+    "strategy_reasoning": "Good margin opportunity on established Sudbury corridor lane with reliable rate data and strong carrier match.",
+    "selling_points": "vetted carriers with Northern Ontario experience who know the Sudbury route\nlive GPS tracking visible on your screen from pickup to delivery\ndigital proof of delivery sent within minutes of drop-off\ndedicated founder-led service — you're not a number in a call center",
+    "urgency_factors": "Pickup is in 2 days — limited flatbed availability on this lane",
+    "rapport_topics": "Ask about facility conditions at the Sudbury delivery site\nMention experience running the Toronto-Sudbury corridor\nAsk about their typical weekly shipping volume on this lane",
+
+    "objection_1_type": "rate_too_high",
+    "objection_1_response": "I totally understand — price is a big factor. Let me ask: beyond rate, what matters most to you? On-time delivery? Communication? Because while we might not always be the cheapest option, our shippers stay with us because we're reliable. We don't just find the cheapest truck — we find the best truck for the job.",
+    "objection_1_followup": "What rate would work for you on this load?",
+    "objection_2_type": "have_broker",
+    "objection_2_response": "That's great — it means you know the value of good logistics support. We'd love to be a backup option for you. There will come a time when your go-to is full or can't cover a lane, and we'd be ready to step in without any scramble on your end.",
+    "objection_2_followup": "What lanes does your current broker primarily cover for you?",
+    "objection_3_type": "dont_use_brokers",
+    "objection_3_response": "I understand — some shippers have had frustrating experiences with brokers. We think of ourselves more as a transportation partner than a middleman. We provide access to a vetted carrier network and manage the entire process. Would you be open to trying us for just this one load to see the difference?",
+    "objection_3_followup": "What's been your biggest frustration with brokers in the past?",
+    "objection_4_type": "not_decision_maker",
+    "objection_4_response": "No problem at all. Could you point me in the right direction? I'd love to connect with whoever handles transportation. What's the best way to reach them?",
+    "objection_4_followup": "Do you have their name and direct number?",
+    "objection_5_type": "call_back",
+    "objection_5_response": "Absolutely, I understand you're busy. Let me put something on the calendar so I don't catch you at a bad time again. When would work best — morning or afternoon?",
+    "objection_5_followup": "Would tomorrow morning work, or is there a specific day and time that's better?",
+
+    "disclosure_script": "",
+    "consent_type": "implied_load_post",
+
+    "is_callback": "false",
+    "is_cross_border": "false",
+    "is_hazmat": "false",
+    "special_requirements": "none",
+    "max_call_duration": "300"
+  },
+
+  "metadata": {
+    "pipelineLoadId": 5891,
+    "briefId": 1042,
+    "briefVersion": "2.0",
+    "persona": "friendly",
+    "language": "en",
+    "currency": "CAD",
+    "retryCount": 0,
+    "parentBriefId": null,
+    "primaryCarrierId": 142,
+    "primaryCarrierRate": 1800,
+    "primaryCarrierPhone": "+17055559876",
+    "initialOffer": 2400,
+    "finalOffer": 2120,
+    "minAcceptableRate": 2120,
+    "totalCost": 1850,
+    "targetMargin": 470,
+    "briefGeneratedAt": "2026-04-15T09:32:00Z",
+    "callInitiatedAt": "2026-04-15T09:32:05Z"
+  }
+}
