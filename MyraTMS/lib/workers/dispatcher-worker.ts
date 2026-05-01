@@ -1,305 +1,293 @@
 /**
  * AGENT 7 - DISPATCHER WORKER
  *
- * Handles everything after a load is booked. Creates the load in MyraTMS,
- * assigns the carrier, generates rate confirmation PDF, sends tracking link,
- * and schedules check-calls. This agent bridges Engine 2 (AI pipeline) with
- * Engine 1 (TMS operations).
+ * Handles everything after a load is booked. Bridges Engine 2 (AI pipeline)
+ * with Engine 1 (TMS operations) by chaining the existing TMS API routes:
  *
- * The full dispatch lifecycle already exists in MyraTMS as API routes.
- * Agent 7's job is to chain these calls together automatically.
+ *   POST /api/loads                          → creates the load row
+ *   UPDATE loads (direct DB)                 → patches pipeline linkage cols
+ *   POST /api/loads/[id]/assign              → attaches carrier
+ *   POST /api/loads/[id]/tracking-token      → generates tracking token
+ *   POST /api/loads/[id]/send-tracking       → emails the link to shipper
  *
- * Input: dispatch-queue with DispatchJobPayload
- * Output: Load created in TMS, carrier assigned, tracking activated
- * Next Stage: dispatched → delivered (when POD captured)
+ * Auth: short-lived JWT minted via signServiceToken() — same payload shape as
+ * a real user JWT (userId='system', role='admin'), so it sails through the
+ * Edge middleware verifier and resolves via getCurrentUser() in the route
+ * handlers without route-side changes.
+ *
+ * Input:  dispatch-queue with DispatchJobPayload (enqueued by the webhook
+ *         when a call books with auto_book_eligible=true)
+ * Output: TMS load row created, carrier assigned, tracking link sent;
+ *         pipeline_loads.tms_load_id populated, stage advanced to 'dispatched'.
  */
 
-import { Job } from 'bullmq';
-import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import Redis from 'ioredis';
+import { signServiceToken } from '@/lib/pipeline/service-token';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
- * Dispatch job payload - received from Voice Agent webhook
+ * Dispatch payload — matches the shape the webhook's `enqueueNextAction()`
+ * produces. The Dispatcher fetches everything else (carrier id, shipper
+ * email, equipment, etc.) from the DB so the queue payload stays minimal.
  */
 export interface DispatchJobPayload extends BaseJobPayload {
   agreedRate: number;
   agreedRateCurrency: string;
   profit: number;
-  carrierId: number;
-  carrierRate: number;
-  shipperEmail: string;
   callId: string;
 }
 
-/**
- * Dispatcher worker - TMS integration
- */
+interface PipelineLoadRow {
+  id: number;
+  load_id: string;
+  origin_city: string;
+  origin_state: string;
+  destination_city: string;
+  destination_state: string;
+  pickup_date: Date | null;
+  delivery_date: Date | null;
+  equipment_type: string;
+  commodity: string | null;
+  weight_lbs: number | null;
+  shipper_company: string | null;
+  shipper_email: string | null;
+  shipper_phone: string | null;
+  top_carrier_id: string | null;
+}
+
+interface CreatedLoad {
+  id: string;
+}
+
 export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
   private tmsApiUrl: string;
-  private serviceToken: string;
+  private serviceTokenTtl: string;
 
-  constructor(redis: Redis, tmsApiUrl: string, serviceToken: string) {
+  constructor(redis: Redis, opts: { tmsApiUrl?: string; serviceTokenTtl?: string } = {}) {
     const config: WorkerConfig = {
       queueName: 'dispatch-queue',
       expectedStage: 'booked',
-      nextStage: 'dispatched',
-      concurrency: 10, // Lower concurrency - each dispatch involves multiple TMS writes
+      // nextStage handled inside updatePipelineLoad — we also need to write
+      // tms_load_id alongside the stage transition.
+      nextStage: undefined,
+      concurrency: 10,
       retryConfig: {
         attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 60000, // 60 seconds
-        },
+        backoff: { type: 'exponential', delay: 60000 },
       },
       redis,
     };
-
     super(config);
-    this.tmsApiUrl = tmsApiUrl;
-    this.serviceToken = serviceToken;
+
+    this.tmsApiUrl =
+      opts.tmsApiUrl ?? process.env.TMS_API_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    this.serviceTokenTtl = opts.serviceTokenTtl ?? '5m';
   }
 
-  /**
-   * Main dispatch sequence
-   */
   public async process(payload: DispatchJobPayload): Promise<ProcessResult> {
-    const { pipelineLoadId, agreedRate, carrierId, carrierRate, shipperEmail, callId } = payload;
-    logger.debug(`[Dispatcher] Processing dispatch for load ${pipelineLoadId}`);
+    const { pipelineLoadId, agreedRate, profit, callId } = payload;
+    logger.debug(`[Dispatcher] Dispatching load ${pipelineLoadId}`);
 
-    try {
-      // Fetch the full pipeline load and carrier data
-      const pipelineLoadResult = await db.query(
-        'SELECT * FROM pipeline_loads WHERE id = $1',
-        [pipelineLoadId]
-      );
-      const pipelineLoad = pipelineLoadResult.rows[0];
+    const load = await this.fetchPipelineLoad(pipelineLoadId);
+    if (!load) throw new Error(`pipeline_load ${pipelineLoadId} not found`);
+    if (!load.top_carrier_id) {
+      throw new Error(`pipeline_load ${pipelineLoadId} has no top_carrier_id — cannot dispatch`);
+    }
 
-      if (!pipelineLoad) {
-        throw new Error(`Pipeline load ${pipelineLoadId} not found`);
-      }
+    const carrierRate = await this.fetchCarrierRate(load.load_id, load.top_carrier_id);
 
-      // STEP 1: Create load in TMS
-      const tmsLoadId = await this.createTMSLoad(pipelineLoad, agreedRate);
+    const cookie = `auth-token=${signServiceToken(this.serviceTokenTtl)}`;
 
-      // STEP 2: Assign carrier
-      await this.assignCarrier(tmsLoadId, carrierId, carrierRate);
+    // Step 1: create the TMS load row.
+    const tmsLoad = await this.createTMSLoad(load, agreedRate, payload.agreedRateCurrency, cookie);
 
-      // STEP 3: Generate tracking token
-      // TODO: Implement tracking token generation
+    // Step 2: patch the pipeline-linkage columns the route doesn't handle.
+    await db.query(
+      `UPDATE loads
+       SET pipeline_load_id = $2,
+           source_type = 'ai_agent',
+           booked_via = 'ai_auto',
+           updated_at = NOW()
+       WHERE id = $1`,
+      [tmsLoad.id, pipelineLoadId],
+    );
 
-      // STEP 4: Send tracking link to shipper
-      if (shipperEmail) {
-        await this.sendTrackingLink(tmsLoadId, shipperEmail);
-      }
+    // Step 3: assign the carrier (also flips loads.status to 'Dispatched').
+    await this.assignCarrier(tmsLoad.id, load.top_carrier_id, carrierRate, cookie);
 
-      // STEP 5: Schedule check-calls (existing TMS pattern)
-      // TODO: Insert into check-call schedule table
+    // Step 4 + 5: tracking token + email link. Best-effort, non-fatal.
+    if (load.shipper_email) {
+      await this.sendTrackingLink(tmsLoad.id, load.shipper_email, cookie);
+    } else {
+      logger.debug(`[Dispatcher] No shipper email for load ${pipelineLoadId}; skipping tracking link`);
+    }
 
-      logger.info(
-        `[Dispatcher] Load ${pipelineLoadId} dispatched. TMS load_id: ${tmsLoadId}, agreed rate: $${agreedRate}, profit: $${payload.profit}`
-      );
+    logger.info(
+      `[Dispatcher] Load ${pipelineLoadId} dispatched. tms_load_id=${tmsLoad.id}, carrier=${load.top_carrier_id}, agreed=$${agreedRate}, profit=$${profit}, call=${callId}`,
+    );
 
-      return {
-        success: true,
-        pipelineLoadId,
-        stage: this.config.expectedStage,
-        duration: 0,
-        details: {
-          tmsLoadId,
-          carrierId,
-          agreedRate,
-          profit: payload.profit,
-        },
-      };
-    } catch (error) {
-      logger.error(`[Dispatcher] Error dispatching load ${pipelineLoadId}:`, error);
-      throw error;
+    return {
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: {
+        tmsLoadId: tmsLoad.id,
+        carrierId: load.top_carrier_id,
+        carrierRate,
+        agreedRate,
+        profit,
+      },
+    };
+  }
+
+  private async fetchPipelineLoad(id: number): Promise<PipelineLoadRow | null> {
+    const r = await db.query<PipelineLoadRow>(
+      `SELECT id, load_id, origin_city, origin_state, destination_city, destination_state,
+              pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
+              shipper_company, shipper_email, shipper_phone, top_carrier_id
+       FROM pipeline_loads WHERE id = $1`,
+      [id],
+    );
+    return r.rows[0] ?? null;
+  }
+
+  private async fetchCarrierRate(loadId: string, carrierId: string): Promise<number> {
+    const r = await db.query<{ breakdown: any }>(
+      `SELECT breakdown FROM match_results
+       WHERE load_id = $1 AND carrier_id = $2
+       ORDER BY match_score DESC LIMIT 1`,
+      [loadId, carrierId],
+    );
+    const carrierAvg = r.rows[0]?.breakdown?.rate?.carrier_avg_rate;
+    return typeof carrierAvg === 'number' && carrierAvg > 0 ? carrierAvg : 0;
+  }
+
+  private async createTMSLoad(
+    load: PipelineLoadRow,
+    agreedRate: number,
+    currency: string,
+    cookie: string,
+  ): Promise<CreatedLoad> {
+    const body = {
+      origin: `${load.origin_city}, ${load.origin_state}`,
+      destination: `${load.destination_city}, ${load.destination_state}`,
+      revenue: agreedRate,
+      carrierCost: 0,
+      equipment: load.equipment_type,
+      weight: load.weight_lbs?.toString() ?? '',
+      pickupDate: load.pickup_date ? this.toIsoDate(load.pickup_date) : null,
+      deliveryDate: load.delivery_date ? this.toIsoDate(load.delivery_date) : null,
+      // loads.source has a CHECK constraint allowing only
+      // 'Load Board' | 'Contract Shipper' | 'One-off Shipper'. Engine 2's
+      // loads are board-sourced (DAT, Truckstop, etc.) so 'Load Board' is
+      // the correct value. The booked_via='ai_auto' linkage column we set
+      // below distinguishes AI dispatches from human-booked ones.
+      source: 'Load Board',
+      status: 'Booked',
+      shipperName: load.shipper_company ?? '',
+    };
+
+    const res = await fetch(`${this.tmsApiUrl}/api/loads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '<unparseable>');
+      throw new Error(`POST /api/loads ${res.status}: ${text}`);
+    }
+    const created = (await res.json()) as { id: string };
+    if (!created.id) throw new Error(`POST /api/loads returned no id: ${JSON.stringify(created)}`);
+    return { id: created.id };
+  }
+
+  private async assignCarrier(
+    tmsLoadId: string,
+    carrierId: string,
+    carrierRate: number,
+    cookie: string,
+  ): Promise<void> {
+    const res = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/assign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({
+        carrier_id: carrierId,
+        carrier_rate: carrierRate,
+        assignment_method: 'ai_auto',
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '<unparseable>');
+      throw new Error(`POST /api/loads/${tmsLoadId}/assign ${res.status}: ${text}`);
     }
   }
 
-  /**
-   * Create load in TMS via API
-   */
-  private async createTMSLoad(pipelineLoad: any, agreedRate: number): Promise<string> {
-    try {
-      // TODO: Call existing POST /api/loads endpoint
-
-      const response = await fetch(`${this.tmsApiUrl}/api/loads`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: `auth-token=${this.serviceToken}`,
-        },
-        body: JSON.stringify({
-          origin: `${pipelineLoad.origin_city}, ${pipelineLoad.origin_state}`,
-          destination: `${pipelineLoad.destination_city}, ${pipelineLoad.destination_state}`,
-          revenue: agreedRate,
-          equipment: pipelineLoad.equipment_type,
-          commodity: pipelineLoad.commodity,
-          weight: pipelineLoad.weight_lbs?.toString() || '',
-          pickup_date: pipelineLoad.pickup_date,
-          delivery_date: pipelineLoad.delivery_date,
-          source: 'Load Board',
-          status: 'Booked',
-          // Link back to pipeline
-          pipeline_load_id: pipelineLoad.id,
-          source_type: 'ai_agent',
-          booked_via: 'ai_auto',
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(`TMS API error creating load: ${JSON.stringify(error)}`);
-      }
-
-      const tmsLoad = await response.json();
-      return tmsLoad.id;
-    } catch (error) {
-      logger.error('[Dispatcher] Failed to create TMS load:', error);
-      throw error;
+  private async sendTrackingLink(tmsLoadId: string, email: string, cookie: string): Promise<void> {
+    const tokRes = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/tracking-token`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    if (!tokRes.ok) {
+      logger.warn(`[Dispatcher] tracking-token returned ${tokRes.status} for ${tmsLoadId}; skipping email`);
+      return;
+    }
+    const sendRes = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/send-tracking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ email }),
+    });
+    if (!sendRes.ok) {
+      logger.warn(`[Dispatcher] send-tracking returned ${sendRes.status} for ${tmsLoadId}`);
     }
   }
 
-  /**
-   * Assign carrier to load in TMS
-   */
-  private async assignCarrier(tmsLoadId: string, carrierId: number, carrierRate: number): Promise<void> {
-    try {
-      // TODO: Call existing POST /api/loads/[id]/assign endpoint
-
-      const response = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/assign`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: `auth-token=${this.serviceToken}`,
-        },
-        body: JSON.stringify({
-          carrier_id: carrierId,
-          carrier_cost: carrierRate,
-          auto_send_ratecon: true, // Send rate con PDF to carrier via email
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(`TMS API error assigning carrier: ${JSON.stringify(error)}`);
-      }
-
-      logger.debug(`[Dispatcher] Assigned carrier ${carrierId} to TMS load ${tmsLoadId}`);
-    } catch (error) {
-      logger.error(`[Dispatcher] Failed to assign carrier to TMS load ${tmsLoadId}:`, error);
-
-      // TODO: Implement fallback carrier assignment if first carrier fails
-      // Try next carrier in stack from brief
-      throw error;
-    }
+  private toIsoDate(d: Date | string): string {
+    return (d instanceof Date ? d : new Date(d)).toISOString().split('T')[0];
   }
 
-  /**
-   * Generate tracking token and send tracking link to shipper
-   */
-  private async sendTrackingLink(tmsLoadId: string, shipperEmail: string): Promise<void> {
-    try {
-      // TODO: Call existing POST /api/loads/[id]/tracking-token endpoint
-
-      // Step 1: Generate token
-      const tokenResponse = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/tracking-token`, {
-        method: 'POST',
-        headers: {
-          Cookie: `auth-token=${this.serviceToken}`,
-        },
-      });
-
-      if (!tokenResponse.ok) {
-        logger.warn(`[Dispatcher] Failed to generate tracking token for load ${tmsLoadId}`);
-        return; // Non-critical - continue
-      }
-
-      // Step 2: Send tracking link email
-      const emailResponse = await fetch(`${this.tmsApiUrl}/api/loads/${tmsLoadId}/send-tracking`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: `auth-token=${this.serviceToken}`,
-        },
-        body: JSON.stringify({ email: shipperEmail }),
-      });
-
-      if (!emailResponse.ok) {
-        logger.warn(`[Dispatcher] Failed to send tracking link for load ${tmsLoadId}`);
-        return; // Non-critical - continue
-      }
-
-      logger.debug(`[Dispatcher] Tracking link sent to ${shipperEmail} for TMS load ${tmsLoadId}`);
-    } catch (error) {
-      logger.error(`[Dispatcher] Error sending tracking link:`, error);
-      // Non-critical - don't throw
+  protected async updatePipelineLoad(pipelineLoadId: number, result: ProcessResult): Promise<void> {
+    const tmsLoadId = result.details?.tmsLoadId as string | undefined;
+    if (!tmsLoadId) {
+      logger.warn(`[Dispatcher] No tmsLoadId in result for load ${pipelineLoadId}; not advancing stage`);
+      return;
     }
-  }
-
-  /**
-   * Override updatePipelineLoad to store TMS linkage
-   */
-  protected async updatePipelineLoad(pipelineLoadId: number, result: any): Promise<void> {
-    try {
-      const { tmsLoadId } = result.details;
-
-      await db.query(
-        `UPDATE pipeline_loads
-         SET stage = 'dispatched',
-             stage_updated_at = NOW(),
-             tms_load_id = $2,
-             dispatched_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1`,
-        [pipelineLoadId, tmsLoadId]
-      );
-
-      logger.debug(
-        `[Dispatcher] Pipeline load ${pipelineLoadId} linked to TMS load ${tmsLoadId} and advanced to 'dispatched'`
-      );
-    } catch (error) {
-      logger.error(`[Dispatcher] Failed to update pipeline load ${pipelineLoadId}:`, error);
-      throw error;
-    }
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'dispatched',
+           stage_updated_at = NOW(),
+           tms_load_id = $2,
+           dispatched_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [pipelineLoadId, tmsLoadId],
+    );
+    logger.debug(`[Dispatcher] Load ${pipelineLoadId} → 'dispatched'; tms_load_id=${tmsLoadId}`);
   }
 }
 
 /**
- * Post-dispatch monitoring
- *
- * After dispatch, the load enters standard TMS operations:
- * - Check-calls every 4 hours (existing exception detection cron)
- * - GPS tracking via driver app
- * - POD capture on delivery
- * - Auto-invoice on POD (existing workflow trigger)
- *
- * When load is delivered, a cron job advances the pipeline:
+ * Cron-callable: advance pipeline_loads to 'delivered' when their linked
+ * loads.status flips to 'Delivered'. Idempotent — only flips loads currently
+ * in 'dispatched'. Driven by /api/cron/pipeline-health.
  */
-export async function advanceDeliveredLoads(): Promise<void> {
-  try {
-    // TODO: Run as cron job (e.g., every 30 minutes)
-    // Check for loads marked as 'Delivered' in TMS
-
-    await db.query(`
-      UPDATE pipeline_loads
-      SET stage = 'delivered',
-          stage_updated_at = NOW(),
-          delivered_at = NOW()
-      WHERE tms_load_id IN (
-        SELECT id FROM loads WHERE status = 'Delivered'
-      )
-      AND stage = 'dispatched'
-    `);
-
-    logger.debug('[Dispatcher] Delivery advancement cron completed');
-  } catch (error) {
-    logger.error('[Dispatcher] Error advancing delivered loads:', error);
+export async function advanceDeliveredLoads(): Promise<{ advanced: number }> {
+  const r = await db.query<{ id: number }>(
+    `UPDATE pipeline_loads pl
+     SET stage = 'delivered',
+         stage_updated_at = NOW(),
+         delivered_at = NOW()
+     FROM loads l
+     WHERE pl.tms_load_id = l.id
+       AND l.status = 'Delivered'
+       AND pl.stage = 'dispatched'
+     RETURNING pl.id`,
+  );
+  if (r.rows.length > 0) {
+    logger.info(`[Dispatcher] Advanced ${r.rows.length} loads to 'delivered'`);
   }
+  return { advanced: r.rows.length };
 }
-
-// TODO: Export initialized worker
-// export const dispatcherWorker = new DispatcherWorker(redisClient, process.env.NEXT_PUBLIC_API_URL, serviceToken);

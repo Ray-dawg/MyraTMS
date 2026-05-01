@@ -55,12 +55,15 @@ describe('CompilerWorker', () => {
     );
     pipelineLoadId = res.rows[0].id;
 
-    // Insert one match_results row.
+    // Insert one match_results row. Use an explicit id with millisecond +
+    // random suffix because the default PK ('MR-' || hex(epoch_seconds))
+    // collides when multiple tests run in parallel within the same second.
     await db.query(
       `INSERT INTO match_results (
-         load_id, carrier_id, match_score, match_grade, breakdown, was_selected, assignment_method, created_at
-       ) VALUES ($1, $2, 0.78, 'B', $3, false, 'auto', NOW())`,
+         id, load_id, carrier_id, match_score, match_grade, breakdown, was_selected, assignment_method, created_at
+       ) VALUES ($1, $2, $3, 0.78, 'B', $4, false, 'auto', NOW())`,
       [
+        `MR-CMP-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
         TEST_LOAD_ID,
         REAL_CARRIER_ID,
         JSON.stringify({

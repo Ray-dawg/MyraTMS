@@ -15,6 +15,18 @@
     {
       "path": "/api/cron/shipper-reports",
       "schedule": "0 6 1 * *"
+    },
+    {
+      "path": "/api/cron/pipeline-scan",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/pipeline-health",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/feedback-aggregation",
+      "schedule": "0 7 * * *"
     }
   ]
 }
