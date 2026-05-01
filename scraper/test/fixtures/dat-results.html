@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head><title>DAT Power — Search Results (synthetic fixture)</title></head>
+<body>
+  <header>
+    <button data-test="user-menu">Patrice Penda</button>
+  </header>
+
+  <main>
+    <table data-test="results">
+      <thead>
+        <tr>
+          <th>Load ID</th>
+          <th>Origin</th>
+          <th>Destination</th>
+          <th>Equipment</th>
+          <th>Pickup</th>
+          <th>Weight</th>
+          <th>Length</th>
+          <th>Rate</th>
+          <th>Broker</th>
+          <th>Phone</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr data-test="result-row">
+          <td data-field="id">DAT-12345</td>
+          <td data-field="origin">Toronto, ON</td>
+          <td data-field="destination">Sudbury, ON</td>
+          <td data-field="equipment">Vans, Dry</td>
+          <td data-field="pickupDate">2026-05-04</td>
+          <td data-field="weight">42,000</td>
+          <td data-field="length">53'</td>
+          <td data-field="rate">$2,400</td>
+          <td data-field="broker">Northern Mine Supply Co</td>
+          <td data-field="phone">(705) 555-1861</td>
+        </tr>
+        <tr data-test="result-row">
+          <td data-field="id">DAT-12346</td>
+          <td data-field="origin">Calgary, AB</td>
+          <td data-field="destination">Vancouver, BC</td>
+          <td data-field="equipment">Vans, Reefer</td>
+          <td data-field="pickupDate">2026-05-05</td>
+          <td data-field="weight">38,500</td>
+          <td data-field="length">53'</td>
+          <td data-field="rate">$3,150</td>
+          <td data-field="broker">Pacific Coast Logistics</td>
+          <td data-field="phone">+1 587 555 9012 ext 4</td>
+        </tr>
+        <tr data-test="result-row">
+          <td data-field="id">DAT-12347</td>
+          <td data-field="origin">Atlanta, GA</td>
+          <td data-field="destination">Miami, FL</td>
+          <td data-field="equipment">Flatbeds</td>
+          <td data-field="pickupDate">Tomorrow</td>
+          <td data-field="weight">45,000</td>
+          <td data-field="length">48'</td>
+          <td data-field="rate">$2.10/mi</td>
+          <td data-field="broker">Sun Belt Freight</td>
+          <td data-field="phone">404-555-3344</td>
+        </tr>
+        <tr data-test="result-row">
+          <td data-field="id">DAT-12348</td>
+          <td data-field="origin">Chicago, IL</td>
+          <td data-field="destination">Detroit, MI</td>
+          <td data-field="equipment">Vans, Dry</td>
+          <td data-field="pickupDate">Today</td>
+          <td data-field="weight">22,000</td>
+          <td data-field="length">53'</td>
+          <td data-field="rate">Call</td>
+          <td data-field="broker">Midwest Brokerage Inc</td>
+          <td data-field="phone"></td>
+        </tr>
+        <!-- Row missing required fields — must be filtered out by normalizeDATRow -->
+        <tr data-test="result-row">
+          <td data-field="id"></td>
+          <td data-field="origin"></td>
+          <td data-field="destination">Boston, MA</td>
+          <td data-field="equipment">Vans, Dry</td>
+          <td data-field="pickupDate">2026-05-06</td>
+          <td data-field="weight">30,000</td>
+          <td data-field="length">53'</td>
+          <td data-field="rate">$1,800</td>
+          <td data-field="broker">Beacon Logistics</td>
+          <td data-field="phone">617-555-7766</td>
+        </tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

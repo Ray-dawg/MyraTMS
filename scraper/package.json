@@ -1,0 +1,39 @@
+{
+  "name": "myra-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "T-04A headless browser load board scanner — bridge layer until DAT/Truckstop/123LB/Loadlink official API access lands",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dat:manual-login": "tsx scripts/dat-manual-login.ts",
+    "migrate": "tsx scripts/run-migrations.ts"
+  },
+  "dependencies": {
+    "bullmq": "^5.76.4",
+    "ioredis": "^5.10.1",
+    "pg": "^8.13.0",
+    "pino": "^9.5.0",
+    "playwright": "^1.48.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.1",
+    "@types/node": "^20.17.0",
+    "@types/pg": "^8.11.10",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
