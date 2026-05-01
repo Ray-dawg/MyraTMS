@@ -28,6 +28,7 @@ import { isCrossSourceDuplicate } from './pipeline/dedup.js';
 import { writePipelineLoad } from './pipeline/db.js';
 import { buildQualifyPayload, enqueueQualify } from './pipeline/enqueue.js';
 import type { RawLoad } from './pipeline/normalize.js';
+import { getIngestMethod } from './pipeline/registry.js';
 
 export interface BoardConfig {
   source: LoadBoardSource;
@@ -86,6 +87,20 @@ export class Scheduler {
     }
     if (this.polling.has(board.source)) {
       logger.warn({ source: board.source }, 'Scheduler: previous poll still running, skipping');
+      this.scheduleNext(board);
+      return;
+    }
+
+    // DB-backed registry check — the canonical source of truth shared
+    // with the Vercel API path. The scraper only polls when this row says
+    // 'scrape'. Cutover from scrape→api flips this atomically; both
+    // services see the change within 30s (registry cache TTL).
+    const ingestMethod = await getIngestMethod(this.db, board.source);
+    if (ingestMethod !== 'scrape') {
+      logger.info(
+        { source: board.source, ingestMethod },
+        'Scheduler: source not in scrape mode, skipping poll',
+      );
       this.scheduleNext(board);
       return;
     }

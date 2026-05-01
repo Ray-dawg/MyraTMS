@@ -19,6 +19,11 @@ import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { getCached, setCache } from '@/lib/redis';
+import type { LoadBoardSource, SearchQuery } from '@/lib/loadboards/base';
+import { LoadBoardAPIError } from '@/lib/loadboards/base';
+import { getClient } from '@/lib/loadboards/registry';
+import { getSource as getRegistrySource } from '@/lib/loadboards/source-registry';
+import { takeToken } from '@/lib/loadboards/rate-limiter';
 
 /** Thin RedisCache shim wrapping the existing REST-client helpers */
 class RedisCache {
@@ -281,6 +286,190 @@ export class ScannerService {
       return `unsupported destination country: ${load.destinationCountry}`;
     }
     return null;
+  }
+
+  /**
+   * Poll one source via its official-API client (Sprint 6.5 path).
+   *
+   * The cron at /api/cron/pipeline-scan calls this once per source whose
+   * loadboard_sources.ingest_method = 'api'. Field-for-field identical
+   * to ingestRawLoads() in terms of pipeline_loads INSERT shape and
+   * qualify-queue payload — API loads are indistinguishable from
+   * CSV/scrape loads downstream. The only marker is created_by:
+   *
+   *   'scanner-v1'      → API path (this method)
+   *   'scanner-csv-v1'  → CSV import (ingestRawLoads)
+   *   'scraper-v1'      → Railway headless scraper
+   */
+  public async pollSourceViaAPI(source: LoadBoardSource): Promise<{
+    source: LoadBoardSource;
+    status: 'success' | 'rate_limited' | 'not_implemented' | 'auth_failed' | 'failed';
+    received: number;
+    inserted: number;
+    duplicates: number;
+    skipped: number;
+    insertedIds: number[];
+    error?: string;
+  }> {
+    const insertedIds: number[] = [];
+
+    // 1. Verify the source is actually in 'api' mode (defensive — caller should
+    //    already have filtered, but a race between cutover and dispatch is possible).
+    const sourceRow = await getRegistrySource(source);
+    if (!sourceRow) {
+      return { source, status: 'failed', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: 'no source row' };
+    }
+    if (sourceRow.ingest_method !== 'api') {
+      logger.info(`[Scanner.api] source=${source} ingest_method=${sourceRow.ingest_method} — skipping`);
+      return { source, status: 'failed', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: `ingest_method=${sourceRow.ingest_method}` };
+    }
+
+    // 2. Rate limit check — fail-open if Redis unavailable, fail-closed if cap exceeded.
+    const allowed = await takeToken(source, sourceRow.rate_limit_per_minute);
+    if (!allowed) {
+      logger.warn(`[Scanner.api] source=${source} rate limited, skipping this poll`);
+      return { source, status: 'rate_limited', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds };
+    }
+
+    // 3. Get the client + authenticate. not_implemented bubbles up cleanly.
+    const client = getClient(source);
+    let auth;
+    try {
+      auth = await client.authenticate();
+    } catch (err) {
+      if (err instanceof LoadBoardAPIError && err.reason === 'not_implemented') {
+        return { source, status: 'not_implemented', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: err.message };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[Scanner.api] source=${source} authenticate failed: ${msg}`);
+      return { source, status: 'auth_failed', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: msg };
+    }
+
+    // 4. Build a default search query. (Cron-driven; the broader query
+    //    refinement story belongs in a future sprint with operator config.)
+    const query = this.buildDefaultSearchQuery();
+
+    // 5. Hit the board's API.
+    let apiRows: unknown[];
+    try {
+      apiRows = await client.searchLoads(query, auth);
+    } catch (err) {
+      if (err instanceof LoadBoardAPIError && err.reason === 'not_implemented') {
+        return { source, status: 'not_implemented', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: err.message };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[Scanner.api] source=${source} searchLoads failed: ${msg}`);
+      return { source, status: 'failed', received: 0, inserted: 0, duplicates: 0, skipped: 0, insertedIds, error: msg };
+    }
+
+    // 6. Map → normalize → insert → enqueue, one row at a time so a single
+    //    bad row doesn't tank the whole poll.
+    let inserted = 0;
+    let duplicates = 0;
+    let skipped = 0;
+
+    for (const row of apiRows) {
+      const load = client.mapToRawLoad(row);
+      if (!load) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        const res = await db.query<{ id: number }>(
+          `INSERT INTO pipeline_loads (
+             load_id, load_board_source,
+             origin_city, origin_state, origin_country,
+             destination_city, destination_state, destination_country,
+             pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
+             distance_miles,
+             shipper_company, shipper_contact_name, shipper_phone, shipper_email,
+             posted_rate, posted_rate_currency, rate_type,
+             stage, stage_updated_at, created_by
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+             $15, $16, $17, $18, $19, $20, $21,
+             'scanned', NOW(), 'scanner-v1'
+           )
+           ON CONFLICT (load_id, load_board_source) DO NOTHING
+           RETURNING id`,
+          [
+            load.loadId, load.loadBoardSource,
+            load.originCity, load.originState, load.originCountry,
+            load.destinationCity, load.destinationState, load.destinationCountry,
+            load.pickupDate, load.deliveryDate, load.equipmentType, load.commodity, load.weightLbs,
+            load.distanceMiles,
+            load.shipperCompany, load.shipperContactName, load.shipperPhone, load.shipperEmail,
+            load.postedRate, load.postedRateCurrency, load.rateType,
+          ],
+        );
+
+        if (res.rows.length === 0) {
+          duplicates++;
+          continue;
+        }
+
+        const pipelineLoadId = res.rows[0].id;
+        insertedIds.push(pipelineLoadId);
+        inserted++;
+
+        await this.qualifyQueue.add(
+          'qualify',
+          {
+            pipelineLoadId,
+            loadId: load.loadId,
+            loadBoardSource: load.loadBoardSource,
+            enqueuedAt: new Date().toISOString(),
+            priority: load.postedRate ? Math.round(load.postedRate) : 0,
+            origin: { city: load.originCity, state: load.originState, country: load.originCountry },
+            destination: { city: load.destinationCity, state: load.destinationState, country: load.destinationCountry },
+            equipmentType: load.equipmentType,
+            postedRate: load.postedRate,
+            postedRateCurrency: load.postedRateCurrency,
+            distanceMiles: load.distanceMiles ?? 0,
+            pickupDate: load.pickupDate,
+            shipperPhone: load.shipperPhone,
+          },
+          { priority: load.postedRate ? Math.round(load.postedRate) : 0 },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[Scanner.api] source=${source} insert/enqueue failed: ${msg}`);
+        skipped++;
+      }
+    }
+
+    logger.info(
+      `[Scanner.api] source=${source}: received=${apiRows.length}, inserted=${inserted}, duplicates=${duplicates}, skipped=${skipped}`,
+    );
+
+    return {
+      source,
+      status: 'success',
+      received: apiRows.length,
+      inserted,
+      duplicates,
+      skipped,
+      insertedIds,
+    };
+  }
+
+  /**
+   * Default search query for now: today + DAYS_FORWARD, dry van + flatbed +
+   * reefer, ON + AB origin. Operator config in loadboard_sources is a
+   * future enhancement.
+   */
+  private buildDefaultSearchQuery(): SearchQuery {
+    const now = new Date();
+    const end = new Date(now);
+    end.setDate(end.getDate() + 7);
+    return {
+      equipmentTypes: ['dry_van', 'flatbed', 'reefer'],
+      originProvinces: ['ON', 'AB'],
+      pickupDateFrom: now,
+      pickupDateTo: end,
+      maxResults: 100,
+    };
   }
 
   /**
