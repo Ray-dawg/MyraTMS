@@ -3,30 +3,36 @@
  *
  * Performs deep analysis on qualified loads. Runs the rate cascade (6 sources),
  * computes cost model, calculates margin envelope, profiles shipper, and recommends
- * negotiation strategy. This is the first agent using Claude API.
+ * negotiation strategy. This is the first agent that may use Claude API.
  *
  * Runs in PARALLEL with Agent 4 (Carrier Ranker). Both triggered simultaneously
  * when a load enters 'qualified' stage. Converges at completion gate before
  * Agent 5 compiles the brief.
  *
- * Input: research-queue with ResearchJobPayload
- * Output: Load stage stays 'qualified', research_completed_at set in DB
- * Next Stage: matched (only after Agent 4 also completes - completion gate)
- *
- * Uses Claude API for rate estimation fallback and optional shipper profiling.
- * Reuses existing quoting engine infrastructure.
+ * Input:  research-queue with ResearchJobPayload
+ * Output: pipeline_loads.market_rate_floor/mid/best, recommended_strategy,
+ *         research_completed_at populated. Optionally enqueues to brief-queue
+ *         when both parallel agents complete.
  */
 
-import { Job } from 'bullmq';
 import Redis from 'ioredis';
-import Anthropic from '@anthropic-ai/sdk';
+import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import {
+  calculateTotalCost,
+  calculateNegotiationParams,
+  type CostBreakdown,
+} from '@/lib/pipeline/cost-calculator';
+import {
+  getBenchmarkRate,
+  getCurrentSeason,
+  type EquipmentType as BenchmarkEquipmentType,
+} from '@/lib/pipeline/benchmark-rates';
+import { onResearcherComplete, buildBriefPayload } from '@/lib/pipeline/gate';
+import { ClaudeService } from '@/lib/pipeline/claude-service';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
-/**
- * Researcher job payload - received from Agent 2 (Qualifier)
- */
 export interface ResearchJobPayload extends BaseJobPayload {
   qualifiedLoad: {
     origin: { city: string; state: string; country: string };
@@ -45,399 +51,455 @@ export interface ResearchJobPayload extends BaseJobPayload {
   estimatedMarginRange: { low: number; high: number };
 }
 
-/**
- * Rate cascade result - output of 6-source rate lookup
- */
 interface RateCascadeResult {
   floorRate: number;
   midRate: number;
   bestRate: number;
-  confidence: number; // 0.0 to 1.0
-  sources: string[]; // Which sources contributed
-  currency: string; // 'CAD' | 'USD'
+  confidence: number;
+  sources: string[];
+  currency: 'CAD' | 'USD';
 }
 
-/**
- * Cost breakdown for the load
- */
-interface CostBreakdown {
-  baseCost: number;
-  deadheadCost: number;
-  fuelSurcharge: number;
-  accessorials: number;
-  adminOverhead: number;
-  crossBorderFees: number;
-  factoringFee: number;
-  total: number;
-}
-
-/**
- * Negotiation parameters computed from cost and rates
- */
-interface NegotiationParams {
-  initialOffer: number;
-  concessionStep1: number;
-  concessionStep2: number;
-  finalOffer: number;
-  walkAwayRate: number;
-  minMargin: number;
-  targetMargin: number;
-  stretchMargin: number;
-  marginEnvelope: {
-    floor: number;
-    target: number;
-    stretch: number;
-  };
-}
-
-/**
- * Shipper profile from historical data
- */
 interface ShipperProfile {
-  preferredLanguage: string;
-  preferredCurrency: string;
+  preferredLanguage: 'en' | 'fr';
+  preferredCurrency: 'CAD' | 'USD';
   previousCallCount: number;
   previousOutcomes: string[];
-  postingFrequency: number;
   bestPerformingPersona: string | null;
   lastBookedRate: number | null;
+  lastBookedDate: string | null;
   fatigueScore: number;
+  isRepeatShipper: boolean;
+  knownObjections: string[];
+  notes: string | null;
+  companyName: string | null;
+  contactName: string | null;
 }
 
-/**
- * Complete research result
- */
-interface LoadIntelligence {
+interface ResearchIntelligence {
   rates: RateCascadeResult;
   cost: CostBreakdown;
-  negotiation: NegotiationParams;
+  negotiation: ReturnType<typeof calculateNegotiationParams>;
   shipperProfile: ShipperProfile;
-  strategy: { approach: string; reasoning: string };
-  distance: { miles: number; km: number; durationHours: number };
+  strategy: { approach: 'aggressive' | 'standard' | 'walk'; reasoning: string };
+  distance: { miles: number; km: number };
 }
 
-/**
- * Researcher worker - deep load analysis
- */
-export class ResearcherWorker extends BaseWorker<ResearchJobPayload> {
-  private anthropic: Anthropic;
-  private briefQueue: any; // TODO: Import Queue type
+const CURRENT_FUEL_PRICE_CAD = 1.50;
 
-  constructor(redis: Redis, briefQueue: any) {
+function normalizeEquipment(raw: string): BenchmarkEquipmentType {
+  const lower = raw.toLowerCase();
+  if (lower.includes('flat')) return 'flatbed';
+  if (lower.includes('reefer') || lower.includes('refrigerated')) return 'reefer';
+  if (lower.includes('step') || lower.includes('stepdeck')) return 'step_deck';
+  return 'dry_van';
+}
+
+export class ResearcherWorker extends BaseWorker<ResearchJobPayload> {
+  private claudeService: ClaudeService | null = null;
+  private briefQueue: Queue;
+
+  constructor(redis: Redis, briefQueue: Queue) {
     const config: WorkerConfig = {
       queueName: 'research-queue',
       expectedStage: 'qualified',
-      nextStage: 'matched', // Set conditionally by completion gate
-      concurrency: 20, // Each job makes Claude API calls (~2-5 seconds per load)
-      retryConfig: {
-        attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 60000, // 60 seconds
-        },
-      },
+      nextStage: 'matched',
+      concurrency: 20,
+      retryConfig: { attempts: 3, backoff: { type: 'exponential', delay: 60000 } },
       redis,
     };
-
     super(config);
-    this.anthropic = new Anthropic(); // Uses ANTHROPIC_API_KEY env var
     this.briefQueue = briefQueue;
+
+    if (process.env.ANTHROPIC_API_KEY) {
+      try {
+        this.claudeService = new ClaudeService();
+        logger.debug('[Researcher] Claude service available — Source 5 enabled');
+      } catch (err) {
+        logger.warn('[Researcher] Claude service init failed; cascade will skip Source 5', err);
+      }
+    } else {
+      logger.debug('[Researcher] ANTHROPIC_API_KEY missing — cascade will skip Source 5');
+    }
   }
 
-  /**
-   * Main research pipeline
-   */
   public async process(payload: ResearchJobPayload): Promise<ProcessResult> {
     const { pipelineLoadId, qualifiedLoad } = payload;
     logger.debug(`[Researcher] Processing load ${pipelineLoadId}`);
 
-    try {
-      // Execute the 7-step research pipeline
-      // Step 1: Distance (retrieve or compute)
-      // TODO: const distance = await getDistance(qualifiedLoad.origin, qualifiedLoad.destination);
+    const distance = {
+      miles: qualifiedLoad.distanceMiles,
+      km: qualifiedLoad.distanceKm || qualifiedLoad.distanceMiles * 1.60934,
+    };
 
-      // Step 2: Rate Cascade (6 sources)
-      const rates = await this.runRateCascade(qualifiedLoad);
+    const rates = await this.runRateCascade(qualifiedLoad, distance);
 
-      // Step 3: Cost Model
-      const cost = this.calculateTotalCost(
-        qualifiedLoad.distanceMiles,
-        qualifiedLoad.origin.country,
-        qualifiedLoad.origin.country !== qualifiedLoad.destination.country
-      );
+    const isCrossBorder = qualifiedLoad.origin.country !== qualifiedLoad.destination.country;
+    const cost = calculateTotalCost({
+      distanceMiles: distance.miles,
+      distanceKm: distance.km,
+      carrierRate: qualifiedLoad.origin.country === 'CA' ? 2.0 : 1.5,
+      fuelPricePerLitre: CURRENT_FUEL_PRICE_CAD,
+      originCountry: qualifiedLoad.origin.country,
+      destinationCountry: qualifiedLoad.destination.country,
+      isCrossBorder,
+    });
 
-      // Step 4-5: Margin Envelope and Negotiation Params
-      const negotiation = this.computeNegotiationParams(cost.total, rates, rates.currency);
+    const negotiation = calculateNegotiationParams(cost.total, rates.currency, rates.bestRate);
 
-      // Step 6: Shipper Profile
-      // TODO: const shipperProfile = await this.profileShipper(payload.shipperPhone);
+    const shipperProfile = await this.profileShipper(payload, qualifiedLoad);
 
-      // Step 7: Strategy Recommendation
-      const strategy = this.determineStrategy(qualifiedLoad, rates, negotiation);
+    const strategy = this.determineStrategy(rates, cost, negotiation, shipperProfile);
 
-      const intelligence: LoadIntelligence = {
+    const intelligence: ResearchIntelligence = {
+      rates,
+      cost,
+      negotiation,
+      shipperProfile,
+      strategy,
+      distance,
+    };
+
+    logger.info(
+      `[Researcher] Load ${pipelineLoadId} researched. Market $${rates.floorRate}-$${rates.bestRate} (${rates.sources.join(',')}, conf ${rates.confidence.toFixed(2)}). Cost $${cost.total}. Strategy: ${strategy.approach}.`,
+    );
+
+    return {
+      success: true,
+      pipelineLoadId,
+      stage: this.config.expectedStage,
+      duration: 0,
+      details: {
         rates,
-        cost,
-        negotiation,
-        shipperProfile: this.defaultShipperProfile(), // Placeholder
-        strategy,
-        distance: {
-          miles: qualifiedLoad.distanceMiles,
-          km: qualifiedLoad.distanceKm,
-          durationHours: 0, // TODO: Get from distance service
-        },
-      };
-
-      logger.info(
-        `[Researcher] Load ${pipelineLoadId} researched. Market rates: $${rates.floorRate}-$${rates.bestRate}. Strategy: ${strategy.approach}`
-      );
-
-      return {
-        success: true,
-        pipelineLoadId,
-        stage: this.config.expectedStage,
-        duration: 0,
-        details: {
-          rates: {
-            floor: rates.floorRate,
-            mid: rates.midRate,
-            best: rates.bestRate,
-            confidence: rates.confidence,
-          },
-          cost: cost.total,
-          strategy: strategy.approach,
-          intelligence,
-        },
-      };
-    } catch (error) {
-      logger.error(`[Researcher] Error processing load ${pipelineLoadId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Run the rate cascade - 6 sources in priority order
-   */
-  private async runRateCascade(load: any): Promise<RateCascadeResult> {
-    // TODO: Implement complete rate cascade
-    // Priority order:
-    // 1. Historical loads on this lane (existing in quoting engine)
-    // 2. DAT RateView API (existing integration slot)
-    // 3. Truckstop API (existing integration slot)
-    // 4. Manual rate cache (existing rate_cache table)
-    // 5. Claude API estimation
-    // 6. Benchmark fallback (existing hardcoded table)
-
-    // Placeholder - return default for now
-    const benchmark = 2500; // TODO: Implement getBenchmarkRate
-
-    return {
-      floorRate: Math.round(benchmark * 0.85),
-      midRate: benchmark,
-      bestRate: Math.round(benchmark * 1.15),
-      confidence: 0.4, // Low confidence - using benchmark only
-      sources: ['benchmark'],
-      currency: 'CAD',
-    };
-  }
-
-  /**
-   * Calculate total cost to Myra to move this load
-   */
-  private calculateTotalCost(
-    distanceMiles: number,
-    originCountry: string,
-    crossBorder: boolean
-  ): CostBreakdown {
-    const costPerMile = originCountry === 'CA' ? 2.0 : 1.5;
-    const deadheadMiles = distanceMiles * 0.15;
-    const totalMiles = distanceMiles + deadheadMiles;
-
-    const baseCost = totalMiles * costPerMile;
-    const deadheadCost = deadheadMiles * costPerMile;
-    const fuelSurcharge = distanceMiles * 0.25;
-    const accessorials = 75;
-    const adminOverhead = 35;
-    const crossBorderFees = crossBorder ? 250 : 0;
-    const estimatedFactoringFee = (baseCost + fuelSurcharge + accessorials) * 0.03;
-
-    return {
-      baseCost: Math.round(baseCost * 100) / 100,
-      deadheadCost: Math.round(deadheadCost * 100) / 100,
-      fuelSurcharge: Math.round(fuelSurcharge * 100) / 100,
-      accessorials,
-      adminOverhead,
-      crossBorderFees,
-      factoringFee: Math.round(estimatedFactoringFee * 100) / 100,
-      total: Math.round(
-        (baseCost + fuelSurcharge + accessorials + adminOverhead + crossBorderFees + estimatedFactoringFee) * 100
-      ) / 100,
-    };
-  }
-
-  /**
-   * Compute negotiation envelope from cost and rates
-   */
-  private computeNegotiationParams(totalCost: number, rates: RateCascadeResult, currency: string): NegotiationParams {
-    const minMargin = currency === 'CAD' ? 270 : 200;
-    const targetMargin = currency === 'CAD' ? 470 : 350;
-    const stretchMargin = currency === 'CAD' ? 675 : 500;
-
-    const minAcceptableRate = totalCost + minMargin;
-    const targetRate = totalCost + targetMargin;
-    const stretchRate = totalCost + stretchMargin;
-
-    // Initial offer: target rate, capped at 102% of best market rate
-    let initialOffer = targetRate;
-    if (initialOffer > rates.bestRate * 1.02) {
-      initialOffer = Math.min(rates.bestRate * 1.02, targetRate);
-    }
-    initialOffer = Math.max(initialOffer, minAcceptableRate); // Never open below minimum
-
-    // Concession ladder
-    const maxConcession = initialOffer - minAcceptableRate;
-    const concessionStep1 = initialOffer - maxConcession * 0.33;
-    const concessionStep2 = initialOffer - maxConcession * 0.67;
-    const finalOffer = minAcceptableRate;
-
-    return {
-      initialOffer: Math.round(initialOffer),
-      concessionStep1: Math.round(concessionStep1),
-      concessionStep2: Math.round(concessionStep2),
-      finalOffer: Math.round(finalOffer),
-      walkAwayRate: Math.round(minAcceptableRate),
-      minMargin,
-      targetMargin,
-      stretchMargin,
-      marginEnvelope: {
-        floor: Math.round(minAcceptableRate - totalCost),
-        target: Math.round(targetRate - totalCost),
-        stretch: Math.round(stretchRate - totalCost),
+        cost: cost.total,
+        strategy: strategy.approach,
+        intelligence,
       },
     };
   }
 
   /**
-   * Determine negotiation strategy (rule-based, no Claude API needed for this)
+   * Rate cascade — 6 sources in priority order, plus the posted rate as an
+   * anchor. The posted_rate from a load board is "what this shipper is willing
+   * to pay" and dominates static benchmarks when present, since the benchmark
+   * table reflects carrier-side per-mile costs and tends to undershoot
+   * shipper-paying rates on short-haul lanes.
+   *
+   *   Source 1: Historical loads on this lane         — `loads` table
+   *   Source 2: DAT RateView API                       — TODO
+   *   Source 3: Truckstop API                          — TODO
+   *   Source 4: Manual rate cache                      — TODO
+   *   Source 5: Claude AI estimate                     — optional
+   *   Source 6: Benchmark fallback                     — always available
+   *   Anchor:   Posted rate                            — used when present
    */
-  private determineStrategy(
-    load: any,
-    rates: RateCascadeResult,
-    negotiation: NegotiationParams
-  ): { approach: string; reasoning: string } {
-    const estimatedMargin = negotiation.initialOffer - rates.midRate > 0
-      ? negotiation.marginEnvelope.target
-      : negotiation.marginEnvelope.floor;
+  private async runRateCascade(
+    load: ResearchJobPayload['qualifiedLoad'],
+    distance: { miles: number; km: number },
+  ): Promise<RateCascadeResult> {
+    const sources: string[] = [];
+    const currency: 'CAD' | 'USD' = load.origin.country === 'CA' ? 'CAD' : 'USD';
 
-    if (estimatedMargin >= negotiation.stretchMargin && rates.confidence > 0.7) {
-      return {
-        approach: 'aggressive',
-        reasoning: 'Strong margin opportunity with high-confidence rate data. Push for stretch rate.',
-      };
+    let bestEstimate: { mid: number; range: number; confidence: number; source: string } | null = null;
+
+    const historical = await this.lookupHistoricalRate(load);
+    if (historical) {
+      sources.push('historical');
+      bestEstimate = { ...historical, source: 'historical' };
     }
 
-    if (estimatedMargin >= negotiation.targetMargin) {
-      return {
-        approach: 'standard',
-        reasoning: 'Healthy margin at target rate. Standard negotiation approach.',
-      };
+    if (this.claudeService) {
+      const claude = await this.tryClaudeEstimate(load, distance.miles).catch((err) => {
+        logger.warn('[Researcher] Claude estimate failed; continuing cascade', err);
+        return null;
+      });
+      if (claude) {
+        sources.push('claude_estimate');
+        if (!bestEstimate || claude.confidence > bestEstimate.confidence) {
+          bestEstimate = { ...claude, source: 'claude_estimate' };
+        }
+      }
     }
 
-    if (estimatedMargin >= negotiation.minMargin) {
-      return {
-        approach: 'standard',
-        reasoning: 'Margin is viable but tight. Be prepared to hold firm on rate.',
-      };
+    if (!bestEstimate) {
+      const benchmark = getBenchmarkRate(
+        normalizeEquipment(load.equipmentType),
+        distance.km,
+        getCurrentSeason(),
+      );
+      const mid = Math.round(benchmark.ratePerMile * distance.miles);
+      sources.push('benchmark');
+      bestEstimate = { mid, range: 0.15, confidence: 0.45, source: 'benchmark' };
     }
+
+    // Anchor: posted_rate is a real shipper-paying signal when available, and
+    // the benchmark table tends to undershoot on short-haul. If posted is
+    // notably higher than the cascade mid, blend toward it (75/25 weighting
+    // pulls confidence up too).
+    if (load.postedRate && load.postedRate > 0) {
+      sources.push('posted');
+      if (load.postedRate > bestEstimate.mid * 1.1) {
+        const blendedMid = Math.round(load.postedRate * 0.75 + bestEstimate.mid * 0.25);
+        bestEstimate = {
+          mid: blendedMid,
+          range: 0.12,
+          confidence: Math.min(bestEstimate.confidence + 0.2, 0.85),
+          source: bestEstimate.source,
+        };
+      }
+    }
+
+    const mid = Math.round(bestEstimate.mid);
+    const floor = Math.round(mid * (1 - bestEstimate.range));
+    const best = Math.round(mid * (1 + bestEstimate.range));
 
     return {
-      approach: 'walk',
-      reasoning: 'Margin below minimum threshold. Proceed with call but prepared to decline.',
+      floorRate: floor,
+      midRate: mid,
+      bestRate: best,
+      confidence: bestEstimate.confidence,
+      sources,
+      currency,
     };
   }
 
   /**
-   * Default shipper profile for new shippers
+   * Source 1: Look up historical rates for similar loads on this lane.
+   * Queries the `loads` table for delivered loads in the same origin state →
+   * destination state corridor with matching equipment over the last 90 days.
+   *
+   * Uses `revenue` (shipper-paying rate) — the broker's revenue is what we
+   * want as a market-rate signal for new loads. Equipment values like 'Dry
+   * Van' / 'Reefer' match the canonical TMS equipment column.
    */
-  private defaultShipperProfile(): ShipperProfile {
+  private async lookupHistoricalRate(
+    load: ResearchJobPayload['qualifiedLoad'],
+  ): Promise<{ mid: number; range: number; confidence: number } | null> {
+    try {
+      const result = await db.query<{ avg_rate: string | null; n: string }>(
+        `SELECT AVG(revenue)::numeric AS avg_rate, COUNT(*)::int AS n
+         FROM loads
+         WHERE origin ILIKE $1
+           AND destination ILIKE $2
+           AND equipment ILIKE $3
+           AND status IN ('Delivered', 'Invoiced', 'Closed')
+           AND created_at > NOW() - INTERVAL '90 days'
+           AND revenue IS NOT NULL AND revenue > 0`,
+        [`%, ${load.origin.state}`, `%, ${load.destination.state}`, `%${load.equipmentType}%`],
+      );
+
+      const row = result.rows[0];
+      const n = Number(row?.n ?? 0);
+      const avg = row?.avg_rate ? Number(row.avg_rate) : 0;
+      if (n < 2 || avg <= 0) return null;
+
+      const confidence = Math.min(0.5 + n * 0.05, 0.9);
+      return { mid: Math.round(avg), range: 0.12, confidence };
+    } catch (err) {
+      logger.warn('[Researcher] Historical lookup failed; skipping source 1', err);
+      return null;
+    }
+  }
+
+  /**
+   * Source 5: Optional Claude estimate. Falls through silently if anything goes
+   * wrong — the cascade is designed so Source 6 always provides a fallback.
+   */
+  private async tryClaudeEstimate(
+    load: ResearchJobPayload['qualifiedLoad'],
+    distanceMiles: number,
+  ): Promise<{ mid: number; range: number; confidence: number } | null> {
+    if (!this.claudeService) return null;
+
+    const jobId = `research-${Date.now()}`;
+    this.claudeService.initializeBudget(jobId, 10000, 5000);
+
+    const result = await this.claudeService.research(
+      {
+        loadId: 'pipeline-research',
+        originCity: load.origin.city,
+        originState: load.origin.state,
+        destinationCity: load.destination.city,
+        destinationState: load.destination.state,
+        distanceMiles,
+        equipmentType: load.equipmentType,
+        pickupDate: load.pickupDate,
+        originCountry: load.origin.country,
+      } as any,
+      jobId,
+    );
+
+    const intel = result.data;
     return {
+      mid: intel.rates.midRate,
+      range:
+        intel.rates.bestRate > 0
+          ? (intel.rates.bestRate - intel.rates.floorRate) / (2 * intel.rates.midRate)
+          : 0.15,
+      confidence: intel.rates.confidence,
+    };
+  }
+
+  /**
+   * Profile a shipper from history. Falls back to defaults for new shippers.
+   */
+  private async profileShipper(
+    payload: ResearchJobPayload,
+    load: ResearchJobPayload['qualifiedLoad'],
+  ): Promise<ShipperProfile> {
+    const phone = (payload as any).shipperPhone || null;
+
+    const defaults: ShipperProfile = {
       preferredLanguage: 'en',
-      preferredCurrency: 'CAD',
+      preferredCurrency: load.origin.country === 'CA' ? 'CAD' : 'USD',
       previousCallCount: 0,
       previousOutcomes: [],
-      postingFrequency: 0,
       bestPerformingPersona: null,
       lastBookedRate: null,
+      lastBookedDate: null,
       fatigueScore: 0,
+      isRepeatShipper: false,
+      knownObjections: [],
+      notes: null,
+      companyName: null,
+      contactName: null,
+    };
+
+    if (!phone) return defaults;
+
+    try {
+      const prefRes = await db.query<{
+        preferred_language: string | null;
+        preferred_currency: string | null;
+        total_calls_received: number | null;
+        total_bookings: number | null;
+        best_performing_persona: string | null;
+        avg_agreed_rate: string | null;
+        last_objection_type: string | null;
+        company_name: string | null;
+        contact_name: string | null;
+      }>(`SELECT * FROM shipper_preferences WHERE phone = $1 LIMIT 1`, [phone]);
+
+      const recentRes = await db.query<{
+        outcome: string;
+        agreed_rate: string | null;
+        call_initiated_at: Date;
+      }>(
+        `SELECT outcome, agreed_rate, call_initiated_at
+         FROM agent_calls
+         WHERE phone_number_called = $1
+         ORDER BY call_initiated_at DESC
+         LIMIT 10`,
+        [phone],
+      );
+
+      const previousOutcomes = recentRes.rows.map((r) => r.outcome).filter(Boolean);
+      const recentCount = recentRes.rows.filter(
+        (r) =>
+          new Date(r.call_initiated_at).getTime() > Date.now() - 7 * 86400_000,
+      ).length;
+
+      const lastBooked = recentRes.rows.find((r) => r.outcome === 'booked' && r.agreed_rate);
+
+      const pref = prefRes.rows[0];
+
+      return {
+        preferredLanguage: ((pref?.preferred_language as 'en' | 'fr') || 'en'),
+        preferredCurrency: ((pref?.preferred_currency as 'CAD' | 'USD') ||
+          defaults.preferredCurrency),
+        previousCallCount: pref?.total_calls_received ?? recentRes.rows.length,
+        previousOutcomes,
+        bestPerformingPersona: pref?.best_performing_persona ?? null,
+        lastBookedRate: lastBooked?.agreed_rate ? Number(lastBooked.agreed_rate) : null,
+        lastBookedDate: lastBooked
+          ? new Date(lastBooked.call_initiated_at).toISOString().split('T')[0]
+          : null,
+        fatigueScore: recentCount,
+        isRepeatShipper: (pref?.total_bookings ?? 0) > 0,
+        knownObjections: pref?.last_objection_type ? [pref.last_objection_type] : [],
+        notes: null,
+        companyName: pref?.company_name ?? null,
+        contactName: pref?.contact_name ?? null,
+      };
+    } catch (err) {
+      logger.warn('[Researcher] Shipper profile lookup failed; using defaults', err);
+      return defaults;
+    }
+  }
+
+  private determineStrategy(
+    rates: RateCascadeResult,
+    cost: CostBreakdown,
+    negotiation: ReturnType<typeof calculateNegotiationParams>,
+    shipperProfile: ShipperProfile,
+  ): { approach: 'aggressive' | 'standard' | 'walk'; reasoning: string } {
+    const minMargin = rates.currency === 'CAD' ? 270 : 200;
+    const targetMargin = rates.currency === 'CAD' ? 470 : 350;
+    const stretchMargin = rates.currency === 'CAD' ? 675 : 500;
+
+    // Hard walk: market ceiling can't clear the floor margin. The voice agent
+    // would have to demand >100% of best rate. Don't waste a call.
+    if (rates.bestRate < cost.total + minMargin) {
+      return {
+        approach: 'walk',
+        reasoning: `Market ceiling $${rates.bestRate} below cost $${cost.total} + min margin $${minMargin}. Decline gracefully.`,
+      };
+    }
+
+    const expectedMargin = negotiation.initialOffer - cost.total;
+
+    if (expectedMargin >= stretchMargin && rates.confidence >= 0.7) {
+      return {
+        approach: 'aggressive',
+        reasoning: `Strong margin ($${expectedMargin}) with high-confidence rate data (${rates.confidence.toFixed(2)}) from ${rates.sources.join(', ')}. Push for stretch rate.`,
+      };
+    }
+
+    if (expectedMargin >= targetMargin) {
+      return {
+        approach: 'standard',
+        reasoning: `Healthy margin ($${expectedMargin}) at target rate. Standard approach with cushion to concede.`,
+      };
+    }
+
+    return {
+      approach: 'standard',
+      reasoning: `Margin viable but tight (expected $${expectedMargin}). Hold firm on rate, lean on service value.`,
     };
   }
 
-  /**
-   * Override updatePipelineLoad to store research results
-   */
   protected async updatePipelineLoad(pipelineLoadId: number, result: any): Promise<void> {
-    try {
-      const intel = result.details.intelligence;
+    const intel: ResearchIntelligence = result.details?.intelligence;
+    if (!intel) {
+      logger.warn(`[Researcher] No intelligence in result for load ${pipelineLoadId}; skipping update`);
+      return;
+    }
 
-      // TODO: Update pipeline_loads with research results
-      // After this, check if Agent 4 (Ranker) is also done
-      // If both done, advance to 'matched' and enqueue to brief-queue
+    await db.query(
+      `UPDATE pipeline_loads
+       SET research_completed_at = NOW(),
+           market_rate_floor = $2,
+           market_rate_mid = $3,
+           market_rate_best = $4,
+           recommended_strategy = $5,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [
+        pipelineLoadId,
+        intel.rates.floorRate,
+        intel.rates.midRate,
+        intel.rates.bestRate,
+        intel.strategy.approach,
+      ],
+    );
 
-      // Step 1: Update with research results
-      await db.query(
-        `UPDATE pipeline_loads
-         SET research_completed_at = NOW(),
-             market_rate_floor = $2,
-             market_rate_mid = $3,
-             market_rate_best = $4,
-             recommended_strategy = $5,
-             updated_at = NOW()
-         WHERE id = $1`,
-        [
-          pipelineLoadId,
-          intel.rates.floorRate,
-          intel.rates.midRate,
-          intel.rates.bestRate,
-          intel.strategy.approach,
-        ]
-      );
-
-      // Step 2: Check if Agent 4 (Ranker) is also done
-      const check = await db.query(
-        'SELECT carrier_match_count FROM pipeline_loads WHERE id = $1',
-        [pipelineLoadId]
-      );
-
-      if (check.rows[0]?.carrier_match_count > 0) {
-        // Both agents done - advance to 'matched' and enqueue to brief-queue
-        await db.query(
-          "UPDATE pipeline_loads SET stage = 'matched', stage_updated_at = NOW() WHERE id = $1",
-          [pipelineLoadId]
-        );
-
-        // TODO: Enqueue to brief-queue with both research + matching results
-        // const briefPayload = this.buildBriefPayload(pipelineLoadId, result);
-        // await this.briefQueue.add('brief', briefPayload, { priority: ... });
-
-        logger.info(
-          `[Researcher] Completion gate triggered. Load ${pipelineLoadId} advanced to 'matched' and enqueued to brief-queue.`
-        );
-      } else {
-        logger.debug(
-          `[Researcher] Agent 4 not yet done. Load ${pipelineLoadId} waiting for carrier matching to complete.`
-        );
-      }
-    } catch (error) {
-      logger.error(`[Researcher] Failed to update pipeline load ${pipelineLoadId}:`, error);
-      throw error;
+    const gate = await onResearcherComplete(db as any, pipelineLoadId);
+    if (gate.shouldEnqueue) {
+      const briefPayload = await buildBriefPayload(db as any, pipelineLoadId);
+      await this.briefQueue.add('compile', briefPayload, { priority: briefPayload.priority });
+      logger.info(`[Researcher] Gate opened for load ${pipelineLoadId} → brief-queue`);
+    } else {
+      logger.debug(`[Researcher] Gate not yet open for load ${pipelineLoadId}: ${gate.reason}`);
     }
   }
 }
-
-// TODO: Export initialized worker
-// export const researcherWorker = new ResearcherWorker(redisClient, briefQueue);
-
-// TODO: Implement additional functions
-// - getDistance(origin, destination): Promise<Distance>
-// - profileShipper(phone): Promise<ShipperProfile>
-// - claudeRateEstimate(load): Promise<RateCascadeResult | null>
