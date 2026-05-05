@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import crypto from "crypto"
 
@@ -14,6 +14,8 @@ export async function POST(req: NextRequest) {
     return apiError("Forbidden", 403)
   }
 
+  const ctx = requireTenantContext(req)
+
   try {
     const body = await req.json()
     const { carrierId, loadId, firstName, lastName, phone, email } = body
@@ -25,45 +27,49 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const sql = getDb()
+    type InviteResult =
+      | { ok: false; error: string; status: number }
+      | { ok: true; driverId: string; inviteToken: string }
 
-    // Validate load exists and belongs to the specified carrier
-    const loadRows = await sql`SELECT id, carrier_id FROM loads WHERE id = ${loadId}`
-    if (loadRows.length === 0) {
-      return apiError("Load not found", 404)
-    }
-    const load = loadRows[0] as any
-    // Non-admin users may only invite drivers for loads assigned to their carrier
-    if (user.role !== "admin" && load.carrier_id && load.carrier_id !== carrierId) {
-      return apiError("Forbidden: load does not belong to this carrier", 403)
-    }
-
-    const driverId = crypto.randomUUID()
-
-    // Create driver with pending_invite status
-    await sql`
-      INSERT INTO drivers (id, carrier_id, first_name, last_name, phone, email, invite_status, invite_token, invited_at, status, created_at)
-      VALUES (
-        ${driverId},
-        ${carrierId},
-        ${firstName},
-        ${lastName},
-        ${phone},
-        ${email || null},
-        'pending_invite',
-        gen_random_uuid(),
-        now(),
-        'available',
-        now()
+    const result = await withTenant(ctx.tenantId, async (client): Promise<InviteResult> => {
+      // Validate load exists in this tenant and belongs to the specified carrier
+      const { rows: loadRows } = await client.query(
+        `SELECT id, carrier_id FROM loads WHERE id = $1 LIMIT 1`,
+        [loadId],
       )
-    `
+      if (loadRows.length === 0) {
+        return { ok: false, error: "Load not found", status: 404 }
+      }
+      const load = loadRows[0]
+      if (user.role !== "admin" && load.carrier_id && load.carrier_id !== carrierId) {
+        return { ok: false, error: "Forbidden: load does not belong to this carrier", status: 403 }
+      }
 
-    // Assign driver to load
-    await sql`UPDATE loads SET driver_id = ${driverId} WHERE id = ${loadId}`
+      const driverId = crypto.randomUUID()
 
-    // Fetch the created driver to get the generated invite_token
-    const rows = await sql`SELECT invite_token FROM drivers WHERE id = ${driverId}`
-    const inviteToken = rows[0].invite_token as string
+      await client.query(
+        `INSERT INTO drivers (id, carrier_id, first_name, last_name, phone, email, invite_status, invite_token, invited_at, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending_invite', gen_random_uuid(), now(), 'available', now())`,
+        [driverId, carrierId, firstName, lastName, phone, email || null],
+      )
+
+      await client.query(
+        `UPDATE loads SET driver_id = $1 WHERE id = $2`,
+        [driverId, loadId],
+      )
+
+      const { rows: tokenRows } = await client.query(
+        `SELECT invite_token FROM drivers WHERE id = $1 LIMIT 1`,
+        [driverId],
+      )
+      return { ok: true, driverId, inviteToken: String(tokenRows[0].invite_token) }
+    })
+
+    if (!result.ok) {
+      return apiError(result.error, result.status)
+    }
+
+    const { driverId, inviteToken } = result
 
     // Build invite URL
     const baseUrl = process.env.NEXT_PUBLIC_DRIVER_APP_URL || "http://localhost:3001"

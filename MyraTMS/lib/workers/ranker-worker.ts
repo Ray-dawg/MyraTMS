@@ -16,6 +16,12 @@ import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { matchCarriers, storeMatchResults, type CarrierMatch, type MatchRequest } from '@/lib/matching';
+import { LEGACY_DEFAULT_TENANT_ID } from '@/lib/auth';
+
+// Engine 2 is implicitly single-tenant until migration 030 (PENDING) plumbs
+// per-load tenant_id into pipeline_loads. Until then, all Engine 2 work pins
+// to the Myra default tenant. Tracked in STACK_DRIFT_REPORT.md.
+const ENGINE2_TENANT_ID = LEGACY_DEFAULT_TENANT_ID;
 import { onRankerComplete, buildBriefPayload } from '@/lib/pipeline/gate';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
@@ -117,7 +123,7 @@ export class RankerWorker extends BaseWorker<MatchJobPayload> {
       excludeCarriers: [],
     };
 
-    const matchResponse = await matchCarriers(db.sql, matchRequest);
+    const matchResponse = await matchCarriers(ENGINE2_TENANT_ID, matchRequest);
     const viable = matchResponse.matches.filter((m) => m.match_grade !== 'F');
 
     if (viable.length === 0) {
@@ -136,7 +142,7 @@ export class RankerWorker extends BaseWorker<MatchJobPayload> {
     }
 
     // Persist to the audit table (existing pattern).
-    await storeMatchResults(db.sql, load.load_id, viable);
+    await storeMatchResults(ENGINE2_TENANT_ID, load.load_id, viable);
 
     // Build the in-memory carrier stack for downstream agents.
     const carrierStack: CarrierStack = await Promise.all(

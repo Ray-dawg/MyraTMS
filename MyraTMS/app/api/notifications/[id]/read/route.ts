@@ -1,23 +1,22 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(request)
   if (!user) return apiError("Unauthorized", 401)
-
+  const ctx = requireTenantContext(request)
   const { id } = await params
-  const sql = getDb()
 
-  await sql`
-    UPDATE notifications SET read = true
-    WHERE id = ${id}
-      AND (user_id = ${user.userId} OR user_id IS NULL)
-  `
+  await withTenant(ctx.tenantId, async (client) => {
+    await client.query(
+      `UPDATE notifications SET read = true
+        WHERE id = $1
+          AND (user_id = $2 OR user_id IS NULL)`,
+      [id, user.userId],
+    )
+  })
 
   return NextResponse.json({ success: true })
 }

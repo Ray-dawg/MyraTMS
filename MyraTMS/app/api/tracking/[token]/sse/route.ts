@@ -1,35 +1,21 @@
 import { NextRequest } from "next/server"
-import { getDb } from "@/lib/db"
+import { withTenant, resolveTrackingToken } from "@/lib/db/tenant-context"
 
 /**
  * GET /api/tracking/[token]/sse
- * Public SSE stream. Sends 'update' events every 5 seconds with
- * current position + status. Closes when load is delivered.
- * Sends heartbeat comments every 15 seconds.
+ * Public SSE stream of position + status updates.
+ * Resolves the token once at start (via resolveTrackingToken), then polls
+ * inside withTenant on each tick.
  */
 export async function GET(
   _request: NextRequest,
-  { params }: { params: Promise<{ token: string }> }
+  { params }: { params: Promise<{ token: string }> },
 ) {
   const { token } = await params
-  const sql = getDb()
 
-  // Validate token
-  const tokens = await sql`
-    SELECT load_id, expires_at FROM tracking_tokens
-    WHERE token = ${token}
-    LIMIT 1
-  `
-
-  if (tokens.length === 0) {
-    return new Response("Token not found", { status: 404 })
-  }
-
-  const { load_id, expires_at } = tokens[0]
-
-  if (expires_at && new Date(expires_at) < new Date()) {
-    return new Response("Token expired", { status: 410 })
-  }
+  const resolved = await resolveTrackingToken(token)
+  if (!resolved) return new Response("Token not found", { status: 404 })
+  const { tenantId, loadId } = resolved
 
   const encoder = new TextEncoder()
   let cancelled = false
@@ -43,80 +29,73 @@ export async function GET(
           clearInterval(interval)
           return
         }
-
         tickCount++
 
         try {
-          // Every 15s (every 3rd tick) send a heartbeat
           if (tickCount % 3 === 0) {
             controller.enqueue(encoder.encode(`:heartbeat\n\n`))
           }
 
-          // Fetch current load state
-          const rows = await sql`
-            SELECT
-              status, current_lat, current_lng, current_eta,
-              origin, destination, updated_at
-            FROM loads
-            WHERE id = ${load_id}
-            LIMIT 1
-          `
+          const load = await withTenant(tenantId, async (client) => {
+            const { rows } = await client.query(
+              `SELECT status, current_lat, current_lng, current_eta,
+                      origin, destination, updated_at
+                 FROM loads
+                WHERE id = $1
+                LIMIT 1`,
+              [loadId],
+            )
+            return rows[0] ?? null
+          })
 
-          if (rows.length === 0) {
+          if (!load) {
             clearInterval(interval)
-            try { controller.close() } catch { /* noop */ }
+            try { controller.close() } catch {}
             return
           }
 
-          const load = rows[0]
           const isDelivered = load.status === "delivered" || load.status === "Delivered"
-
           const payload = {
             status: load.status,
-            currentLat: load.current_lat ? parseFloat(load.current_lat) : null,
-            currentLng: load.current_lng ? parseFloat(load.current_lng) : null,
+            currentLat: load.current_lat ? Number.parseFloat(load.current_lat) : null,
+            currentLng: load.current_lng ? Number.parseFloat(load.current_lng) : null,
             currentEta: load.current_eta || null,
             lastUpdated: load.updated_at || new Date().toISOString(),
             isDelivered,
           }
+          controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`))
 
-          const data = `event: update\ndata: ${JSON.stringify(payload)}\n\n`
-          controller.enqueue(encoder.encode(data))
-
-          // Close stream when delivered
           if (isDelivered) {
             clearInterval(interval)
-            try { controller.close() } catch { /* noop */ }
+            try { controller.close() } catch {}
           }
         } catch (err) {
           console.error("[SSE] Error fetching load data:", err)
-          // Don't close on transient errors; just skip this tick
         }
-      }, 5000) // 5 second interval
+      }, 5000)
 
-      // Send an initial update immediately
       try {
-        const rows = await sql`
-          SELECT
-            status, current_lat, current_lng, current_eta,
-            origin, destination, updated_at
-          FROM loads
-          WHERE id = ${load_id}
-          LIMIT 1
-        `
-
-        if (rows.length > 0) {
-          const load = rows[0]
+        const load = await withTenant(tenantId, async (client) => {
+          const { rows } = await client.query(
+            `SELECT status, current_lat, current_lng, current_eta,
+                    origin, destination, updated_at
+               FROM loads
+              WHERE id = $1
+              LIMIT 1`,
+            [loadId],
+          )
+          return rows[0] ?? null
+        })
+        if (load) {
           const payload = {
             status: load.status,
-            currentLat: load.current_lat ? parseFloat(load.current_lat) : null,
-            currentLng: load.current_lng ? parseFloat(load.current_lng) : null,
+            currentLat: load.current_lat ? Number.parseFloat(load.current_lat) : null,
+            currentLng: load.current_lng ? Number.parseFloat(load.current_lng) : null,
             currentEta: load.current_eta || null,
             lastUpdated: load.updated_at || new Date().toISOString(),
             isDelivered: load.status === "delivered" || load.status === "Delivered",
           }
-          const data = `event: update\ndata: ${JSON.stringify(payload)}\n\n`
-          controller.enqueue(encoder.encode(data))
+          controller.enqueue(encoder.encode(`event: update\ndata: ${JSON.stringify(payload)}\n\n`))
         }
       } catch {
         // initial send failed; interval will retry

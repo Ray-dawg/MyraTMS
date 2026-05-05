@@ -1,36 +1,36 @@
 import PDFDocument from "pdfkit"
 import { PassThrough } from "stream"
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
 
 const DEFAULT_TERMS = `Carrier warrants active FMCSA operating authority and insurance meeting minimum requirements. Carrier is liable for loss or damage to cargo from pickup to delivery. Detention: 2 hours free time at each stop, $75/hour thereafter. TONU: $250 if cancelled after truck is dispatched. Carrier may not broker, re-broker, or assign this load without written consent.`
 
-export async function generateRateCon(loadId: string): Promise<Buffer> {
-  const sql = getDb()
+export async function generateRateCon(tenantId: number, loadId: string): Promise<Buffer> {
+  const { load, settingsMap } = await withTenant(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `SELECT l.*, c.company AS carrier_company, c.mc_number, c.dot_number,
+              c.contact_name AS carrier_contact, c.contact_phone AS carrier_phone,
+              c.insurance_expiry
+         FROM loads l
+         LEFT JOIN carriers c ON l.carrier_id = c.id
+        WHERE l.id = $1`,
+      [loadId],
+    )
+    if (rows.length === 0) throw new Error(`Load ${loadId} not found`)
 
-  const rows = await sql`
-    SELECT l.*, c.company AS carrier_company, c.mc_number, c.dot_number,
-           c.contact_name AS carrier_contact, c.contact_phone AS carrier_phone,
-           c.insurance_expiry
-    FROM loads l
-    LEFT JOIN carriers c ON l.carrier_id = c.id
-    WHERE l.id = ${loadId}
-  `
+    const { rows: settingsRows } = await client.query(
+      `SELECT settings_key, settings_value FROM settings
+        WHERE settings_key IN ('rate_con_terms', 'company_name', 'broker_mc', 'broker_website')
+          AND user_id IS NULL`,
+    )
+    const settingsMap = Object.fromEntries(
+      settingsRows.map((r) => [
+        String(r.settings_key),
+        String(r.settings_value).replace(/^"|"$/g, ""),
+      ]),
+    )
+    return { load: rows[0], settingsMap }
+  })
 
-  if (rows.length === 0) throw new Error(`Load ${loadId} not found`)
-  const load = rows[0]
-
-  // Fetch global settings: terms + brokerage branding in one query
-  const settingsRows = await sql`
-    SELECT settings_key, settings_value FROM settings
-    WHERE settings_key IN ('rate_con_terms', 'company_name', 'broker_mc', 'broker_website')
-      AND user_id IS NULL
-  `
-  const settingsMap = Object.fromEntries(
-    settingsRows.map((r) => [
-      String(r.settings_key),
-      String(r.settings_value).replace(/^"|"$/g, ""),
-    ])
-  )
   const terms = settingsMap.rate_con_terms || DEFAULT_TERMS
   const companyName = settingsMap.company_name || "Myra Logistics"
   const brokerMC = settingsMap.broker_mc || "MC# 123456"
@@ -50,7 +50,7 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
     passthrough.on("error", reject)
     doc.pipe(passthrough)
 
-    const pageWidth = doc.page.width - 100 // accounting for margins
+    const pageWidth = doc.page.width - 100
 
     // ── HEADER ──
     doc.font("Helvetica-Bold").fontSize(20).text("RATE CONFIRMATION", { align: "center" })
@@ -60,11 +60,9 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
     doc.fillColor("#000000")
     doc.moveDown(0.5)
 
-    // Horizontal rule
     doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor("#cccccc").lineWidth(0.5).stroke()
     doc.moveDown(0.5)
 
-    // Document ref + date
     doc.fontSize(9).fillColor("#666666")
     doc.text(`Document: ${docRef}`, 50, doc.y, { align: "right" })
     doc.text(`Date: ${today}`, { align: "right" })
@@ -88,7 +86,6 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
     const detailsY = doc.y
     const halfWidth = (pageWidth - 20) / 2
 
-    // Pickup (left)
     doc.fontSize(8).fillColor("#999999").text("PICKUP", 60, detailsY + 10)
     doc.fillColor("#000000").fontSize(10).font("Helvetica-Bold")
     doc.text(String(load.origin || "N/A"), 60, detailsY + 24, { width: halfWidth - 20 })
@@ -103,7 +100,6 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
     }
     doc.text(pickupTime, 60, doc.y + 2, { width: halfWidth - 20 })
 
-    // Delivery (right)
     const rightX = 50 + halfWidth + 20
     doc.fontSize(8).fillColor("#999999").text("DELIVERY", rightX + 10, detailsY + 10)
     doc.fillColor("#000000").fontSize(10).font("Helvetica-Bold")
@@ -114,24 +110,21 @@ export async function generateRateCon(loadId: string): Promise<Buffer> {
       : "TBD"
     doc.text(deliveryDate, rightX + 10, doc.y + 2, { width: halfWidth - 20 })
 
-    // Draw two boxes side by side
     const detailsH = 74
     doc.rect(50, detailsY, halfWidth, detailsH).strokeColor("#dddddd").lineWidth(0.5).stroke()
     doc.rect(50 + halfWidth + 20, detailsY, halfWidth, detailsH).strokeColor("#dddddd").lineWidth(0.5).stroke()
     doc.y = detailsY + detailsH + 10
 
-    // Equipment / Weight / Commodity / Reference
     doc.fontSize(9).fillColor("#333333")
     const details = [
       load.equipment ? `Equipment: ${load.equipment}` : null,
       load.weight ? `Weight: ${load.weight}` : null,
       load.commodity ? `Commodity: ${load.commodity}` : null,
-    ].filter(Boolean).join("  |  ")
+    ]
+      .filter(Boolean)
+      .join("  |  ")
     if (details) doc.text(details, 55)
-
-    if (load.reference_number) {
-      doc.text(`Reference: ${load.reference_number}`, 55)
-    }
+    if (load.reference_number) doc.text(`Reference: ${load.reference_number}`, 55)
     doc.fillColor("#000000")
     doc.moveDown(1)
 

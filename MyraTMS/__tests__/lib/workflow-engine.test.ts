@@ -3,15 +3,24 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // ---------------------------------------------------------------------------
 // Unit tests for lib/workflow-engine.ts
 //
-// We mock @/lib/db so no real database connection is needed. The tests
-// exercise condition evaluation and action execution logic.
+// We mock @/lib/db/tenant-context so no real database connection is needed.
+// The engine reaches the database exclusively through withTenant(), so we
+// stub that to invoke the callback with a fake PoolClient whose .query()
+// is a vi mock. All tests exercise condition evaluation and action logic.
 // ---------------------------------------------------------------------------
 
-// Mock getDb before importing the module under test
-const mockSql = vi.fn()
+// Tenant id used in every test call. Real value irrelevant — the mock
+// short-circuits the RLS-enforced tenant scoping.
+const TENANT_ID = 2
 
-vi.mock("@/lib/db", () => ({
-  getDb: () => mockSql,
+// Mock the client.query() that the engine calls inside withTenant().
+const mockClient = { query: vi.fn() }
+
+vi.mock("@/lib/db/tenant-context", () => ({
+  withTenant: vi.fn(
+    async <T,>(_tenantId: number, cb: (client: typeof mockClient) => Promise<T>) =>
+      cb(mockClient),
+  ),
 }))
 
 // Import AFTER mocking
@@ -24,25 +33,23 @@ import { executeWorkflows, type WorkflowContext } from "@/lib/workflow-engine"
 interface MockWorkflowRow {
   id: string
   name: string
-  conditions: string
-  actions: string
+  conditions: string | unknown[]
+  actions: string | unknown[]
 }
 
 /**
- * Configure the mock SQL function to return specific workflows on the
- * first call (the SELECT query), then resolve to empty on subsequent calls
- * (INSERT/UPDATE side-effect queries).
+ * Configure the mock client.query to return specific workflows on the first
+ * call (the SELECT) and empty result sets on subsequent calls (INSERT/UPDATE
+ * side-effects). Engine expects pg-style { rows: [...] } responses.
  */
 function setupMockWorkflows(workflows: MockWorkflowRow[]) {
   let callCount = 0
-  mockSql.mockImplementation((...args: unknown[]) => {
+  mockClient.query.mockImplementation(() => {
     callCount++
-    // First call is the SELECT query for active workflows
     if (callCount === 1) {
-      return Promise.resolve(workflows)
+      return Promise.resolve({ rows: workflows })
     }
-    // Subsequent calls are INSERT/UPDATE side-effects
-    return Promise.resolve([])
+    return Promise.resolve({ rows: [] })
   })
 }
 
@@ -72,14 +79,14 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", {
+    await executeWorkflows(TENANT_ID,"status_change", {
       loadId: "LD-001",
       oldStatus: "In Transit",
       newStatus: "Delivered",
     })
 
     // SELECT workflows + INSERT notification + UPDATE workflow metadata = 3 calls
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("does NOT fire workflow when 'equals' condition does not match", async () => {
@@ -99,13 +106,13 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", {
+    await executeWorkflows(TENANT_ID,"status_change", {
       loadId: "LD-001",
       newStatus: "Delivered",
     })
 
     // Only the SELECT query should fire; no actions executed
-    expect(mockSql).toHaveBeenCalledTimes(1)
+    expect(mockClient.query).toHaveBeenCalledTimes(1)
   })
 
   it("fires workflow when 'not_equals' condition matches", async () => {
@@ -125,10 +132,10 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { newStatus: "Delivered" })
+    await executeWorkflows(TENANT_ID,"status_change", { newStatus: "Delivered" })
 
     // SELECT + INSERT notification + UPDATE metadata
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("fires workflow when 'contains' condition matches (case-insensitive)", async () => {
@@ -148,9 +155,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { newStatus: "In Transit" })
+    await executeWorkflows(TENANT_ID,"status_change", { newStatus: "In Transit" })
 
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("does NOT fire when 'contains' condition does not match", async () => {
@@ -170,9 +177,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { newStatus: "Delivered" })
+    await executeWorkflows(TENANT_ID,"status_change", { newStatus: "Delivered" })
 
-    expect(mockSql).toHaveBeenCalledTimes(1)
+    expect(mockClient.query).toHaveBeenCalledTimes(1)
   })
 
   it("fires workflow when 'greater_than' condition matches", async () => {
@@ -192,9 +199,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("load_created", { margin: 2500 } as WorkflowContext)
+    await executeWorkflows(TENANT_ID,"load_created", { margin: 2500 } as WorkflowContext)
 
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("does NOT fire when 'greater_than' condition fails", async () => {
@@ -214,9 +221,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("load_created", { margin: 2500 } as WorkflowContext)
+    await executeWorkflows(TENANT_ID,"load_created", { margin: 2500 } as WorkflowContext)
 
-    expect(mockSql).toHaveBeenCalledTimes(1)
+    expect(mockClient.query).toHaveBeenCalledTimes(1)
   })
 
   it("fires workflow when 'less_than' condition matches", async () => {
@@ -236,9 +243,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("load_created", { margin: 200 } as WorkflowContext)
+    await executeWorkflows(TENANT_ID,"load_created", { margin: 200 } as WorkflowContext)
 
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("requires ALL conditions to pass (AND logic)", async () => {
@@ -260,13 +267,13 @@ describe("Condition evaluation via executeWorkflows", () => {
     ])
 
     // Only one condition matches (status matches, but margin is too low)
-    await executeWorkflows("status_change", {
+    await executeWorkflows(TENANT_ID,"status_change", {
       newStatus: "Delivered",
       margin: 500,
     } as WorkflowContext)
 
     // Only SELECT fires; no action because AND fails
-    expect(mockSql).toHaveBeenCalledTimes(1)
+    expect(mockClient.query).toHaveBeenCalledTimes(1)
   })
 
   it("fires when ALL conditions pass", async () => {
@@ -287,12 +294,12 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", {
+    await executeWorkflows(TENANT_ID,"status_change", {
       newStatus: "Delivered",
       margin: 2000,
     } as WorkflowContext)
 
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("fires when conditions array is empty (always match)", async () => {
@@ -310,9 +317,9 @@ describe("Condition evaluation via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("any_trigger", {})
+    await executeWorkflows(TENANT_ID,"any_trigger", {})
 
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 })
 
@@ -340,10 +347,10 @@ describe("Action execution via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { loadId: "LD-001", newStatus: "Delivered" })
+    await executeWorkflows(TENANT_ID,"status_change", { loadId: "LD-001", newStatus: "Delivered" })
 
     // SELECT + INSERT (send_email creates notification) + UPDATE metadata
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("executes update_status action", async () => {
@@ -361,10 +368,10 @@ describe("Action execution via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { loadId: "LD-001" })
+    await executeWorkflows(TENANT_ID,"status_change", { loadId: "LD-001" })
 
     // SELECT + UPDATE loads (update_status) + UPDATE workflows metadata
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("executes assign_carrier action", async () => {
@@ -382,10 +389,10 @@ describe("Action execution via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("load_created", { loadId: "LD-002" })
+    await executeWorkflows(TENANT_ID,"load_created", { loadId: "LD-002" })
 
     // SELECT + UPDATE loads (assign_carrier) + UPDATE workflows metadata
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("skips update_status when loadId is missing", async () => {
@@ -405,10 +412,10 @@ describe("Action execution via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", {})
+    await executeWorkflows(TENANT_ID,"status_change", {})
 
     // SELECT + UPDATE metadata only (no UPDATE loads because loadId is missing)
-    expect(mockSql).toHaveBeenCalledTimes(2)
+    expect(mockClient.query).toHaveBeenCalledTimes(2)
 
     warnSpy.mockRestore()
   })
@@ -432,10 +439,10 @@ describe("Action execution via executeWorkflows", () => {
       },
     ])
 
-    await executeWorkflows("status_change", { loadId: "LD-001" })
+    await executeWorkflows(TENANT_ID,"status_change", { loadId: "LD-001" })
 
     // SELECT + INSERT notif 1 + INSERT notif 2 + UPDATE metadata = 4 calls
-    expect(mockSql).toHaveBeenCalledTimes(4)
+    expect(mockClient.query).toHaveBeenCalledTimes(4)
   })
 })
 
@@ -447,79 +454,83 @@ describe("Workflow engine edge cases", () => {
   it("does nothing when no workflows match the trigger", async () => {
     setupMockWorkflows([])
 
-    await executeWorkflows("status_change", { loadId: "LD-001" })
+    await executeWorkflows(TENANT_ID,"status_change", { loadId: "LD-001" })
 
-    expect(mockSql).toHaveBeenCalledTimes(1) // just the SELECT
+    expect(mockClient.query).toHaveBeenCalledTimes(1) // just the SELECT
   })
 
   it("handles conditions stored as already-parsed objects", async () => {
     // The workflow engine handles both JSON string and pre-parsed conditions
     let callCount = 0
-    mockSql.mockImplementation(() => {
+    mockClient.query.mockImplementation(() => {
       callCount++
       if (callCount === 1) {
-        return Promise.resolve([
-          {
-            id: "wf-parsed",
-            name: "Pre-parsed",
-            // Already parsed (not a string)
-            conditions: [
-              { field: "newStatus", operator: "equals", value: "Delivered" },
-            ],
-            actions: [
-              {
-                type: "create_notification",
-                config: { title: "Pre-parsed test" },
-              },
-            ],
-          },
-        ])
+        return Promise.resolve({
+          rows: [
+            {
+              id: "wf-parsed",
+              name: "Pre-parsed",
+              // Already parsed (not a string)
+              conditions: [
+                { field: "newStatus", operator: "equals", value: "Delivered" },
+              ],
+              actions: [
+                {
+                  type: "create_notification",
+                  config: { title: "Pre-parsed test" },
+                },
+              ],
+            },
+          ],
+        })
       }
-      return Promise.resolve([])
+      return Promise.resolve({ rows: [] })
     })
 
-    await executeWorkflows("status_change", { newStatus: "Delivered" })
+    await executeWorkflows(TENANT_ID,"status_change", { newStatus: "Delivered" })
 
     // SELECT + INSERT notification + UPDATE metadata
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
   })
 
   it("continues processing remaining workflows if one throws", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
     let callCount = 0
-    mockSql.mockImplementation(() => {
+    mockClient.query.mockImplementation(() => {
       callCount++
       if (callCount === 1) {
-        return Promise.resolve([
-          {
-            id: "wf-fail",
-            name: "Failing Workflow",
-            conditions: JSON.stringify([]),
-            actions: "INVALID_JSON{{{", // will fail JSON.parse
-          },
-          {
-            id: "wf-ok",
-            name: "OK Workflow",
-            conditions: JSON.stringify([]),
-            actions: JSON.stringify([
-              {
-                type: "create_notification",
-                config: { title: "I should still fire" },
-              },
-            ]),
-          },
-        ])
+        return Promise.resolve({
+          rows: [
+            {
+              id: "wf-fail",
+              name: "Failing Workflow",
+              conditions: JSON.stringify([]),
+              actions: "INVALID_JSON{{{", // will fail JSON.parse
+            },
+            {
+              id: "wf-ok",
+              name: "OK Workflow",
+              conditions: JSON.stringify([]),
+              actions: JSON.stringify([
+                {
+                  type: "create_notification",
+                  config: { title: "I should still fire" },
+                },
+              ]),
+            },
+          ],
+        })
       }
-      return Promise.resolve([])
+      return Promise.resolve({ rows: [] })
     })
 
     // Should NOT throw even though one workflow has invalid JSON
-    await executeWorkflows("status_change", {})
+    await executeWorkflows(TENANT_ID,"status_change", {})
 
     // SELECT + INSERT notification (wf-ok) + UPDATE metadata (wf-ok) = 3 calls
     // wf-fail throws on JSON.parse, caught internally
-    expect(mockSql).toHaveBeenCalledTimes(3)
+    expect(mockClient.query).toHaveBeenCalledTimes(3)
 
     errorSpy.mockRestore()
   })
@@ -527,13 +538,13 @@ describe("Workflow engine edge cases", () => {
   it("never throws to the caller even on fatal DB errors", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
-    mockSql.mockImplementation(() => {
+    mockClient.query.mockImplementation(() => {
       return Promise.reject(new Error("Database connection failed"))
     })
 
     // Should NOT throw
     await expect(
-      executeWorkflows("status_change", { loadId: "LD-001" })
+      executeWorkflows(TENANT_ID, "status_change", { loadId: "LD-001" })
     ).resolves.toBeUndefined()
 
     errorSpy.mockRestore()

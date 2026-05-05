@@ -1,49 +1,53 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import { createNotification } from "@/lib/notifications"
 
 export async function GET(request: NextRequest) {
   const user = getCurrentUser(request)
   if (!user) return apiError("Unauthorized", 401)
+  const ctx = requireTenantContext(request)
 
   const params = request.nextUrl.searchParams
   const unreadOnly = params.get("unread_only") === "true"
-  const limit = Math.min(parseInt(params.get("limit") || "50", 10) || 50, 50)
+  const limit = Math.min(Number.parseInt(params.get("limit") || "50", 10) || 50, 50)
 
-  const sql = getDb()
+  const result = await withTenant(ctx.tenantId, async (client) => {
+    const notifications = unreadOnly
+      ? (await client.query(
+          `SELECT * FROM notifications
+            WHERE (user_id = $1 OR user_id IS NULL)
+              AND read = false
+            ORDER BY created_at DESC
+            LIMIT $2`,
+          [user.userId, limit],
+        )).rows
+      : (await client.query(
+          `SELECT * FROM notifications
+            WHERE (user_id = $1 OR user_id IS NULL)
+            ORDER BY created_at DESC
+            LIMIT $2`,
+          [user.userId, limit],
+        )).rows
 
-  const notifications = unreadOnly
-    ? await sql`
-        SELECT * FROM notifications
-        WHERE (user_id = ${user.userId} OR user_id IS NULL)
-          AND read = false
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `
-    : await sql`
-        SELECT * FROM notifications
-        WHERE (user_id = ${user.userId} OR user_id IS NULL)
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `
+    const { rows: countRows } = await client.query(
+      `SELECT COUNT(*)::int AS count FROM notifications
+        WHERE (user_id = $1 OR user_id IS NULL)
+          AND read = false`,
+      [user.userId],
+    )
 
-  const unreadRows = await sql`
-    SELECT COUNT(*)::int AS count FROM notifications
-    WHERE (user_id = ${user.userId} OR user_id IS NULL)
-      AND read = false
-  `
-
-  return NextResponse.json({
-    notifications,
-    unreadCount: unreadRows[0].count,
+    return { notifications, unreadCount: countRows[0].count as number }
   })
+
+  return NextResponse.json(result)
 }
 
 export async function POST(request: NextRequest) {
   const user = getCurrentUser(request)
   if (!user) return apiError("Unauthorized", 401)
+  const ctx = requireTenantContext(request)
 
   const body = await request.json()
   const { userId, type, title, body: notifBody, link, loadId } = body
@@ -53,6 +57,7 @@ export async function POST(request: NextRequest) {
   }
 
   const notification = await createNotification({
+    tenantId: ctx.tenantId,
     userId: userId || null,
     type: type || "info",
     title,

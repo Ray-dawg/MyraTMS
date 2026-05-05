@@ -1,120 +1,121 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 
 export async function GET(req: NextRequest) {
   try {
     const user = getCurrentUser(req)
-
-    if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      )
-    }
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 })
+    const ctx = requireTenantContext(req)
 
     const scope = req.nextUrl.searchParams.get("scope")
     const key = req.nextUrl.searchParams.get("key")
-    const sql = getDb()
 
-    let rows
-    if (scope === "global") {
-      rows = key
-        ? await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL AND settings_key = ${key}`
-        : await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`
-    } else if (key) {
-      rows = await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId} AND settings_key = ${key}`
-    } else {
-      rows = await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId}`
-    }
+    const rows = await withTenant(ctx.tenantId, async (client) => {
+      if (scope === "global") {
+        if (key) {
+          const { rows } = await client.query(
+            `SELECT settings_key, settings_value FROM settings
+              WHERE user_id IS NULL AND settings_key = $1`,
+            [key],
+          )
+          return rows
+        }
+        const { rows } = await client.query(
+          `SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`,
+        )
+        return rows
+      }
+      if (key) {
+        const { rows } = await client.query(
+          `SELECT settings_key, settings_value FROM settings
+            WHERE user_id = $1 AND settings_key = $2`,
+          [user.userId, key],
+        )
+        return rows
+      }
+      const { rows } = await client.query(
+        `SELECT settings_key, settings_value FROM settings WHERE user_id = $1`,
+        [user.userId],
+      )
+      return rows
+    })
 
-    // Build a { key: value } object from rows
     const settings: Record<string, unknown> = {}
     for (const row of rows) {
       settings[row.settings_key] = row.settings_value
     }
-
     return NextResponse.json({ settings })
   } catch (error) {
     console.error("Get settings error:", error)
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
 
 export async function PATCH(req: NextRequest) {
   try {
     const user = getCurrentUser(req)
-
-    if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      )
-    }
+    if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 })
+    const ctx = requireTenantContext(req)
 
     const body = await req.json()
-    const sql = getDb()
 
-    // Support both single { key, value } and batch { settings: { key: value, ... } }
     let entries: Array<{ key: string; value: unknown }> = []
-
     if (body.settings && typeof body.settings === "object") {
-      // Batch mode
-      entries = Object.entries(body.settings).map(([key, value]) => ({
-        key,
-        value,
-      }))
+      entries = Object.entries(body.settings).map(([key, value]) => ({ key, value }))
     } else if (body.key !== undefined) {
-      // Single mode
       entries = [{ key: body.key, value: body.value }]
     } else {
       return NextResponse.json(
         { error: "Request must include { key, value } or { settings: { ... } }" },
-        { status: 400 }
+        { status: 400 },
       )
     }
 
     const scope = body.scope
-    const userId = scope === "global" ? null : user.userId
 
-    // Upsert each setting
-    for (const entry of entries) {
-      if (scope === "global") {
-        await sql`
-          INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
-          VALUES (gen_random_uuid(), NULL, ${entry.key}, ${JSON.stringify(entry.value)}::jsonb, NOW())
-          ON CONFLICT (settings_key) WHERE user_id IS NULL
-          DO UPDATE SET settings_value = ${JSON.stringify(entry.value)}::jsonb, updated_at = NOW()
-        `
-      } else {
-        await sql`
-          INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
-          VALUES (gen_random_uuid(), ${user.userId}, ${entry.key}, ${JSON.stringify(entry.value)}::jsonb, NOW())
-          ON CONFLICT (user_id, settings_key)
-          DO UPDATE SET settings_value = ${JSON.stringify(entry.value)}::jsonb, updated_at = NOW()
-        `
+    const settings = await withTenant(ctx.tenantId, async (client) => {
+      for (const entry of entries) {
+        const valueJson = JSON.stringify(entry.value)
+        if (scope === "global") {
+          await client.query(
+            `INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
+             VALUES (gen_random_uuid(), NULL, $1, $2::jsonb, NOW())
+             ON CONFLICT (settings_key) WHERE user_id IS NULL
+             DO UPDATE SET settings_value = $2::jsonb, updated_at = NOW()`,
+            [entry.key, valueJson],
+          )
+        } else {
+          await client.query(
+            `INSERT INTO settings (id, user_id, settings_key, settings_value, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, $3::jsonb, NOW())
+             ON CONFLICT (user_id, settings_key)
+             DO UPDATE SET settings_value = $3::jsonb, updated_at = NOW()`,
+            [user.userId, entry.key, valueJson],
+          )
+        }
       }
-    }
 
-    // Return settings for the scope
-    const rows = scope === "global"
-      ? await sql`SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`
-      : await sql`SELECT settings_key, settings_value FROM settings WHERE user_id = ${user.userId}`
+      const { rows } =
+        scope === "global"
+          ? await client.query(
+              `SELECT settings_key, settings_value FROM settings WHERE user_id IS NULL`,
+            )
+          : await client.query(
+              `SELECT settings_key, settings_value FROM settings WHERE user_id = $1`,
+              [user.userId],
+            )
 
-    const settings: Record<string, unknown> = {}
-    for (const row of rows) {
-      settings[row.settings_key] = row.settings_value
-    }
+      const out: Record<string, unknown> = {}
+      for (const row of rows) {
+        out[row.settings_key] = row.settings_value
+      }
+      return out
+    })
 
     return NextResponse.json({ settings })
   } catch (error) {
     console.error("Update settings error:", error)
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }

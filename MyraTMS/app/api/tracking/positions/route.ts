@@ -1,19 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import { getCached, setCache } from "@/lib/redis"
-
-// ---------------------------------------------------------------------------
-// GET /api/tracking/positions
-// Returns fleet GPS positions. Auth-gated.
-// Fallback chain:
-//   1. location_pings table (from Driver_App GPS pings) — PRIMARY
-//   2. Samsara ELD API (if SAMSARA_API_KEY set)
-//   3. Motive ELD API (if MOTIVE_API_KEY set)
-//   4. Mock data fallback
-// All normalized to: { load_id, driver_name, lat, lng, speed, heading, updated_at, source }
-// ---------------------------------------------------------------------------
 
 interface NormalizedPosition {
   load_id: string
@@ -42,10 +31,7 @@ async function fetchSamsaraPositions(apiKey: string): Promise<NormalizedPosition
   try {
     const res = await fetch("https://api.samsara.com/v1/fleet/locations", {
       method: "GET",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Accept": "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10000),
     })
     if (!res.ok) return []
@@ -70,10 +56,7 @@ async function fetchMotivePositions(apiKey: string): Promise<NormalizedPosition[
   try {
     const res = await fetch("https://api.gomotive.com/v1/vehicle_locations", {
       method: "GET",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Accept": "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10000),
     })
     if (!res.ok) return []
@@ -97,44 +80,41 @@ async function fetchMotivePositions(apiKey: string): Promise<NormalizedPosition[
 export async function GET(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
+  const ctx = requireTenantContext(req)
 
-  const sql = getDb()
   const samsaraKey = process.env.SAMSARA_API_KEY
   const motiveKey = process.env.MOTIVE_API_KEY
   const apiConnected = !!(samsaraKey || motiveKey)
   const positions: NormalizedPosition[] = []
   let source = "mock"
 
-  // 1. Try location_pings table (from Driver_App GPS pings) — PRIMARY
+  // 1. Try location_pings (per-tenant) — PRIMARY
   try {
-    const dbPositions = await sql`
-      SELECT DISTINCT ON (lp.load_id)
-        lp.load_id,
-        d.name as driver_name,
-        lp.lat,
-        lp.lng,
-        lp.speed,
-        lp.heading,
-        lp.recorded_at as updated_at,
-        l.carrier,
-        l.origin,
-        l.destination,
-        l.status,
-        l.current_eta as eta
-      FROM location_pings lp
-      LEFT JOIN drivers d ON d.id = lp.driver_id
-      LEFT JOIN loads l ON l.id = lp.load_id
-      WHERE lp.recorded_at > NOW() - INTERVAL '2 hours'
-      ORDER BY lp.load_id, lp.recorded_at DESC
-    `
+    const dbPositions = await withTenant(ctx.tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT DISTINCT ON (lp.load_id)
+           lp.load_id,
+           d.name as driver_name,
+           lp.lat, lp.lng, lp.speed, lp.heading,
+           lp.recorded_at as updated_at,
+           l.carrier, l.origin, l.destination, l.status,
+           l.current_eta as eta
+           FROM location_pings lp
+           LEFT JOIN drivers d ON d.id = lp.driver_id
+           LEFT JOIN loads l ON l.id = lp.load_id
+          WHERE lp.recorded_at > NOW() - INTERVAL '2 hours'
+          ORDER BY lp.load_id, lp.recorded_at DESC`,
+      )
+      return rows
+    })
 
     if (dbPositions.length > 0) {
       for (const row of dbPositions) {
         positions.push({
           load_id: row.load_id,
           driver_name: row.driver_name || "Unknown",
-          lat: parseFloat(row.lat),
-          lng: parseFloat(row.lng),
+          lat: Number.parseFloat(row.lat),
+          lng: Number.parseFloat(row.lng),
           speed: row.speed || 0,
           heading: row.heading || "N",
           updated_at: row.updated_at || new Date().toISOString(),
@@ -149,13 +129,12 @@ export async function GET(req: NextRequest) {
       source = "driver_app"
     }
   } catch (err) {
-    // Table may not exist yet — fall through to next source
     console.error("[GPS] location_pings query failed:", err)
   }
 
-  // 2. If no Driver_App data, try Samsara
+  // 2. Samsara fallback (cache key now per-tenant)
   if (positions.length === 0 && samsaraKey) {
-    const cacheKey = "gps:samsara:positions"
+    const cacheKey = `gps:samsara:positions:t${ctx.tenantId}`
     const cached = await getCached<NormalizedPosition[]>(cacheKey)
     if (cached && cached.length > 0) {
       positions.push(...cached)
@@ -165,14 +144,14 @@ export async function GET(req: NextRequest) {
       if (samsaraPositions.length > 0) {
         positions.push(...samsaraPositions)
         source = "samsara"
-        await setCache(cacheKey, samsaraPositions, 60) // Cache for 60s
+        await setCache(cacheKey, samsaraPositions, 60)
       }
     }
   }
 
-  // 3. If still no data, try Motive
+  // 3. Motive fallback
   if (positions.length === 0 && motiveKey) {
-    const cacheKey = "gps:motive:positions"
+    const cacheKey = `gps:motive:positions:t${ctx.tenantId}`
     const cached = await getCached<NormalizedPosition[]>(cacheKey)
     if (cached && cached.length > 0) {
       positions.push(...cached)
@@ -182,14 +161,13 @@ export async function GET(req: NextRequest) {
       if (motivePositions.length > 0) {
         positions.push(...motivePositions)
         source = "motive"
-        await setCache(cacheKey, motivePositions, 60) // Cache for 60s
+        await setCache(cacheKey, motivePositions, 60)
       }
     }
   }
 
-  // 4. Fall back to mock data
+  // 4. Mock fallback
   if (positions.length === 0) {
-    // Add slight randomization to simulate real-time movement
     const mocked = MOCK_POSITIONS.map((p) => ({
       ...p,
       speed: p.status === "Delayed" ? 0 : p.speed + Math.floor(Math.random() * 6) - 3,

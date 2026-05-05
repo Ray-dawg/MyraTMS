@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 
 // ---------------------------------------------------------------------------
@@ -12,6 +12,7 @@ import { apiError } from "@/lib/api-error"
 export async function POST(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
+  const ctx = requireTenantContext(req)
 
   let body: {
     origin?: string
@@ -38,38 +39,44 @@ export async function POST(req: NextRequest) {
     return apiError("Missing required fields: origin, destination")
   }
 
-  const sql = getDb()
   const id = `LD-${Date.now().toString(36).toUpperCase()}`
   const assignedRep = `${user.firstName} ${user.lastName}`
 
-  await sql`
-    INSERT INTO loads (
-      id, origin, destination, shipper, carrier, source, status,
-      revenue, carrier_cost, margin, margin_percent,
-      pickup_date, delivery_date, assigned_rep, equipment, weight,
-      risk_flag, commodity
+  await withTenant(ctx.tenantId, async (client) => {
+    await client.query(
+      `INSERT INTO loads (
+        id, origin, destination, shipper, carrier, source, status,
+        revenue, carrier_cost, margin, margin_percent,
+        pickup_date, delivery_date, assigned_rep, equipment, weight,
+        risk_flag, commodity
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11,
+        $12, $13, $14, $15, $16,
+        $17, $18
+      )`,
+      [
+        id,
+        origin,
+        destination,
+        body.shipper_name || "TBD",
+        "Unassigned",
+        "Load Board",
+        "Booked",
+        rate || 0,
+        0,
+        rate || 0,
+        100,
+        body.pickup_date || null,
+        body.delivery_date || null,
+        assignedRep,
+        equipment || "Dry Van 53'",
+        body.weight || "N/A",
+        false,
+        body.commodity || null,
+      ],
     )
-    VALUES (
-      ${id},
-      ${origin},
-      ${destination},
-      ${body.shipper_name || "TBD"},
-      ${"Unassigned"},
-      ${"Load Board"},
-      ${"Booked"},
-      ${rate || 0},
-      ${0},
-      ${rate || 0},
-      ${100},
-      ${body.pickup_date || null},
-      ${body.delivery_date || null},
-      ${assignedRep},
-      ${equipment || "Dry Van 53'"},
-      ${body.weight || "N/A"},
-      ${false},
-      ${body.commodity || null}
-    )
-  `
+  })
 
   return NextResponse.json({
     success: true,

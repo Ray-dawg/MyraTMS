@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server"
 import { put } from "@vercel/blob"
-import { getCurrentUser } from "@/lib/auth"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { attachDocument } from "@/lib/documents"
+
+const ALLOWED_DOC_TYPES = ["BOL", "POD", "Rate Confirmation", "Insurance", "Contract", "Invoice"] as const
+type DocType = (typeof ALLOWED_DOC_TYPES)[number]
 
 export async function POST(request: NextRequest) {
   try {
     const user = getCurrentUser(request)
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const ctx = requireTenantContext(request)
 
     const formData = await request.formData()
     const file = formData.get("file") as File
@@ -15,12 +19,26 @@ export async function POST(request: NextRequest) {
     const relatedType = (formData.get("relatedType") as string) || "Load"
 
     if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 })
-
-    const allowedTypes = ["application/pdf", "image/png", "image/jpeg", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"]
-    if (!allowedTypes.includes(file.type)) {
-      return NextResponse.json({ error: "File type not allowed. Accepted: PDF, PNG, JPG, XLSX, CSV" }, { status: 400 })
+    if (!ALLOWED_DOC_TYPES.includes(docType as DocType)) {
+      return NextResponse.json(
+        { error: `Invalid type. Allowed: ${ALLOWED_DOC_TYPES.join(", ")}` },
+        { status: 400 },
+      )
     }
 
+    const allowedFileTypes = [
+      "application/pdf",
+      "image/png",
+      "image/jpeg",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/csv",
+    ]
+    if (!allowedFileTypes.includes(file.type)) {
+      return NextResponse.json(
+        { error: "File type not allowed. Accepted: PDF, PNG, JPG, XLSX, CSV" },
+        { status: 400 },
+      )
+    }
     if (file.size > 10 * 1024 * 1024) {
       return NextResponse.json({ error: "File size exceeds 10MB limit" }, { status: 400 })
     }
@@ -32,8 +50,9 @@ export async function POST(request: NextRequest) {
     const uploadedBy = `${user.firstName || ""} ${user.lastName || ""}`.trim()
 
     const doc = await attachDocument({
+      tenantId: ctx.tenantId,
       loadId: relatedTo || "",
-      docType: docType as any,
+      docType: docType as DocType,
       blobUrl: blob.url,
       fileName: file.name,
       fileSize: file.size,

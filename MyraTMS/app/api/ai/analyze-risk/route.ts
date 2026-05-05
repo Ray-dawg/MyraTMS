@@ -1,13 +1,29 @@
 import { generateText, Output } from "ai"
 import { z } from "zod"
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
+import { requireTenantContext } from "@/lib/auth"
+import type { NextRequest } from "next/server"
 
-export async function POST() {
-  const sql = getDb()
+export async function POST(req: NextRequest) {
+  const ctx = requireTenantContext(req)
 
-  const loads = await sql`SELECT id, origin, destination, shipper_name, carrier_name, status, margin_percent, risk_flag FROM loads WHERE status IN ('Booked','Dispatched','In Transit') LIMIT 20`
-  const alerts = await sql`SELECT * FROM compliance_alerts WHERE resolved = false ORDER BY detected_at DESC LIMIT 10`
-  const carriers = await sql`SELECT id, company, authority_status, insurance_status, safety_rating, on_time_percent FROM carriers WHERE risk_flag = true OR authority_status != 'Active' OR insurance_status != 'Active'`
+  const { loads, alerts, carriers } = await withTenant(ctx.tenantId, async (client) => {
+    const [loads, alerts, carriers] = await Promise.all([
+      client.query(
+        `SELECT id, origin, destination, shipper_name, carrier_name, status, margin_percent, risk_flag
+           FROM loads WHERE status IN ('Booked','Dispatched','In Transit') LIMIT 20`,
+      ),
+      client.query(
+        `SELECT * FROM compliance_alerts WHERE resolved = false ORDER BY detected_at DESC LIMIT 10`,
+      ),
+      client.query(
+        `SELECT id, company, authority_status, insurance_status, safety_rating, on_time_percent
+           FROM carriers
+          WHERE risk_flag = true OR authority_status != 'Active' OR insurance_status != 'Active'`,
+      ),
+    ])
+    return { loads: loads.rows, alerts: alerts.rows, carriers: carriers.rows }
+  })
 
   const { output } = await generateText({
     model: "xai/grok-3-mini-fast",

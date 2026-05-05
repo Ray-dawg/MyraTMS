@@ -1,5 +1,6 @@
-import type { NeonQueryFunction } from "@neondatabase/serverless"
-import { getEligibleCarriers, type EligibleCarrier } from "./filters"
+import { withTenant } from "@/lib/db/tenant-context"
+import type { PoolClient } from "@neondatabase/serverless"
+import { getEligibleCarriers } from "./filters"
 import {
   scoreLaneFamiliarity,
   scoreProximity,
@@ -72,8 +73,6 @@ export interface MatchResponse {
   timestamp: string
 }
 
-// ── Scoring Weights ──────────────────────────────────────────────
-
 const WEIGHTS = {
   lane: 0.30,
   proximity: 0.25,
@@ -82,21 +81,24 @@ const WEIGHTS = {
   relationship: 0.10,
 }
 
-// ── Match Orchestrator ───────────────────────────────────────────
-
 /**
- * Main matching function.
- * Filters eligible carriers, scores each one, ranks by score, returns top N.
+ * Tenant-scoped match. Opens its own withTenant transaction internally.
+ * Use matchCarriersWithClient if you already hold a PoolClient inside another tx.
  */
 export async function matchCarriers(
-  sql: NeonQueryFunction<false, false>,
-  request: MatchRequest
+  tenantId: number,
+  request: MatchRequest,
+): Promise<MatchResponse> {
+  return withTenant(tenantId, (client) => matchCarriersWithClient(client, request))
+}
+
+export async function matchCarriersWithClient(
+  client: PoolClient,
+  request: MatchRequest,
 ): Promise<MatchResponse> {
   const maxResults = request.maxResults || 5
   const minScore = request.minGrade ? gradeToMinScore(request.minGrade) : 0
 
-  // Calculate target carrier rate from revenue if carrier_cost not set
-  // Default 22% target margin
   const targetCarrierRate =
     request.carrierCost > 0
       ? request.carrierCost
@@ -104,44 +106,35 @@ export async function matchCarriers(
         ? request.revenue * 0.78
         : 0
 
-  // Step 1: Hard filter — equipment, active, insured
   const eligible = await getEligibleCarriers(
-    sql,
+    client,
     request.equipmentType,
-    request.excludeCarriers
+    request.excludeCarriers,
   )
 
-  // Step 2: Score each eligible carrier
   const scoredMatches: CarrierMatch[] = []
 
   for (const carrier of eligible) {
     const [lane, proximity, rate, reliability, relationship] = await Promise.all([
-      scoreLaneFamiliarity(sql, carrier.id, request.origin, request.destination),
+      scoreLaneFamiliarity(client, carrier.id, request.origin, request.destination),
       scoreProximity(
-        sql,
+        client,
         carrier.id,
         request.originLat,
         request.originLng,
         carrier.homeLat,
-        carrier.homeLng
+        carrier.homeLng,
       ),
-      scoreRate(
-        sql,
-        carrier.id,
-        request.origin,
-        request.destination,
-        targetCarrierRate
-      ),
+      scoreRate(client, carrier.id, request.origin, request.destination, targetCarrierRate),
       scoreReliability(
-        sql,
+        client,
         carrier.id,
         carrier.communicationRating,
-        carrier.onTimePercent
+        carrier.onTimePercent,
       ),
-      scoreRelationship(sql, carrier.id),
+      scoreRelationship(client, carrier.id),
     ])
 
-    // Weighted sum
     const finalScore =
       lane.score * WEIGHTS.lane +
       proximity.score * WEIGHTS.proximity +
@@ -152,11 +145,10 @@ export async function matchCarriers(
     const roundedScore = Math.round(finalScore * 1000) / 1000
     const grade = scoreToGrade(roundedScore)
 
-    // Apply minimum grade filter
     if (roundedScore < minScore) continue
 
     scoredMatches.push({
-      rank: 0, // Set after sorting
+      rank: 0,
       carrier_id: carrier.id,
       carrier_name: carrier.company,
       match_score: roundedScore,
@@ -191,26 +183,22 @@ export async function matchCarriers(
           days_since_last: relationship.daysSinceLastLoad,
         },
       },
-      suggested_driver:
-        proximity.driverId
-          ? {
-              id: proximity.driverId,
-              name: proximity.driverName,
-              phone: proximity.driverPhone,
-            }
-          : null,
+      suggested_driver: proximity.driverId
+        ? {
+            id: proximity.driverId,
+            name: proximity.driverName,
+            phone: proximity.driverPhone,
+          }
+        : null,
       contact: {
         name: carrier.contactName,
         phone: carrier.contactPhone,
       },
       distance_miles:
-        proximity.distanceKm >= 0
-          ? Math.round(kmToMiles(proximity.distanceKm))
-          : null,
+        proximity.distanceKm >= 0 ? Math.round(kmToMiles(proximity.distanceKm)) : null,
     })
   }
 
-  // Step 3: Sort by score descending, take top N
   scoredMatches.sort((a, b) => b.match_score - a.match_score)
   const topMatches = scoredMatches.slice(0, maxResults)
   topMatches.forEach((m, i) => (m.rank = i + 1))
@@ -224,30 +212,22 @@ export async function matchCarriers(
   }
 }
 
-/**
- * Store match results in the audit table for learning.
- */
 export async function storeMatchResults(
-  sql: NeonQueryFunction<false, false>,
+  tenantId: number,
   loadId: string,
-  matches: CarrierMatch[]
+  matches: CarrierMatch[],
 ): Promise<void> {
-  for (const match of matches) {
-    const id = `MR-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`
-    await sql`
-      INSERT INTO match_results (id, load_id, carrier_id, match_score, match_grade, breakdown)
-      VALUES (
-        ${id},
-        ${loadId},
-        ${match.carrier_id},
-        ${match.match_score},
-        ${match.match_grade},
-        ${JSON.stringify(match.breakdown)}
+  await withTenant(tenantId, async (client) => {
+    for (const match of matches) {
+      const id = `MR-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`
+      await client.query(
+        `INSERT INTO match_results (id, load_id, carrier_id, match_score, match_grade, breakdown)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, loadId, match.carrier_id, match.match_score, match.match_grade, JSON.stringify(match.breakdown)],
       )
-    `
-  }
+    }
+  })
 }
 
-// Re-exports
 export { scoreToGrade, gradeToMinScore, GRADE_COLORS, type MatchGrade } from "./grades"
 export { haversine, kmToMiles } from "./haversine"

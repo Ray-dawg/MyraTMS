@@ -1,4 +1,4 @@
-import type { NeonQueryFunction } from "@neondatabase/serverless"
+import type { PoolClient } from "@neondatabase/serverless"
 import { escapeLikeMeta } from "@/lib/escape-like"
 
 export interface EligibleCarrier {
@@ -24,41 +24,33 @@ export interface EligibleCarrier {
  * 4. Are not in the exclude list
  */
 export async function getEligibleCarriers(
-  sql: NeonQueryFunction<false, false>,
+  client: PoolClient,
   equipmentType: string,
-  excludeCarrierIds: string[] = []
+  excludeCarrierIds: string[] = [],
 ): Promise<EligibleCarrier[]> {
-  // Normalize equipment type for matching
   const normalizedEquip = normalizeEquipment(equipmentType)
+  const equipLike = `%${escapeLikeMeta(normalizedEquip)}%`
 
-  const carriers = await sql`
-    SELECT DISTINCT
-      c.id,
-      c.company,
-      c.mc_number,
-      c.dot_number,
-      c.contact_name,
-      c.contact_phone,
-      c.home_lat,
-      c.home_lng,
-      c.home_city,
-      c.communication_rating,
-      c.on_time_percent,
-      c.insurance_expiry
-    FROM carriers c
-    LEFT JOIN carrier_equipment ce ON c.id = ce.carrier_id
-    WHERE c.authority_status = 'Active'
-      AND (c.insurance_expiry IS NULL OR c.insurance_expiry > CURRENT_DATE)
-      AND (
-        ce.equipment_type = ${normalizedEquip}
-        OR c.id IN (
-          SELECT DISTINCT carrier_id FROM loads
-          WHERE equipment ILIKE ${`%${escapeLikeMeta(normalizedEquip)}%`}
-          AND carrier_id IS NOT NULL
+  const { rows: carriers } = await client.query(
+    `SELECT DISTINCT
+       c.id, c.company, c.mc_number, c.dot_number,
+       c.contact_name, c.contact_phone,
+       c.home_lat, c.home_lng, c.home_city,
+       c.communication_rating, c.on_time_percent, c.insurance_expiry
+       FROM carriers c
+       LEFT JOIN carrier_equipment ce ON c.id = ce.carrier_id
+      WHERE c.authority_status = 'Active'
+        AND (c.insurance_expiry IS NULL OR c.insurance_expiry > CURRENT_DATE)
+        AND (
+          ce.equipment_type = $1
+          OR c.id IN (
+            SELECT DISTINCT carrier_id FROM loads
+              WHERE equipment ILIKE $2 AND carrier_id IS NOT NULL
+          )
         )
-      )
-    ORDER BY c.company
-  `
+      ORDER BY c.company`,
+    [normalizedEquip, equipLike],
+  )
 
   const excludeSet = new Set(excludeCarrierIds)
 

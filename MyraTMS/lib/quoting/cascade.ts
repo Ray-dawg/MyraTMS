@@ -3,14 +3,14 @@
  *
  * Priority order:
  * 1. Historical loads (≥5 loads on lane)
- * 2. DAT API (stubbed — wired in Task 7)
- * 3. Truckstop API (stubbed — wired in Task 7)
+ * 2. DAT API
+ * 3. Truckstop API
  * 4. Manual rate cache
- * 5. AI estimation (stubbed — wired in Task 8)
+ * 5. AI estimation
  * 6. Benchmark formula (always returns)
  */
 
-import { getDb } from "@/lib/db"
+import type { PoolClient } from "@neondatabase/serverless"
 import { calculateHistoricalConfidence, calculateManualCacheConfidence } from "./confidence"
 import { calculateBenchmarkRate, type EquipmentType } from "@/lib/rates/benchmark"
 import { fetchDATRate } from "@/lib/rates/dat-client"
@@ -28,14 +28,15 @@ export interface RateResult {
 }
 
 export async function lookupRate(
+  client: PoolClient,
   originRegion: string,
   destRegion: string,
   equipmentType: EquipmentType,
   distanceMiles: number,
-  pickupDate: Date
+  pickupDate: Date,
 ): Promise<RateResult> {
   // Source 1: Historical loads
-  const historical = await queryHistoricalLoads(originRegion, destRegion, equipmentType)
+  const historical = await queryHistoricalLoads(client, equipmentType)
   if (historical && historical.loadCount >= 5) {
     const confidence = calculateHistoricalConfidence(historical.loadCount, historical.mostRecent)
     const totalRate = historical.avgRatePerMile * distanceMiles
@@ -50,11 +51,10 @@ export async function lookupRate(
     }
   }
 
-  // Source 2: DAT API (stubbed — wired in Task 7)
-  const datRate = await tryDATLookup(originRegion, destRegion, equipmentType)
+  // Source 2: DAT API
+  const datRate = await tryDATLookup(client, originRegion, destRegion, equipmentType)
   if (datRate) {
     if (historical && historical.loadCount >= 1) {
-      // Blend: 30% historical + 70% DAT
       const blended = historical.avgRatePerMile * 0.3 + datRate.ratePerMile * 0.7
       return {
         ratePerMile: blended,
@@ -69,8 +69,8 @@ export async function lookupRate(
     return { ...datRate, source: "dat", confidence: 0.80 }
   }
 
-  // Source 3: Truckstop API (stubbed — wired in Task 7)
-  const truckstopRate = await tryTruckstopLookup(originRegion, destRegion, equipmentType)
+  // Source 3: Truckstop API
+  const truckstopRate = await tryTruckstopLookup(client, originRegion, destRegion, equipmentType)
   if (truckstopRate) {
     if (historical && historical.loadCount >= 1) {
       const blended = historical.avgRatePerMile * 0.3 + truckstopRate.ratePerMile * 0.7
@@ -88,7 +88,7 @@ export async function lookupRate(
   }
 
   // Source 4: Manual rate cache
-  const manual = await queryRateCache("manual", originRegion, destRegion, equipmentType)
+  const manual = await queryRateCache(client, "manual", originRegion, destRegion, equipmentType)
   if (manual) {
     const ageDays = (Date.now() - new Date(manual.fetched_at).getTime()) / 86400000
     const confidence = calculateManualCacheConfidence(ageDays)
@@ -103,13 +103,13 @@ export async function lookupRate(
     }
   }
 
-  // Source 5: AI estimation (stubbed — wired in Task 8)
-  const aiRate = await tryAIEstimation(originRegion, destRegion, equipmentType, distanceMiles)
+  // Source 5: AI estimation
+  const aiRate = await tryAIEstimation(client, originRegion, destRegion, equipmentType, distanceMiles)
   if (aiRate) {
     return { ...aiRate, source: "ai", confidence: 0.55 }
   }
 
-  // Source 6: Benchmark formula (always works)
+  // Source 6: Benchmark formula
   const benchmark = calculateBenchmarkRate(distanceMiles, equipmentType, pickupDate)
   return {
     ratePerMile: benchmark.ratePerMile,
@@ -122,8 +122,6 @@ export async function lookupRate(
   }
 }
 
-// ── Helpers ──────────────────────────────────────────────────
-
 interface HistoricalResult {
   loadCount: number
   avgRatePerMile: number
@@ -133,36 +131,35 @@ interface HistoricalResult {
 }
 
 async function queryHistoricalLoads(
-  originRegion: string, destRegion: string, equipmentType: string
+  client: PoolClient,
+  equipmentType: string,
 ): Promise<HistoricalResult | null> {
-  const sql = getDb()
-
-  // Look for completed loads on the same lane in the last 180 days
-  const rows = await sql`
-    SELECT
-      COUNT(*) as load_count,
-      AVG(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
-        (SELECT distance_miles FROM distance_cache dc
-         WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
-         ORDER BY dc.created_at DESC LIMIT 1), 0)
-      END) as avg_rate_per_mile,
-      MIN(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
-        (SELECT distance_miles FROM distance_cache dc
-         WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
-         ORDER BY dc.created_at DESC LIMIT 1), 0)
-      END) as min_rate_per_mile,
-      MAX(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
-        (SELECT distance_miles FROM distance_cache dc
-         WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
-         ORDER BY dc.created_at DESC LIMIT 1), 0)
-      END) as max_rate_per_mile,
-      MAX(l.created_at) as most_recent
-    FROM loads l
-    WHERE l.status IN ('Delivered', 'Invoiced', 'Closed')
-      AND l.equipment = ${equipmentType}
-      AND l.carrier_cost > 0
-      AND l.created_at > NOW() - INTERVAL '180 days'
-  `
+  const { rows } = await client.query(
+    `SELECT
+       COUNT(*) as load_count,
+       AVG(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
+         (SELECT distance_miles FROM distance_cache dc
+          WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
+          ORDER BY dc.created_at DESC LIMIT 1), 0)
+       END) as avg_rate_per_mile,
+       MIN(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
+         (SELECT distance_miles FROM distance_cache dc
+          WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
+          ORDER BY dc.created_at DESC LIMIT 1), 0)
+       END) as min_rate_per_mile,
+       MAX(CASE WHEN carrier_cost > 0 THEN carrier_cost / NULLIF(
+         (SELECT distance_miles FROM distance_cache dc
+          WHERE dc.origin_address = l.origin AND dc.dest_address = l.destination
+          ORDER BY dc.created_at DESC LIMIT 1), 0)
+       END) as max_rate_per_mile,
+       MAX(l.created_at) as most_recent
+       FROM loads l
+      WHERE l.status IN ('Delivered', 'Invoiced', 'Closed')
+        AND l.equipment = $1
+        AND l.carrier_cost > 0
+        AND l.created_at > NOW() - INTERVAL '180 days'`,
+    [equipmentType],
+  )
 
   if (!rows[0] || Number(rows[0].load_count) === 0 || !rows[0].avg_rate_per_mile) {
     return null
@@ -178,27 +175,34 @@ async function queryHistoricalLoads(
 }
 
 async function queryRateCache(
-  source: string, originRegion: string, destRegion: string, equipmentType: string
+  client: PoolClient,
+  source: string,
+  originRegion: string,
+  destRegion: string,
+  equipmentType: string,
 ) {
-  const sql = getDb()
-  const rows = await sql`
-    SELECT * FROM rate_cache
-    WHERE source = ${source}
-      AND origin_region = ${originRegion}
-      AND dest_region = ${destRegion}
-      AND equipment_type = ${equipmentType}
-      AND (expires_at IS NULL OR expires_at > NOW())
-    ORDER BY fetched_at DESC
-    LIMIT 1
-  `
+  const { rows } = await client.query(
+    `SELECT * FROM rate_cache
+      WHERE source = $1
+        AND origin_region = $2
+        AND dest_region = $3
+        AND equipment_type = $4
+        AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY fetched_at DESC
+      LIMIT 1`,
+    [source, originRegion, destRegion, equipmentType],
+  )
   return rows[0] || null
 }
 
-// ── External Source Wrappers ─────────────────────────────────
-
-async function tryDATLookup(origin: string, dest: string, equipment: string): Promise<RateResult | null> {
+async function tryDATLookup(
+  client: PoolClient,
+  origin: string,
+  dest: string,
+  equipment: string,
+): Promise<RateResult | null> {
   try {
-    const dat = await fetchDATRate(origin, dest, equipment)
+    const dat = await fetchDATRate(client, origin, dest, equipment)
     if (!dat || !dat.averageRatePerMile) return null
     return {
       ratePerMile: dat.averageRatePerMile,
@@ -214,9 +218,14 @@ async function tryDATLookup(origin: string, dest: string, equipment: string): Pr
   }
 }
 
-async function tryTruckstopLookup(origin: string, dest: string, equipment: string): Promise<RateResult | null> {
+async function tryTruckstopLookup(
+  client: PoolClient,
+  origin: string,
+  dest: string,
+  equipment: string,
+): Promise<RateResult | null> {
   try {
-    const ts = await fetchTruckstopRate(origin, dest, equipment)
+    const ts = await fetchTruckstopRate(client, origin, dest, equipment)
     if (!ts || !ts.averageRatePerMile) return null
     return {
       ratePerMile: ts.averageRatePerMile,
@@ -233,11 +242,15 @@ async function tryTruckstopLookup(origin: string, dest: string, equipment: strin
 }
 
 async function tryAIEstimation(
-  origin: string, dest: string, equipment: string, distanceMiles: number
+  client: PoolClient,
+  origin: string,
+  dest: string,
+  equipment: string,
+  distanceMiles: number,
 ): Promise<RateResult | null> {
   try {
     const distanceKm = distanceMiles / 0.621371
-    const ai = await estimateRateWithAI(origin, dest, equipment, distanceMiles, distanceKm, new Date())
+    const ai = await estimateRateWithAI(client, origin, dest, equipment, distanceMiles, distanceKm, new Date())
     if (!ai || !ai.ratePerMile) return null
     return {
       ratePerMile: ai.ratePerMile,

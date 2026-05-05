@@ -1,11 +1,11 @@
 /**
  * AI-powered rate estimation -- Source 5 in the cascade.
- * Uses Vercel AI SDK with xai/grok-3-mini-fast to estimate carrier cost based on lane context.
+ * Uses Vercel AI SDK with xai/grok-3-mini-fast.
  * Caches results in rate_cache (24-hour TTL).
  */
 
 import { generateText } from "ai"
-import { getDb } from "@/lib/db"
+import type { PoolClient } from "@neondatabase/serverless"
 import { getLatestFuelPrice } from "./fuel-index"
 
 const SYSTEM_PROMPT = `You are a freight rate analyst for a Canadian truckload brokerage operating primarily in Ontario. You provide rate estimates based on the data provided. Respond ONLY with a JSON object matching this schema:
@@ -56,11 +56,6 @@ function getSeason(date: Date): string {
   return "winter"
 }
 
-/**
- * Derive confidence from the spread of the AI rate range estimate.
- * A tighter range (rangeLow/rangeHigh ratio closer to 1) implies more certainty.
- * Clamps to [0.40, 0.75] -- AI estimates always carry some uncertainty.
- */
 function deriveConfidenceFromRange(rangeLow: number, rangeHigh: number, hasNearbyLanes: boolean): number {
   if (rangeHigh <= 0 || rangeLow <= 0) return 0.50
   const spreadRatio = (rangeHigh - rangeLow) / rangeHigh
@@ -79,29 +74,27 @@ export interface AIRateResult {
 }
 
 export async function estimateRateWithAI(
+  client: PoolClient,
   originRegion: string,
   destRegion: string,
   equipmentType: string,
   distanceMiles: number,
   distanceKm: number,
-  pickupDate: Date
+  pickupDate: Date,
 ): Promise<AIRateResult | null> {
-  const sql = getDb()
-
-  // Check if AI integration is enabled
-  const integration = await sql`SELECT * FROM integrations WHERE provider = 'ai' AND enabled = true LIMIT 1`
+  const { rows: integration } = await client.query(
+    `SELECT * FROM integrations WHERE provider = 'ai' AND enabled = true LIMIT 1`,
+  )
   if (!integration[0]) return null
 
-  // Check cache first (24-hour TTL)
-  const cached = await sql`
-    SELECT * FROM rate_cache
-    WHERE source = 'ai'
-      AND origin_region = ${originRegion}
-      AND dest_region = ${destRegion}
-      AND equipment_type = ${equipmentType}
-      AND fetched_at > NOW() - INTERVAL '24 hours'
-    ORDER BY fetched_at DESC LIMIT 1
-  `
+  const { rows: cached } = await client.query(
+    `SELECT * FROM rate_cache
+      WHERE source = 'ai'
+        AND origin_region = $1 AND dest_region = $2 AND equipment_type = $3
+        AND fetched_at > NOW() - INTERVAL '24 hours'
+      ORDER BY fetched_at DESC LIMIT 1`,
+    [originRegion, destRegion, equipmentType],
+  )
   if (cached.length > 0) {
     const c = cached[0]
     const detail = c.source_detail || {}
@@ -118,16 +111,13 @@ export async function estimateRateWithAI(
   }
 
   try {
-    // Gather context
-    const nearbyLanes = await sql`
-      SELECT origin_region, dest_region, rate_per_mile, source
-      FROM rate_cache
-      WHERE source != 'ai'
-        AND rate_per_mile IS NOT NULL
-        AND rate_per_mile > 0
-      ORDER BY fetched_at DESC LIMIT 5
-    `
-    const fuel = await getLatestFuelPrice()
+    const { rows: nearbyLanes } = await client.query(
+      `SELECT origin_region, dest_region, rate_per_mile, source
+         FROM rate_cache
+        WHERE source != 'ai' AND rate_per_mile IS NOT NULL AND rate_per_mile > 0
+        ORDER BY fetched_at DESC LIMIT 5`,
+    )
+    const fuel = await getLatestFuelPrice(client)
     const now = new Date()
     const dayType = [0, 6].includes(now.getDay()) ? "weekend" : "weekday"
     const hasNearbyLanes = nearbyLanes.length > 0
@@ -149,8 +139,6 @@ export async function estimateRateWithAI(
       dayType,
     })
 
-    // Use Vercel AI SDK with xai/grok-3-mini-fast (same model as the rest of the app).
-    // XAI_API_KEY is picked up automatically from the environment.
     const { text } = await generateText({
       model: "xai/grok-3-mini-fast",
       system: SYSTEM_PROMPT,
@@ -159,7 +147,6 @@ export async function estimateRateWithAI(
       maxOutputTokens: 500,
     })
 
-    // Parse JSON response
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error("AI did not return valid JSON")
 
@@ -180,20 +167,36 @@ export async function estimateRateWithAI(
       rangeHigh,
     }
 
-    // Cache the result (24-hour TTL)
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-    await sql`
-      INSERT INTO rate_cache (origin_region, dest_region, equipment_type, rate_per_mile, total_rate, source, source_detail, expires_at)
-      VALUES (${originRegion}, ${destRegion}, ${equipmentType}, ${result.ratePerMile}, ${result.totalRate}, 'ai', ${JSON.stringify({ reasoning: result.reasoning, rangeLow: result.rangeLow, rangeHigh: result.rangeHigh, hadNearbyLanes: hasNearbyLanes })}, ${expiresAt})
-    `
+    await client.query(
+      `INSERT INTO rate_cache (origin_region, dest_region, equipment_type, rate_per_mile, total_rate, source, source_detail, expires_at)
+       VALUES ($1, $2, $3, $4, $5, 'ai', $6, $7)`,
+      [
+        originRegion,
+        destRegion,
+        equipmentType,
+        result.ratePerMile,
+        result.totalRate,
+        JSON.stringify({
+          reasoning: result.reasoning,
+          rangeLow: result.rangeLow,
+          rangeHigh: result.rangeHigh,
+          hadNearbyLanes: hasNearbyLanes,
+        }),
+        expiresAt,
+      ],
+    )
 
-    await sql`UPDATE integrations SET last_success_at = NOW() WHERE provider = 'ai'`
+    await client.query(`UPDATE integrations SET last_success_at = NOW() WHERE provider = 'ai'`)
 
     return result
   } catch (err) {
     const msg = err instanceof Error ? err.message : "AI estimation error"
     console.error("[AI estimator] error:", msg)
-    await sql`UPDATE integrations SET last_error_at = NOW(), last_error_msg = ${msg} WHERE provider = 'ai'`
+    await client.query(
+      `UPDATE integrations SET last_error_at = NOW(), last_error_msg = $1 WHERE provider = 'ai'`,
+      [msg],
+    )
     return null
   }
 }

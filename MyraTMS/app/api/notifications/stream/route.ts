@@ -1,15 +1,14 @@
 import { NextRequest } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { createSSEStream, sseHeartbeat } from "@/lib/sse"
 
 export const dynamic = "force-dynamic"
 
 export async function GET(request: NextRequest) {
   const user = getCurrentUser(request)
-  if (!user) {
-    return new Response("Unauthorized", { status: 401 })
-  }
+  if (!user) return new Response("Unauthorized", { status: 401 })
+  const ctx = requireTenantContext(request)
 
   const { stream, writer } = createSSEStream()
 
@@ -19,23 +18,24 @@ export async function GET(request: NextRequest) {
     Connection: "keep-alive",
   }
 
-  // Track the last notification we've seen
   let lastCheckedAt = new Date().toISOString()
   let alive = true
 
-  // Poll for new notifications every 3 seconds
   const pollInterval = setInterval(async () => {
     if (!alive) return
     try {
-      const sql = getDb()
-      const rows = await sql`
-        SELECT id, type, title, body, link, created_at
-        FROM notifications
-        WHERE created_at > ${lastCheckedAt}::timestamptz
-          AND read = false
-          AND (user_id = ${user.userId} OR user_id IS NULL)
-        ORDER BY created_at ASC
-      `
+      const rows = await withTenant(ctx.tenantId, async (client) => {
+        const { rows } = await client.query(
+          `SELECT id, type, title, body, link, created_at
+             FROM notifications
+            WHERE created_at > $1::timestamptz
+              AND read = false
+              AND (user_id = $2 OR user_id IS NULL)
+            ORDER BY created_at ASC`,
+          [lastCheckedAt, user.userId],
+        )
+        return rows
+      })
 
       for (const row of rows) {
         writer.write("notification", {
@@ -56,22 +56,17 @@ export async function GET(request: NextRequest) {
     }
   }, 3000)
 
-  // Keep-alive heartbeat every 15 seconds
   const heartbeatInterval = setInterval(() => {
     if (!alive) return
     sseHeartbeat(writer)
   }, 15000)
 
-  // Cleanup when client disconnects
   const cleanup = () => {
     alive = false
     clearInterval(pollInterval)
     clearInterval(heartbeatInterval)
   }
 
-  // Use the onCancel callback — createSSEStream calls it when the client disconnects
-  // We need to recreate with the cleanup callback
-  // Actually, the stream is already created. We'll handle cleanup via AbortSignal instead.
   request.signal.addEventListener("abort", () => {
     cleanup()
     writer.close()

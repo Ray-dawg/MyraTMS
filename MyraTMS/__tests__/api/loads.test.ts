@@ -101,8 +101,9 @@ describe("Margin calculation", () => {
 
   it("uses default zero for missing revenue/carrierCost", () => {
     // Mirrors the API route: body.revenue || 0, body.carrierCost || 0
-    const revenue = undefined || 0
-    const carrierCost = undefined || 0
+    const body: { revenue?: number; carrierCost?: number } = {}
+    const revenue = body.revenue || 0
+    const carrierCost = body.carrierCost || 0
     const { margin, marginPercent } = calculateMargin(revenue, carrierCost)
     expect(margin).toBe(0)
     expect(marginPercent).toBe(0)

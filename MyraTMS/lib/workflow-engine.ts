@@ -6,10 +6,11 @@
 //
 // Usage:
 //   import { executeWorkflows } from "@/lib/workflow-engine"
-//   await executeWorkflows("status_change", { loadId, oldStatus, newStatus })
+//   await executeWorkflows(tenantId, "status_change", { loadId, oldStatus, newStatus })
 // ---------------------------------------------------------------------------
 
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
+import type { PoolClient } from "@neondatabase/serverless"
 
 export interface WorkflowContext {
   loadId?: string
@@ -38,10 +39,6 @@ interface WorkflowRow {
   actions: WorkflowAction[] | string
 }
 
-// ---------------------------------------------------------------------------
-// Condition evaluation
-// ---------------------------------------------------------------------------
-
 function evaluateCondition(condition: WorkflowCondition, context: WorkflowContext): boolean {
   const fieldValue = context[condition.field]
   const targetValue = condition.value
@@ -49,21 +46,14 @@ function evaluateCondition(condition: WorkflowCondition, context: WorkflowContex
   switch (condition.operator) {
     case "equals":
       return String(fieldValue) === String(targetValue)
-
     case "not_equals":
       return String(fieldValue) !== String(targetValue)
-
     case "contains":
-      return String(fieldValue ?? "")
-        .toLowerCase()
-        .includes(String(targetValue).toLowerCase())
-
+      return String(fieldValue ?? "").toLowerCase().includes(String(targetValue).toLowerCase())
     case "greater_than":
       return Number(fieldValue) > Number(targetValue)
-
     case "less_than":
       return Number(fieldValue) < Number(targetValue)
-
     default:
       console.warn(`[workflow-engine] Unknown operator: ${condition.operator}`)
       return false
@@ -71,53 +61,40 @@ function evaluateCondition(condition: WorkflowCondition, context: WorkflowContex
 }
 
 function evaluateConditions(conditions: WorkflowCondition[], context: WorkflowContext): boolean {
-  // All conditions must pass (AND logic). Empty conditions = always match.
   if (!conditions || conditions.length === 0) return true
   return conditions.every((c) => evaluateCondition(c, context))
 }
 
-// ---------------------------------------------------------------------------
-// Action execution
-// ---------------------------------------------------------------------------
-
 async function executeAction(
+  client: PoolClient,
   action: WorkflowAction,
   context: WorkflowContext,
-  workflowName: string
+  workflowName: string,
 ): Promise<void> {
-  const sql = getDb()
-
   switch (action.type) {
     case "send_email": {
-      // Insert a notification to record the email intent + log it.
-      // Actual SMTP sending is not done here to keep the engine lightweight;
-      // the notification serves as the audit trail.
       const config = action.config as { to?: string; subject?: string; body?: string }
       const title = config.subject || `Email from workflow: ${workflowName}`
       const description = config.body || `Email to ${config.to || "unknown"}`
-
-      await sql`
-        INSERT INTO notifications (title, description, type, read, created_at)
-        VALUES (${title}, ${description}, 'info', false, NOW())
-      `
+      await client.query(
+        `INSERT INTO notifications (title, body, type, read, created_at)
+         VALUES ($1, $2, 'info', false, NOW())`,
+        [title, description],
+      )
       console.log(`[workflow-engine] send_email action: "${title}" to ${config.to || "unknown"}`)
       break
     }
 
     case "create_notification": {
-      const config = action.config as {
-        title?: string
-        description?: string
-        notificationType?: string
-      }
+      const config = action.config as { title?: string; description?: string; notificationType?: string }
       const title = config.title || `Notification from workflow: ${workflowName}`
       const description = config.description || ""
       const notificationType = config.notificationType || "info"
-
-      await sql`
-        INSERT INTO notifications (title, description, type, read, created_at)
-        VALUES (${title}, ${description}, ${notificationType}, false, NOW())
-      `
+      await client.query(
+        `INSERT INTO notifications (title, body, type, read, created_at)
+         VALUES ($1, $2, $3, false, NOW())`,
+        [title, description, notificationType],
+      )
       console.log(`[workflow-engine] create_notification: "${title}"`)
       break
     }
@@ -128,13 +105,11 @@ async function executeAction(
         console.warn("[workflow-engine] update_status: missing status or loadId")
         break
       }
-      await sql`
-        UPDATE loads SET status = ${config.status}, updated_at = NOW()
-        WHERE id = ${context.loadId}
-      `
-      console.log(
-        `[workflow-engine] update_status: load ${context.loadId} -> ${config.status}`
+      await client.query(
+        `UPDATE loads SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [config.status, context.loadId],
       )
+      console.log(`[workflow-engine] update_status: load ${context.loadId} -> ${config.status}`)
       break
     }
 
@@ -144,84 +119,72 @@ async function executeAction(
         console.warn("[workflow-engine] assign_carrier: missing carrierId or loadId")
         break
       }
-      await sql`
-        UPDATE loads SET carrier_id = ${config.carrierId}, updated_at = NOW()
-        WHERE id = ${context.loadId}
-      `
-      console.log(
-        `[workflow-engine] assign_carrier: load ${context.loadId} -> carrier ${config.carrierId}`
+      await client.query(
+        `UPDATE loads SET carrier_id = $1, updated_at = NOW() WHERE id = $2`,
+        [config.carrierId, context.loadId],
       )
+      console.log(`[workflow-engine] assign_carrier: load ${context.loadId} -> carrier ${config.carrierId}`)
       break
     }
 
     default:
-      console.warn(`[workflow-engine] Unknown action type: ${action.type}`)
+      console.warn(`[workflow-engine] Unknown action type: ${(action as { type: string }).type}`)
   }
 }
 
-// ---------------------------------------------------------------------------
-// Main entry point
-// ---------------------------------------------------------------------------
-
 export async function executeWorkflows(
+  tenantId: number,
   triggerType: string,
-  context: WorkflowContext
+  context: WorkflowContext,
 ): Promise<void> {
   try {
-    const sql = getDb()
+    await withTenant(tenantId, async (client) => {
+      const { rows } = await client.query<WorkflowRow>(
+        `SELECT id, name, conditions, actions
+           FROM workflows
+          WHERE active = true AND trigger_type = $1`,
+        [triggerType],
+      )
 
-    // 1. Query active workflows matching the trigger type
-    const workflows = await sql`
-      SELECT id, name, conditions, actions
-      FROM workflows
-      WHERE active = true AND trigger_type = ${triggerType}
-    ` as unknown as WorkflowRow[]
+      if (rows.length === 0) return
 
-    if (workflows.length === 0) return
+      for (const workflow of rows) {
+        try {
+          const conditions: WorkflowCondition[] =
+            typeof workflow.conditions === "string"
+              ? JSON.parse(workflow.conditions)
+              : (workflow.conditions ?? [])
 
-    for (const workflow of workflows) {
-      try {
-        // Parse conditions & actions (may be JSON strings or already parsed)
-        const conditions: WorkflowCondition[] =
-          typeof workflow.conditions === "string"
-            ? JSON.parse(workflow.conditions)
-            : (workflow.conditions ?? [])
+          const actions: WorkflowAction[] =
+            typeof workflow.actions === "string"
+              ? JSON.parse(workflow.actions)
+              : (workflow.actions ?? [])
 
-        const actions: WorkflowAction[] =
-          typeof workflow.actions === "string"
-            ? JSON.parse(workflow.actions)
-            : (workflow.actions ?? [])
+          if (!evaluateConditions(conditions, context)) continue
 
-        // 2. Evaluate conditions
-        if (!evaluateConditions(conditions, context)) {
-          continue // conditions not met, skip this workflow
+          for (const action of actions) {
+            await executeAction(client, action, context, workflow.name)
+          }
+
+          await client.query(
+            `UPDATE workflows
+                SET updated_at = NOW(),
+                    last_run = NOW(),
+                    runs_today = COALESCE(runs_today, 0) + 1
+              WHERE id = $1`,
+            [workflow.id],
+          )
+
+          console.log(`[workflow-engine] Executed workflow "${workflow.name}" (${workflow.id})`)
+        } catch (err) {
+          console.error(
+            `[workflow-engine] Error executing workflow "${workflow.name}" (${workflow.id}):`,
+            err,
+          )
         }
-
-        // 3. Execute actions
-        for (const action of actions) {
-          await executeAction(action, context, workflow.name)
-        }
-
-        // 4. Update workflow metadata
-        await sql`
-          UPDATE workflows
-          SET updated_at = NOW(),
-              last_run = NOW(),
-              runs_today = COALESCE(runs_today, 0) + 1
-          WHERE id = ${workflow.id}
-        `
-
-        console.log(`[workflow-engine] Executed workflow "${workflow.name}" (${workflow.id})`)
-      } catch (err) {
-        console.error(
-          `[workflow-engine] Error executing workflow "${workflow.name}" (${workflow.id}):`,
-          err
-        )
-        // Continue to next workflow -- never throw
       }
-    }
+    })
   } catch (err) {
     console.error("[workflow-engine] Fatal error querying workflows:", err)
-    // Never throw -- callers should not fail because of workflow issues
   }
 }

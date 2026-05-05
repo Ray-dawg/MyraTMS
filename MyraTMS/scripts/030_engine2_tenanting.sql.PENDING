@@ -1,0 +1,31 @@
+-- ============================================================================
+-- 030 PENDING: Engine 2 multi-tenanting
+-- ============================================================================
+-- This file is INTENTIONALLY suffixed .PENDING — it is staged but NOT applied.
+--
+-- Trigger to rename to 030_engine2_tenanting.sql and apply:
+--   1. Engine 2 v1 in production for ≥24 hours with no critical incidents
+--   2. AND the active Engine 2 plan
+--      (Engine 2/docs/superpowers/plans/2026-04-30-engine2-end-to-end.md)
+--      reports completion in completion.md with all checkmarks
+--
+-- Scope (when activated): adds tenant_id BIGINT NOT NULL DEFAULT myra_tenant_id
+-- to every Engine 2 Cat A-DEF table per TENANTING_AUDIT.md §3:
+--   pipeline_loads, agent_calls, negotiation_briefs, consent_log, dnc_list,
+--   shipper_preferences, lane_stats, personas, agent_jobs, compliance_audit
+--
+-- Composite uniqueness changes:
+--   - pipeline_loads: UNIQUE (tenant_id, load_id, load_board_source)
+--                      replacing UNIQUE (load_id, load_board_source)
+--   - agent_calls.call_id stays globally unique (Retell-issued)
+--   - dnc_list.phone becomes (tenant_id, phone) UNIQUE
+--                      replacing global UNIQUE (legal: per-tenant DNC)
+--   - personas.persona_name becomes (tenant_id, persona_name) UNIQUE
+--                      replacing global UNIQUE (each tenant trains own α/β)
+--   - lane_stats UNIQUE expands to include tenant_id
+--
+-- See ADR-004 §M5 and Rule A in the resolution from session 1.
+-- ============================================================================
+
+-- DO NOT APPLY YET. This file is a placeholder.
+-- See SESSION_2_NOTES.md §Open items #M5 for full status.

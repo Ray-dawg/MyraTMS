@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import crypto from "crypto"
-import { getDb } from "@/lib/db"
-import { getCurrentUser, requireRole } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { asServiceAdmin } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireRole, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import { sendGenericEmail } from "@/lib/email"
 
@@ -13,6 +14,8 @@ export async function POST(req: NextRequest) {
   const denied = requireRole(user, "admin")
   if (denied) return denied
 
+  const ctx = requireTenantContext(req)
+
   const body = await req.json()
   const { email, role, firstName, lastName } = body
 
@@ -23,44 +26,55 @@ export async function POST(req: NextRequest) {
     return apiError("role must be 'admin' or 'broker'", 400)
   }
 
-  const sql = getDb()
+  const normalizedEmail = email.toLowerCase().trim()
 
-  // Check if email already has an account
-  const existing = await sql`SELECT id FROM users WHERE email = ${email.toLowerCase().trim()}`
-  if (existing.length > 0) {
+  // Cross-tenant uniqueness check: email must be globally unique across all tenants.
+  const emailTaken = await asServiceAdmin(
+    "Cross-tenant email uniqueness check for new invite",
+    async (client) => {
+      const { rows } = await client.query(
+        `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+        [normalizedEmail],
+      )
+      return rows.length > 0
+    },
+  )
+  if (emailTaken) {
     return apiError("A user with this email already exists", 409)
-  }
-
-  // Check if there's already a pending invite
-  const pendingInvite = await sql`
-    SELECT id FROM user_invites
-    WHERE email = ${email.toLowerCase().trim()}
-    AND status = 'pending'
-    AND expires_at > NOW()
-  `
-  if (pendingInvite.length > 0) {
-    return apiError("A pending invite already exists for this email", 409)
   }
 
   // Generate invite token
   const token = crypto.randomBytes(32).toString("hex")
   const inviteId = `INV-${Date.now().toString(36).toUpperCase()}`
 
-  await sql`
-    INSERT INTO user_invites (id, email, role, first_name, last_name, token, invited_by, status, expires_at, created_at)
-    VALUES (
-      ${inviteId},
-      ${email.toLowerCase().trim()},
-      ${role},
-      ${firstName || null},
-      ${lastName || null},
-      ${token},
-      ${user.userId},
-      'pending',
-      NOW() + INTERVAL '7 days',
-      NOW()
+  // Within the inviter's tenant: dupe-check pending invites + insert.
+  const dupeInvite = await withTenant(ctx.tenantId, async (client) => {
+    const { rows: pending } = await client.query(
+      `SELECT id FROM user_invites
+        WHERE email = $1 AND status = 'pending' AND expires_at > NOW()
+        LIMIT 1`,
+      [normalizedEmail],
     )
-  `
+    if (pending.length > 0) return true
+
+    await client.query(
+      `INSERT INTO user_invites (id, email, role, first_name, last_name, token, invited_by, status, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW() + INTERVAL '7 days', NOW())`,
+      [
+        inviteId,
+        normalizedEmail,
+        role,
+        firstName || null,
+        lastName || null,
+        token,
+        user.userId,
+      ],
+    )
+    return false
+  })
+  if (dupeInvite) {
+    return apiError("A pending invite already exists for this email", 409)
+  }
 
   // Build invite URL
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
@@ -91,7 +105,7 @@ export async function POST(req: NextRequest) {
   }, { status: 201 })
 }
 
-// GET — List all invites (admin only)
+// GET — List all invites for the caller's tenant (admin only)
 export async function GET(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
@@ -99,14 +113,18 @@ export async function GET(req: NextRequest) {
   const denied = requireRole(user, "admin")
   if (denied) return denied
 
-  const sql = getDb()
-  const invites = await sql`
-    SELECT id, email, role, first_name, last_name, status, expires_at, created_at,
-      CASE WHEN expires_at < NOW() AND status = 'pending' THEN 'expired' ELSE status END as display_status
-    FROM user_invites
-    ORDER BY created_at DESC
-    LIMIT 50
-  `
+  const ctx = requireTenantContext(req)
+
+  const invites = await withTenant(ctx.tenantId, async (client) => {
+    const { rows } = await client.query(
+      `SELECT id, email, role, first_name, last_name, status, expires_at, created_at,
+         CASE WHEN expires_at < NOW() AND status = 'pending' THEN 'expired' ELSE status END as display_status
+         FROM user_invites
+        ORDER BY created_at DESC
+        LIMIT 50`,
+    )
+    return rows
+  })
 
   return NextResponse.json({ invites })
 }

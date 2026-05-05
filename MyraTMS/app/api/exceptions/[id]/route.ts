@@ -1,65 +1,61 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getCurrentUser } from "@/lib/auth"
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 
-// ---------------------------------------------------------------------------
-// PATCH /api/exceptions/:id
-//
-// Actions: 'acknowledge' or 'resolve'
-// ---------------------------------------------------------------------------
-
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(req)
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
-
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = requireTenantContext(req)
   const { id } = await params
-  const sql = getDb()
 
   try {
     const body = await req.json()
     const { action } = body as { action: string }
 
     if (action === "acknowledge") {
-      const rows = await sql`
-        UPDATE exceptions
-        SET acknowledged_at = NOW(), status = 'acknowledged'
-        WHERE id = ${id}
-        RETURNING *
-      `
-      if (rows.length === 0) {
-        return NextResponse.json({ error: "Exception not found" }, { status: 404 })
-      }
-      return NextResponse.json(rows[0])
+      const row = await withTenant(ctx.tenantId, async (client) => {
+        const { rows } = await client.query(
+          `UPDATE exceptions
+              SET acknowledged_at = NOW(), status = 'acknowledged'
+            WHERE id = $1
+            RETURNING *`,
+          [id],
+        )
+        return rows[0] ?? null
+      })
+      if (!row) return NextResponse.json({ error: "Exception not found" }, { status: 404 })
+      return NextResponse.json(row)
     }
 
     if (action === "resolve") {
-      const rows = await sql`
-        UPDATE exceptions
-        SET resolved_at = NOW(), status = 'resolved'
-        WHERE id = ${id}
-        RETURNING *
-      `
-      if (rows.length === 0) {
-        return NextResponse.json({ error: "Exception not found" }, { status: 404 })
-      }
+      const exc = await withTenant(ctx.tenantId, async (client) => {
+        const { rows } = await client.query(
+          `UPDATE exceptions
+              SET resolved_at = NOW(), status = 'resolved'
+            WHERE id = $1
+            RETURNING *`,
+          [id],
+        )
+        const exception = rows[0]
+        if (!exception) return null
 
-      const exc = rows[0]
-      if (exc.load_id) {
-        const others = await sql`
-          SELECT 1 FROM exceptions
-          WHERE load_id = ${exc.load_id} AND status = 'active' AND id != ${id}
-          LIMIT 1
-        `
-        if (others.length === 0) {
-          await sql`UPDATE loads SET has_exception = false WHERE id = ${exc.load_id}`
+        if (exception.load_id) {
+          const { rows: others } = await client.query(
+            `SELECT 1 FROM exceptions
+              WHERE load_id = $1 AND status = 'active' AND id != $2
+              LIMIT 1`,
+            [exception.load_id, id],
+          )
+          if (others.length === 0) {
+            await client.query(
+              `UPDATE loads SET has_exception = false WHERE id = $1`,
+              [exception.load_id],
+            )
+          }
         }
-      }
-
+        return exception
+      })
+      if (!exc) return NextResponse.json({ error: "Exception not found" }, { status: 404 })
       return NextResponse.json(exc)
     }
 

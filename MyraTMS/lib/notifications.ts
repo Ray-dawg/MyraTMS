@@ -1,6 +1,7 @@
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
 
 interface CreateNotificationInput {
+  tenantId: number
   userId?: string | null
   type?: string
   title: string
@@ -10,6 +11,7 @@ interface CreateNotificationInput {
 }
 
 export async function createNotification({
+  tenantId,
   userId = null,
   type = "info",
   title,
@@ -17,14 +19,17 @@ export async function createNotification({
   link = null,
   loadId = null,
 }: CreateNotificationInput) {
-  const sql = getDb()
   const id = `NTF-${Date.now().toString(36).toUpperCase()}`
 
-  const rows = await sql`
-    INSERT INTO notifications (id, user_id, type, title, body, link, load_id, read, created_at)
-    VALUES (${id}, ${userId}, ${type}, ${title}, ${body}, ${link}, ${loadId}, false, NOW())
-    RETURNING *
-  `
+  const row = await withTenant(tenantId, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO notifications (id, user_id, type, title, body, link, load_id, read, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, false, NOW())
+       RETURNING *`,
+      [id, userId, type, title, body, link, loadId],
+    )
+    return rows[0]
+  })
 
-  return rows[0]
+  return row
 }

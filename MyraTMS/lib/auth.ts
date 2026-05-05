@@ -5,16 +5,29 @@
 //   import { getCurrentUser } from "@/lib/auth"
 //   const user = getCurrentUser(request)
 //   // user.firstName, user.lastName, user.email, user.role, user.userId
-//   // Use `${user.firstName} ${user.lastName}` instead of hardcoded "Sarah Chen"
+//   // user.tenantId — the active tenant for this session
 //
 // The middleware (middleware.ts) ensures all non-public routes have a valid
 // auth-token cookie, so getCurrentUser() will only return null if the token
 // has been tampered with or the secret has rotated.
+//
+// Multi-tenant (Phase 2.3, 2026-05-01):
+//   JwtPayload now includes tenantId / tenantIds / isSuperAdmin per ADR-002.
+//   Legacy tokens (issued before this deploy) lack these fields; getCurrentUser
+//   backfills them with the Myra default per ADR-004 backwards-compat strategy.
+//   The backfill is removed in Phase M4 once all tokens have rotated.
 // ---------------------------------------------------------------------------
 
 import jwt from "jsonwebtoken"
 import bcrypt from "bcryptjs"
 import { NextRequest } from "next/server"
+
+/**
+ * The Myra tenant id, established by migration 027 (BIGSERIAL after the
+ * `_system` tenant which gets id=1). Used as the backwards-compat default
+ * for JWTs that predate the tenant_id claim. Removed in Phase M4.
+ */
+export const LEGACY_DEFAULT_TENANT_ID = 2
 
 export interface JwtPayload {
   userId: string
@@ -23,6 +36,39 @@ export interface JwtPayload {
   firstName: string
   lastName: string
   carrierId?: string
+  /** Active tenant for this session. Required post-Phase-M4. */
+  tenantId: number
+  /** All tenants this user belongs to. Length 1 for single-tenant users. */
+  tenantIds: number[]
+  /**
+   * True if this user can operate cross-tenant via subdomain navigation.
+   * Granted only via direct DB write or super-admin UI (Phase 5.5).
+   */
+  isSuperAdmin?: boolean
+}
+
+/**
+ * The shape of a legacy token (pre-Phase-2.3). Used internally for
+ * backwards-compat backfill. Don't export this.
+ */
+type LegacyJwtPayload = Omit<JwtPayload, "tenantId" | "tenantIds"> &
+  Partial<Pick<JwtPayload, "tenantId" | "tenantIds">>
+
+/**
+ * Backfill missing tenant fields on a decoded payload. Used both at sign
+ * time (createToken with no tenantId provided) and verify time (verifyToken
+ * decoding a legacy token). Idempotent.
+ */
+function backfillTenantClaims(payload: LegacyJwtPayload): JwtPayload {
+  const tenantId =
+    typeof payload.tenantId === "number"
+      ? payload.tenantId
+      : LEGACY_DEFAULT_TENANT_ID
+  const tenantIds =
+    Array.isArray(payload.tenantIds) && payload.tenantIds.length > 0
+      ? payload.tenantIds
+      : [tenantId]
+  return { ...payload, tenantId, tenantIds }
 }
 
 function getJwtSecret(): string {
@@ -41,16 +87,26 @@ export function createToken(
     firstName: string
     lastName: string
     carrierId?: string
+    tenantId?: number
+    tenantIds?: number[]
+    isSuperAdmin?: boolean
   },
   expiresIn: string = "24h"
 ): string {
-  return jwt.sign({ ...payload } as Record<string, unknown>, getJwtSecret(), { expiresIn: expiresIn as unknown as number })
+  // Backfill missing tenant fields with the legacy default. New code should
+  // always provide tenantId/tenantIds explicitly; this safety net protects
+  // older callers during the Phase 2.3 rollout (per ADR-004 §M2d).
+  const fullPayload = backfillTenantClaims(payload as LegacyJwtPayload)
+  return jwt.sign({ ...fullPayload } as Record<string, unknown>, getJwtSecret(), {
+    expiresIn: expiresIn as unknown as number,
+  })
 }
 
 export function verifyToken(token: string): JwtPayload | null {
   try {
-    const decoded = jwt.verify(token, getJwtSecret()) as JwtPayload
-    return decoded
+    const decoded = jwt.verify(token, getJwtSecret()) as LegacyJwtPayload
+    // Backfill missing tenant fields for legacy tokens issued before Phase 2.3.
+    return backfillTenantClaims(decoded)
   } catch {
     return null
   }
@@ -68,6 +124,55 @@ export function getCurrentUser(request: NextRequest): JwtPayload | null {
     return null
   }
   return verifyToken(token)
+}
+
+/**
+ * Tenant context resolved by middleware.ts (ADR-002) and forwarded via
+ * x-myra-tenant-* headers. Route handlers MUST read tenant context through
+ * this helper rather than re-decoding the JWT, so that the resolution order
+ * (JWT > service header > tracking token > subdomain) stays in one place.
+ *
+ * Returns null if middleware did not inject headers — typically only the case
+ * for public/tracking routes that bypass middleware tenant injection.
+ */
+export interface TenantContext {
+  tenantId: number
+  role: string
+  userId: string
+  isSuperAdmin: boolean
+}
+
+export function getTenantContext(request: NextRequest): TenantContext | null {
+  const tenantIdHeader = request.headers.get("x-myra-tenant-id")
+  if (!tenantIdHeader) return null
+  const tenantId = Number.parseInt(tenantIdHeader, 10)
+  if (!Number.isInteger(tenantId) || tenantId <= 0) return null
+  return {
+    tenantId,
+    role: request.headers.get("x-myra-tenant-role") || "",
+    userId: request.headers.get("x-myra-user-id") || "",
+    isSuperAdmin: request.headers.get("x-myra-super-admin") === "1",
+  }
+}
+
+/**
+ * Convenience: get tenant context, or fall back to decoding the JWT directly
+ * (for routes that may run without middleware tenant injection — e.g. legacy
+ * test harnesses). New route code should prefer getTenantContext().
+ */
+export function requireTenantContext(request: NextRequest): TenantContext {
+  const ctx = getTenantContext(request)
+  if (ctx) return ctx
+  const user = getCurrentUser(request)
+  if (!user) {
+    throw new Error("requireTenantContext: no tenant header and no valid JWT")
+  }
+  return {
+    tenantId: user.tenantId,
+    role: user.role,
+    userId: user.userId,
+    isSuperAdmin: user.isSuperAdmin === true,
+  }
 }
 
 /**

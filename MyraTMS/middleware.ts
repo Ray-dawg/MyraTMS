@@ -114,6 +114,34 @@ function withCors(request: NextRequest, response: NextResponse): NextResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tenant resolution (ADR-002)
+// ---------------------------------------------------------------------------
+// Phase 2.3 (2026-05-01): JWT > service header > tracking token > subdomain.
+// For Phase 1 there's only one domain (myra.myraos.ca / app.myraos.ca), so
+// JWT is effectively the only source. Subdomain-driven resolution lights up
+// in Session 6 when whitelabel custom domains arrive.
+//
+// Forwarded headers for downstream handlers:
+//   x-myra-tenant-id       — numeric tenant id
+//   x-myra-tenant-role     — JWT role claim (owner|admin|operator|driver|...)
+//   x-myra-user-id         — JWT userId claim
+//   x-myra-super-admin     — '1' if isSuperAdmin claim set, else absent
+// Read via lib/auth.ts getTenantContext(request) helper.
+
+const LEGACY_DEFAULT_TENANT_ID = 2 // myra tenant id (mirrors lib/auth.ts)
+
+function resolveTenantIdFromPayload(
+  payload: Record<string, unknown>,
+): number {
+  const claim = payload.tenantId
+  if (typeof claim === "number" && Number.isInteger(claim) && claim > 0) {
+    return claim
+  }
+  // Legacy token (predates Phase 2.3 deploy) — backfill per ADR-004 §M2d.
+  return LEGACY_DEFAULT_TENANT_ID
+}
+
+// ---------------------------------------------------------------------------
 // Route protection middleware
 // ---------------------------------------------------------------------------
 
@@ -142,7 +170,9 @@ export async function middleware(request: NextRequest) {
   ]
   const isPublic = publicPaths.some((p) => pathname === p || pathname.startsWith(p))
 
-  // Tracking routes -- token-based auth, not cookie
+  // Tracking routes -- token-based auth (resolved via resolveTrackingToken
+  // in handlers, NOT here). Tenant context attaches at handler level after
+  // token lookup. Bypass cookie-auth and tenant-header injection.
   const isTracking = pathname.startsWith("/api/tracking/")
 
   if (isPublic || isTracking) {
@@ -170,7 +200,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // ---------------------------------------------------------------------------
-  // Role-Based Access Control (RBAC)
+  // Role-Based Access Control (RBAC) + Tenant resolution (ADR-002)
   // Driver JWTs can only access driver-specific API routes.
   //
   // SECURITY FIX: replaced atob(token.split('.')[1]) with verifyJwtEdge().
@@ -207,6 +237,25 @@ export async function middleware(request: NextRequest) {
         )
       }
     }
+
+    // ----- Tenant resolution -----
+    // Inject resolved tenant context into request headers for downstream
+    // route handlers. Read via lib/auth.ts getTenantContext(request).
+    const tenantId = resolveTenantIdFromPayload(payload)
+    const role = typeof payload.role === "string" ? payload.role : ""
+    const userId = typeof payload.userId === "string" ? payload.userId : ""
+    const isSuperAdmin = payload.isSuperAdmin === true
+
+    const requestHeaders = new Headers(request.headers)
+    requestHeaders.set("x-myra-tenant-id", String(tenantId))
+    requestHeaders.set("x-myra-tenant-role", role)
+    requestHeaders.set("x-myra-user-id", userId)
+    if (isSuperAdmin) requestHeaders.set("x-myra-super-admin", "1")
+
+    return withCors(
+      request,
+      NextResponse.next({ request: { headers: requestHeaders } }),
+    )
   }
 
   const response = NextResponse.next()

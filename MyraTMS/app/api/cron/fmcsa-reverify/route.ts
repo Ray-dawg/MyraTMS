@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
+import { forEachActiveTenant } from "@/lib/db/tenant-context"
 
 // POST /api/cron/fmcsa-reverify
 // vercel.json: { "path": "/api/cron/fmcsa-reverify", "schedule": "0 6 * * *" }
-// Re-verifies active carriers (last_fmcsa_sync NULL or >30 days).
-// Processes up to 50 per invocation. Requires x-cron-secret header.
+// Re-verifies active carriers (last_fmcsa_sync NULL or >30 days) for every
+// active tenant. Up to 50 carriers per tenant per invocation. Requires
+// x-cron-secret header.
 
 interface FmcsaCarrier {
   allowedToOperate?: string
@@ -53,40 +54,82 @@ async function fetchFmcsa(dotNumber: string, apiKey: string): Promise<FmcsaCarri
   }
 }
 
-function buildAlerts(carrier: Record<string, unknown>, authorityStatus: string, safetyRating: string, vehicleOos: number, driverOos: number): AlertPayload[] {
+function buildAlerts(
+  carrier: Record<string, unknown>,
+  authorityStatus: string,
+  safetyRating: string,
+  vehicleOos: number,
+  driverOos: number,
+): AlertPayload[] {
   const alerts: AlertPayload[] = []
   const company = carrier.company as string
   const mc = (carrier.mc_number as string) ?? ""
 
   if (authorityStatus !== "Active") {
-    alerts.push({ type: "authority_inactive", severity: "critical", title: "Authority Inactive / Revoked", description: `Operating authority status: ${authorityStatus}. Carrier ${company} (${mc}) cannot legally operate.` })
+    alerts.push({
+      type: "authority_inactive",
+      severity: "critical",
+      title: "Authority Inactive / Revoked",
+      description: `Operating authority status: ${authorityStatus}. Carrier ${company} (${mc}) cannot legally operate.`,
+    })
   }
 
   if (carrier.insurance_expiry) {
-    const daysUntil = Math.floor((new Date(carrier.insurance_expiry as string).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+    const daysUntil = Math.floor(
+      (new Date(carrier.insurance_expiry as string).getTime() - Date.now()) / (1000 * 60 * 60 * 24),
+    )
     if (daysUntil < 0) {
-      alerts.push({ type: "insurance_expired", severity: "critical", title: "Insurance Expired", description: `Insurance for ${company} (${mc}) expired ${Math.abs(daysUntil)} days ago.` })
+      alerts.push({
+        type: "insurance_expired",
+        severity: "critical",
+        title: "Insurance Expired",
+        description: `Insurance for ${company} (${mc}) expired ${Math.abs(daysUntil)} days ago.`,
+      })
     } else if (daysUntil <= 30) {
-      alerts.push({ type: "insurance_expiring", severity: "warning", title: "Insurance Expiring Soon", description: `Insurance for ${company} (${mc}) expires in ${daysUntil} days.` })
+      alerts.push({
+        type: "insurance_expiring",
+        severity: "warning",
+        title: "Insurance Expiring Soon",
+        description: `Insurance for ${company} (${mc}) expires in ${daysUntil} days.`,
+      })
     }
   }
 
   if (safetyRating === "Unsatisfactory") {
-    alerts.push({ type: "safety_concern", severity: "critical", title: "Unsatisfactory Safety Rating", description: `${company} (${mc}) has an Unsatisfactory FMCSA safety rating.` })
+    alerts.push({
+      type: "safety_concern",
+      severity: "critical",
+      title: "Unsatisfactory Safety Rating",
+      description: `${company} (${mc}) has an Unsatisfactory FMCSA safety rating.`,
+    })
   } else if (safetyRating === "Conditional") {
-    alerts.push({ type: "safety_concern", severity: "warning", title: "Conditional Safety Rating", description: `${company} (${mc}) has a Conditional FMCSA safety rating. Review required.` })
+    alerts.push({
+      type: "safety_concern",
+      severity: "warning",
+      title: "Conditional Safety Rating",
+      description: `${company} (${mc}) has a Conditional FMCSA safety rating. Review required.`,
+    })
   }
 
   // National averages: driver OOS 5.51%, vehicle OOS 20.72%
   if (driverOos > 5.51 || vehicleOos > 20.72) {
-    alerts.push({ type: "high_oos_rate", severity: vehicleOos > 25 || driverOos > 10 ? "critical" : "warning", title: "High Out-of-Service Rate", description: `Vehicle OOS: ${vehicleOos}% (avg 20.72%). Driver OOS: ${driverOos}% (avg 5.51%).` })
+    alerts.push({
+      type: "high_oos_rate",
+      severity: vehicleOos > 25 || driverOos > 10 ? "critical" : "warning",
+      title: "High Out-of-Service Rate",
+      description: `Vehicle OOS: ${vehicleOos}% (avg 20.72%). Driver OOS: ${driverOos}% (avg 5.51%).`,
+    })
   }
 
   return alerts
 }
 
 function alertId(): string {
-  return "CMP-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase()
+  return (
+    "CMP-" +
+    Date.now().toString(36).toUpperCase() +
+    Math.random().toString(36).slice(2, 5).toUpperCase()
+  )
 }
 
 export async function POST(request: NextRequest) {
@@ -102,84 +145,142 @@ export async function POST(request: NextRequest) {
   const fmcsaKey = process.env.FMCSA_API_KEY
   if (!fmcsaKey) {
     console.warn("[cron/fmcsa-reverify] FMCSA_API_KEY is not configured -- skipping run")
-    return NextResponse.json({ processed: 0, issues_found: 0, errors: [], skipped_reason: "FMCSA_API_KEY not configured" })
+    return NextResponse.json({
+      processed: 0,
+      issues_found: 0,
+      errors: [],
+      skipped_reason: "FMCSA_API_KEY not configured",
+    })
   }
 
-  const sql = getDb()
-  let processed = 0
-  let issues_found = 0
-  const errors: string[] = []
+  const summary = await forEachActiveTenant(
+    "cron:fmcsa-reverify",
+    async ({ tenantId, slug, client }) => {
+      let processed = 0
+      let issuesFound = 0
+      const errors: string[] = []
 
-  let staleCarriers: Record<string, unknown>[]
-  try {
-    staleCarriers = await sql`
-      SELECT id, company, mc_number, dot_number, insurance_expiry, authority_status, safety_rating, liability_insurance, cargo_insurance, vehicle_oos_percent, driver_oos_percent
-      FROM carriers
-      WHERE status = 'active'
-        AND (last_fmcsa_sync IS NULL OR last_fmcsa_sync < NOW() - INTERVAL '30 days')
-      ORDER BY last_fmcsa_sync ASC NULLS FIRST
-      LIMIT 50
-    ` as Record<string, unknown>[]
-  } catch (err) {
-    console.error("[cron/fmcsa-reverify] Failed to query stale carriers:", err)
-    return NextResponse.json({ error: "Database error" }, { status: 500 })
-  }
+      const { rows: staleCarriers } = await client.query(
+        `SELECT id, company, mc_number, dot_number, insurance_expiry, authority_status, safety_rating,
+                liability_insurance, cargo_insurance, vehicle_oos_percent, driver_oos_percent
+           FROM carriers
+          WHERE status = 'active'
+            AND (last_fmcsa_sync IS NULL OR last_fmcsa_sync < NOW() - INTERVAL '30 days')
+          ORDER BY last_fmcsa_sync ASC NULLS FIRST
+          LIMIT 50`,
+      )
 
-  console.log(`[cron/fmcsa-reverify] Found ${staleCarriers.length} carrier(s) due for re-verification`)
+      console.log(
+        `[cron/fmcsa-reverify] tenant=${slug}(${tenantId}) found ${staleCarriers.length} carrier(s) due for re-verification`,
+      )
 
-  for (const carrier of staleCarriers) {
-    const carrierId = carrier.id as string
-    const dotNumber = carrier.dot_number as string | null
+      for (const carrier of staleCarriers) {
+        const carrierId = carrier.id as string
+        const dotNumber = carrier.dot_number as string | null
 
-    try {
-      if (!dotNumber) {
-        console.log(`[cron/fmcsa-reverify] Carrier ${carrierId} (${carrier.company}) -- no DOT number, stamping sync time`)
-        await sql`UPDATE carriers SET last_fmcsa_sync = NOW() WHERE id = ${carrierId}`
-        processed++
-        continue
-      }
+        try {
+          if (!dotNumber) {
+            await client.query(
+              `UPDATE carriers SET last_fmcsa_sync = NOW() WHERE id = $1`,
+              [carrierId],
+            )
+            processed++
+            continue
+          }
 
-      console.log(`[cron/fmcsa-reverify] Verifying carrier ${carrierId} (${carrier.company}) DOT ${dotNumber}`)
-      const fc = await fetchFmcsa(dotNumber, fmcsaKey)
+          const fc = await fetchFmcsa(dotNumber, fmcsaKey)
+          if (!fc) {
+            await client.query(
+              `UPDATE carriers SET last_fmcsa_sync = NOW() WHERE id = $1`,
+              [carrierId],
+            )
+            processed++
+            await new Promise((r) => setTimeout(r, 200))
+            continue
+          }
 
-      if (!fc) {
-        console.warn(`[cron/fmcsa-reverify] No FMCSA data for carrier ${carrierId} (DOT ${dotNumber})`)
-        await sql`UPDATE carriers SET last_fmcsa_sync = NOW() WHERE id = ${carrierId}`
-        processed++
+          const authorityStatus = mapAuthorityStatus(fc.allowedToOperate)
+          const safetyRating = mapSafetyRating(fc.safetyRating)
+          const liabilityInsurance =
+            fc.bipdInsuranceOnFile ?? (carrier.liability_insurance as number) ?? 0
+          const cargoInsurance =
+            fc.cargoInsuranceOnFile ?? (carrier.cargo_insurance as number) ?? 0
+          const vehicleOos =
+            fc.vehicleOosRate ?? (carrier.vehicle_oos_percent as number) ?? 0
+          const driverOos =
+            fc.driverOosRate ?? (carrier.driver_oos_percent as number) ?? 0
+
+          await client.query(
+            `UPDATE carriers
+                SET authority_status = $1, safety_rating = $2,
+                    liability_insurance = $3, cargo_insurance = $4,
+                    vehicle_oos_percent = $5, driver_oos_percent = $6,
+                    last_fmcsa_sync = NOW(), updated_at = NOW()
+              WHERE id = $7`,
+            [
+              authorityStatus,
+              safetyRating,
+              liabilityInsurance,
+              cargoInsurance,
+              vehicleOos,
+              driverOos,
+              carrierId,
+            ],
+          )
+
+          const alerts = buildAlerts(
+            carrier,
+            authorityStatus,
+            safetyRating,
+            vehicleOos,
+            driverOos,
+          )
+
+          await client.query(
+            `UPDATE compliance_alerts
+                SET resolved = true, resolved_at = NOW()
+              WHERE carrier_id = $1 AND resolved = false`,
+            [carrierId],
+          )
+
+          for (const alert of alerts) {
+            await client.query(
+              `INSERT INTO compliance_alerts (
+                 id, carrier_id, type, severity, title, description, detected_at, resolved
+               ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), false)`,
+              [alertId(), carrierId, alert.type, alert.severity, alert.title, alert.description],
+            )
+          }
+
+          if (alerts.length > 0) issuesFound += alerts.length
+          processed++
+        } catch (err) {
+          const msg = `Carrier ${carrierId} (${carrier.company}): ${err instanceof Error ? err.message : String(err)}`
+          console.error(`[cron/fmcsa-reverify] Error -- ${msg}`)
+          errors.push(msg)
+        }
         await new Promise((r) => setTimeout(r, 200))
-        continue
       }
 
-      const authorityStatus = mapAuthorityStatus(fc.allowedToOperate)
-      const safetyRating = mapSafetyRating(fc.safetyRating)
-      const liabilityInsurance = fc.bipdInsuranceOnFile ?? (carrier.liability_insurance as number) ?? 0
-      const cargoInsurance = fc.cargoInsuranceOnFile ?? (carrier.cargo_insurance as number) ?? 0
-      const vehicleOos = fc.vehicleOosRate ?? (carrier.vehicle_oos_percent as number) ?? 0
-      const driverOos = fc.driverOosRate ?? (carrier.driver_oos_percent as number) ?? 0
+      return { processed, issues_found: issuesFound, errors }
+    },
+  )
 
-      await sql`
-        UPDATE carriers SET authority_status = ${authorityStatus}, safety_rating = ${safetyRating}, liability_insurance = ${liabilityInsurance}, cargo_insurance = ${cargoInsurance}, vehicle_oos_percent = ${vehicleOos}, driver_oos_percent = ${driverOos}, last_fmcsa_sync = NOW(), updated_at = NOW() WHERE id = ${carrierId}
-      `
-      const alerts = buildAlerts(carrier, authorityStatus, safetyRating, vehicleOos, driverOos)
-      await sql`
-        UPDATE compliance_alerts SET resolved = true, resolved_at = NOW() WHERE carrier_id = ${carrierId} AND resolved = false
-      `
-      for (const alert of alerts) {
-        await sql`
-          INSERT INTO compliance_alerts (id, carrier_id, type, severity, title, description, detected_at, resolved) VALUES (${alertId()}, ${carrierId}, ${alert.type}, ${alert.severity}, ${alert.title}, ${alert.description}, NOW(), false)
-        `
+  const totals = summary.results.reduce(
+    (acc, r) => {
+      if (r.ok && r.result) {
+        acc.processed += r.result.processed
+        acc.issues_found += r.result.issues_found
+        acc.errors += r.result.errors.length
       }
-      if (alerts.length > 0) { console.log(`[cron/fmcsa-reverify] Carrier ${carrierId} -- ${alerts.length} issue(s) found`) } else { console.log(`[cron/fmcsa-reverify] Carrier ${carrierId} -- compliant, no issues`) }
-      processed++
-    } catch (err) {
-      const msg = `Carrier ${carrierId} (${carrier.company}): ${err instanceof Error ? err.message : String(err)}`
-      console.error(`[cron/fmcsa-reverify] Error -- ${msg}`)
-      errors.push(msg)
-    }
-    await new Promise((r) => setTimeout(r, 200))
-  }
+      return acc
+    },
+    { processed: 0, issues_found: 0, errors: 0 },
+  )
 
-  const summary = { processed, issues_found, errors }
-  console.log(`[cron/fmcsa-reverify] Complete -- processed=${processed} issues_found=${issues_found} errors=${errors.length}`)
-  return NextResponse.json(summary)
+  console.log(
+    `[cron/fmcsa-reverify] tenants=${summary.totalTenants} ok=${summary.succeeded} failed=${summary.failed} processed=${totals.processed} issues_found=${totals.issues_found} errors=${totals.errors} duration=${summary.durationMs}ms`,
+  )
+
+  return NextResponse.json({ ...summary, totals })
 }

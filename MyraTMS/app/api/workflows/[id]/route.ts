@@ -1,74 +1,95 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
-import { getCurrentUser } from "@/lib/auth"
+import { withTenant } from "@/lib/db/tenant-context"
+import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
+
+const ALLOWED_COLUMNS: Record<string, { col: string; jsonStringify?: boolean }> = {
+  name: { col: "name" },
+  description: { col: "description" },
+  active: { col: "active" },
+  triggerType: { col: "trigger_type" },
+  triggerConfig: { col: "trigger_config" },
+  conditions: { col: "conditions", jsonStringify: true },
+  actions: { col: "actions", jsonStringify: true },
+  lastRun: { col: "last_run" },
+  runsToday: { col: "runs_today" },
+}
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
-
+  const ctx = requireTenantContext(req)
   const { id } = await params
-  const sql = getDb()
-  const rows = await sql`SELECT * FROM workflows WHERE id = ${id}`
 
-  if (rows.length === 0) return apiError("Workflow not found", 404)
-  return NextResponse.json(rows[0])
+  const row = await withTenant(ctx.tenantId, async (client) => {
+    const { rows } = await client.query(
+      `SELECT * FROM workflows WHERE id = $1`,
+      [id],
+    )
+    return rows[0] ?? null
+  })
+  if (!row) return apiError("Workflow not found", 404)
+  return NextResponse.json(row)
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
-
+  const ctx = requireTenantContext(req)
   const { id } = await params
   const body = await req.json()
-  const sql = getDb()
 
-  // Check existence
-  const existing = await sql`SELECT id FROM workflows WHERE id = ${id}`
-  if (existing.length === 0) return apiError("Workflow not found", 404)
-
-  // Build dynamic update
-  if (body.name !== undefined) {
-    await sql`UPDATE workflows SET name = ${body.name}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.description !== undefined) {
-    await sql`UPDATE workflows SET description = ${body.description}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.active !== undefined) {
-    await sql`UPDATE workflows SET active = ${body.active}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.triggerType !== undefined) {
-    await sql`UPDATE workflows SET trigger_type = ${body.triggerType}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.triggerConfig !== undefined) {
-    await sql`UPDATE workflows SET trigger_config = ${body.triggerConfig}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.conditions !== undefined) {
-    await sql`UPDATE workflows SET conditions = ${JSON.stringify(body.conditions)}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.actions !== undefined) {
-    await sql`UPDATE workflows SET actions = ${JSON.stringify(body.actions)}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.lastRun !== undefined) {
-    await sql`UPDATE workflows SET last_run = ${body.lastRun}, updated_at = NOW() WHERE id = ${id}`
-  }
-  if (body.runsToday !== undefined) {
-    await sql`UPDATE workflows SET runs_today = ${body.runsToday}, updated_at = NOW() WHERE id = ${id}`
+  const setClauses: string[] = []
+  const values: unknown[] = []
+  for (const [key, value] of Object.entries(body)) {
+    const spec = ALLOWED_COLUMNS[key]
+    if (!spec) continue
+    setClauses.push(`${spec.col} = $${values.length + 1}`)
+    values.push(spec.jsonStringify ? JSON.stringify(value) : value)
   }
 
-  const updated = await sql`SELECT * FROM workflows WHERE id = ${id}`
-  return NextResponse.json(updated[0])
+  const updated = await withTenant(ctx.tenantId, async (client) => {
+    const { rows: existing } = await client.query(
+      `SELECT id FROM workflows WHERE id = $1`,
+      [id],
+    )
+    if (existing.length === 0) return null
+
+    if (setClauses.length > 0) {
+      const setString = setClauses.join(", ")
+      await client.query(
+        `UPDATE workflows SET ${setString}, updated_at = NOW() WHERE id = $${values.length + 1}`,
+        [...values, id],
+      )
+    }
+
+    const { rows } = await client.query(
+      `SELECT * FROM workflows WHERE id = $1`,
+      [id],
+    )
+    return rows[0] ?? null
+  })
+
+  if (!updated) return apiError("Workflow not found", 404)
+  return NextResponse.json(updated)
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
-
+  const ctx = requireTenantContext(req)
   const { id } = await params
-  const sql = getDb()
-  const existing = await sql`SELECT id FROM workflows WHERE id = ${id}`
-  if (existing.length === 0) return apiError("Workflow not found", 404)
 
-  await sql`DELETE FROM workflows WHERE id = ${id}`
+  const found = await withTenant(ctx.tenantId, async (client) => {
+    const { rows } = await client.query(
+      `SELECT id FROM workflows WHERE id = $1`,
+      [id],
+    )
+    if (rows.length === 0) return false
+    await client.query(`DELETE FROM workflows WHERE id = $1`, [id])
+    return true
+  })
+
+  if (!found) return apiError("Workflow not found", 404)
   return NextResponse.json({ success: true })
 }

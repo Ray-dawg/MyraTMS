@@ -1,17 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
+import { requireTenantContext } from "@/lib/auth"
 import { generateQuote } from "@/lib/quoting"
 import { apiError } from "@/lib/api-error"
 
 export async function POST(req: NextRequest) {
   try {
+    const ctx = requireTenantContext(req)
     const body = await req.json()
-
     if (!body.origin || !body.destination) {
       return apiError("Origin and destination are required", 400)
     }
 
     const quote = await generateQuote({
+      tenantId: ctx.tenantId,
       origin: body.origin,
       destination: body.destination,
       equipmentType: body.equipmentType || "dry_van",
@@ -33,16 +35,15 @@ export async function POST(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   try {
-    const sql = getDb()
+    const ctx = requireTenantContext(req)
     const { searchParams } = req.nextUrl
     const status = searchParams.get("status")
     const shipperId = searchParams.get("shipperId")
     const confidenceLabel = searchParams.get("confidenceLabel")
     const search = searchParams.get("search")
-    const limit = parseInt(searchParams.get("limit") || "100")
-    const offset = parseInt(searchParams.get("offset") || "0")
+    const limit = Number.parseInt(searchParams.get("limit") || "100")
+    const offset = Number.parseInt(searchParams.get("offset") || "0")
 
-    // Build dynamic query conditions
     const conditions: string[] = []
     const values: unknown[] = []
 
@@ -59,7 +60,9 @@ export async function GET(req: NextRequest) {
       values.push(confidenceLabel)
     }
     if (search) {
-      conditions.push(`(reference ILIKE $${values.length + 1} OR origin_address ILIKE $${values.length + 1} OR dest_address ILIKE $${values.length + 1} OR shipper_name ILIKE $${values.length + 1})`)
+      conditions.push(
+        `(reference ILIKE $${values.length + 1} OR origin_address ILIKE $${values.length + 1} OR dest_address ILIKE $${values.length + 1} OR shipper_name ILIKE $${values.length + 1})`,
+      )
       values.push(`%${search}%`)
     }
 
@@ -67,7 +70,10 @@ export async function GET(req: NextRequest) {
     const query = `SELECT * FROM quotes ${where} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`
     values.push(limit, offset)
 
-    const rows = await sql.query(query, values)
+    const rows = await withTenant(ctx.tenantId, async (client) => {
+      const { rows } = await client.query(query, values)
+      return rows
+    })
     return NextResponse.json(rows)
   } catch (err) {
     console.error("[quotes GET] error:", err)

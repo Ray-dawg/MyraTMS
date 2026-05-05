@@ -22,6 +22,9 @@ let getCurrentUser: typeof import("@/lib/auth").getCurrentUser
 let requireRole: typeof import("@/lib/auth").requireRole
 let hashPassword: typeof import("@/lib/auth").hashPassword
 let comparePassword: typeof import("@/lib/auth").comparePassword
+let getTenantContext: typeof import("@/lib/auth").getTenantContext
+let requireTenantContext: typeof import("@/lib/auth").requireTenantContext
+let LEGACY_DEFAULT_TENANT_ID: typeof import("@/lib/auth").LEGACY_DEFAULT_TENANT_ID
 
 beforeAll(async () => {
   const mod = await import("@/lib/auth")
@@ -31,6 +34,9 @@ beforeAll(async () => {
   requireRole = mod.requireRole
   hashPassword = mod.hashPassword
   comparePassword = mod.comparePassword
+  getTenantContext = mod.getTenantContext
+  requireTenantContext = mod.requireTenantContext
+  LEGACY_DEFAULT_TENANT_ID = mod.LEGACY_DEFAULT_TENANT_ID
 })
 
 const samplePayload = {
@@ -39,6 +45,8 @@ const samplePayload = {
   role: "admin",
   firstName: "Sarah",
   lastName: "Chen",
+  tenantId: 2,
+  tenantIds: [2],
 }
 
 // -- createToken / verifyToken ---------------------------------------------
@@ -229,5 +237,161 @@ describe("hashPassword / comparePassword", () => {
   it("rejects wrong password", async () => {
     const hash = await hashPassword("CorrectPassword")
     expect(await comparePassword("WrongPassword", hash)).toBe(false)
+  })
+})
+
+// -- Multi-tenant JWT claims (Phase 2.3 / ADR-002) -------------------------
+
+describe("createToken — tenant claims", () => {
+  it("preserves explicit tenantId and tenantIds", () => {
+    const token = createToken({
+      ...samplePayload,
+      tenantId: 5,
+      tenantIds: [5, 7],
+    })
+    const decoded = jwt.decode(token) as Record<string, unknown>
+    expect(decoded.tenantId).toBe(5)
+    expect(decoded.tenantIds).toEqual([5, 7])
+  })
+
+  it("backfills LEGACY_DEFAULT_TENANT_ID when tenantId is omitted", () => {
+    // Caller is a legacy site that hasn't been updated to pass tenantId yet.
+    const legacyInput = {
+      userId: "usr-legacy",
+      email: "legacy@myratms.com",
+      role: "broker",
+      firstName: "Legacy",
+      lastName: "User",
+    }
+    // Cast through unknown so the test exercises the runtime backfill, not TS.
+    const token = createToken(legacyInput as unknown as Parameters<typeof createToken>[0])
+    const decoded = jwt.decode(token) as Record<string, unknown>
+    expect(decoded.tenantId).toBe(LEGACY_DEFAULT_TENANT_ID)
+    expect(decoded.tenantIds).toEqual([LEGACY_DEFAULT_TENANT_ID])
+  })
+
+  it("derives tenantIds from tenantId when only tenantId is provided", () => {
+    const token = createToken({ ...samplePayload, tenantId: 9, tenantIds: undefined })
+    const decoded = jwt.decode(token) as Record<string, unknown>
+    expect(decoded.tenantId).toBe(9)
+    expect(decoded.tenantIds).toEqual([9])
+  })
+
+  it("includes isSuperAdmin when set", () => {
+    const token = createToken({ ...samplePayload, isSuperAdmin: true })
+    const decoded = jwt.decode(token) as Record<string, unknown>
+    expect(decoded.isSuperAdmin).toBe(true)
+  })
+})
+
+describe("verifyToken — legacy backfill", () => {
+  it("backfills tenantId/tenantIds on legacy tokens issued without claims", () => {
+    // Sign a token directly via jsonwebtoken (bypassing createToken's backfill)
+    // to simulate a legacy token issued before Phase 2.3.
+    const legacyToken = jwt.sign(
+      {
+        userId: "usr-legacy",
+        email: "legacy@myratms.com",
+        role: "admin",
+        firstName: "L",
+        lastName: "U",
+      },
+      TEST_SECRET,
+      { expiresIn: "1h" },
+    )
+    const result = verifyToken(legacyToken)
+    expect(result).not.toBeNull()
+    expect(result!.tenantId).toBe(LEGACY_DEFAULT_TENANT_ID)
+    expect(result!.tenantIds).toEqual([LEGACY_DEFAULT_TENANT_ID])
+  })
+})
+
+// -- getTenantContext / requireTenantContext -------------------------------
+
+function makeFakeRequestWithHeaders(headers: Record<string, string>) {
+  return {
+    cookies: { get: () => undefined },
+    headers: {
+      get(name: string) {
+        // Header lookup is case-insensitive in real Headers; tests pass the
+        // exact casing the auth code uses.
+        return headers[name] ?? null
+      },
+    },
+  } as unknown as import("next/server").NextRequest
+}
+
+describe("getTenantContext", () => {
+  it("reads tenant context from x-myra-tenant-* headers", () => {
+    const req = makeFakeRequestWithHeaders({
+      "x-myra-tenant-id": "7",
+      "x-myra-tenant-role": "admin",
+      "x-myra-user-id": "usr-007",
+      "x-myra-super-admin": "1",
+    })
+    const ctx = getTenantContext(req)
+    expect(ctx).toEqual({
+      tenantId: 7,
+      role: "admin",
+      userId: "usr-007",
+      isSuperAdmin: true,
+    })
+  })
+
+  it("returns null when x-myra-tenant-id header is absent", () => {
+    const req = makeFakeRequestWithHeaders({})
+    expect(getTenantContext(req)).toBeNull()
+  })
+
+  it("returns null when x-myra-tenant-id is non-numeric", () => {
+    const req = makeFakeRequestWithHeaders({ "x-myra-tenant-id": "abc" })
+    expect(getTenantContext(req)).toBeNull()
+  })
+
+  it("returns null when x-myra-tenant-id is zero or negative", () => {
+    expect(getTenantContext(makeFakeRequestWithHeaders({ "x-myra-tenant-id": "0" }))).toBeNull()
+    expect(getTenantContext(makeFakeRequestWithHeaders({ "x-myra-tenant-id": "-3" }))).toBeNull()
+  })
+
+  it("treats x-myra-super-admin != '1' as not-super-admin", () => {
+    const req = makeFakeRequestWithHeaders({
+      "x-myra-tenant-id": "2",
+      "x-myra-super-admin": "true",
+    })
+    const ctx = getTenantContext(req)
+    expect(ctx!.isSuperAdmin).toBe(false)
+  })
+})
+
+describe("requireTenantContext", () => {
+  it("prefers headers when present", () => {
+    const req = makeFakeRequestWithHeaders({
+      "x-myra-tenant-id": "7",
+      "x-myra-tenant-role": "broker",
+      "x-myra-user-id": "usr-7",
+    })
+    const ctx = requireTenantContext(req)
+    expect(ctx.tenantId).toBe(7)
+    expect(ctx.role).toBe("broker")
+  })
+
+  it("falls back to decoding the JWT cookie when headers are missing", () => {
+    const token = createToken({ ...samplePayload, tenantId: 3, tenantIds: [3] })
+    const req = {
+      cookies: {
+        get(name: string) {
+          return name === "auth-token" ? { value: token } : undefined
+        },
+      },
+      headers: { get: () => null },
+    } as unknown as import("next/server").NextRequest
+    const ctx = requireTenantContext(req)
+    expect(ctx.tenantId).toBe(3)
+    expect(ctx.userId).toBe("usr-001")
+  })
+
+  it("throws when neither headers nor a valid JWT are present", () => {
+    const req = makeFakeRequestWithHeaders({})
+    expect(() => requireTenantContext(req)).toThrow(/no tenant header/i)
   })
 })

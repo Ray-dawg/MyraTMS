@@ -1,5 +1,11 @@
+/**
+ * Quoting-engine distance service. Mirrors lib/geo/distance-service but
+ * with region-mapper integration. Cache table (distance_cache) is global.
+ */
+
 import crypto from "crypto"
-import { getDb } from "@/lib/db"
+import { withTenant } from "@/lib/db/tenant-context"
+import { LEGACY_DEFAULT_TENANT_ID } from "@/lib/auth"
 import { normalizeRegion } from "./region-mapper"
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN
@@ -31,9 +37,7 @@ function hashCoords(lat: number, lng: number): string {
 }
 
 export async function geocodeAddress(address: string): Promise<{ lat: number; lng: number }> {
-  if (!MAPBOX_TOKEN) {
-    throw new Error("Mapbox token not configured — cannot geocode")
-  }
+  if (!MAPBOX_TOKEN) throw new Error("Mapbox token not configured — cannot geocode")
   const encoded = encodeURIComponent(address)
   const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?country=CA,US&limit=1&access_token=${MAPBOX_TOKEN}`
   const res = await fetch(url)
@@ -50,19 +54,22 @@ export async function getDrivingDistance(
   destLat: number,
   destLng: number,
   originAddress: string,
-  destAddress: string
+  destAddress: string,
 ): Promise<DistanceResult> {
   const originHash = hashCoords(originLat, originLng)
   const destHash = hashCoords(destLat, destLng)
-  const sql = getDb()
 
-  // Check cache (valid for 30 days)
-  const cached = await sql`
-    SELECT * FROM distance_cache
-    WHERE origin_hash = ${originHash} AND dest_hash = ${destHash}
-      AND created_at > NOW() - INTERVAL '30 days'
-    LIMIT 1
-  `
+  const cached = await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+    const { rows } = await client.query(
+      `SELECT * FROM distance_cache
+        WHERE origin_hash = $1 AND dest_hash = $2
+          AND created_at > NOW() - INTERVAL '30 days'
+        LIMIT 1`,
+      [originHash, destHash],
+    )
+    return rows
+  })
+
   if (cached.length > 0) {
     const c = cached[0]
     return {
@@ -78,9 +85,7 @@ export async function getDrivingDistance(
     }
   }
 
-  // Mapbox Directions API
   if (!MAPBOX_TOKEN) {
-    // Fallback: haversine straight-line × 1.25 factor
     const R = 6371
     const dLat = ((destLat - originLat) * Math.PI) / 180
     const dLng = ((destLng - originLng) * Math.PI) / 180
@@ -116,17 +121,22 @@ export async function getDrivingDistance(
   const distanceMiles = Math.round(distanceKm * 0.621371 * 10) / 10
   const driveTimeHours = Math.round((route.duration / 3600) * 10) / 10
 
-  // Store in cache
-  await sql`
-    INSERT INTO distance_cache (origin_hash, dest_hash, origin_address, dest_address,
-      distance_km, distance_miles, drive_time_hours, route_geometry)
-    VALUES (
-      ${originHash}, ${destHash}, ${originAddress}, ${destAddress},
-      ${distanceKm}, ${distanceMiles}, ${driveTimeHours},
-      ${JSON.stringify(route.geometry)}
+  await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+    await client.query(
+      `INSERT INTO distance_cache (
+         origin_hash, dest_hash, origin_address, dest_address,
+         distance_km, distance_miles, drive_time_hours, route_geometry
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8
+       )
+       ON CONFLICT DO NOTHING`,
+      [
+        originHash, destHash, originAddress, destAddress,
+        distanceKm, distanceMiles, driveTimeHours,
+        JSON.stringify(route.geometry),
+      ],
     )
-    ON CONFLICT DO NOTHING
-  `
+  })
 
   return {
     distanceKm,
@@ -143,7 +153,7 @@ export async function getDrivingDistance(
 
 export async function resolveAddressToDistance(
   originAddress: string,
-  destAddress: string
+  destAddress: string,
 ): Promise<DistanceResult> {
   const [origin, dest] = await Promise.all([
     geocodeAddress(originAddress),
@@ -152,6 +162,6 @@ export async function resolveAddressToDistance(
   return getDrivingDistance(
     origin.lat, origin.lng,
     dest.lat, dest.lng,
-    originAddress, destAddress
+    originAddress, destAddress,
   )
 }
