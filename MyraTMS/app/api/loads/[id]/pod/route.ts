@@ -4,6 +4,7 @@ import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import { put } from "@vercel/blob"
 import { attachDocument } from "@/lib/documents"
+import { tenantBlobKey } from "@/lib/blob/tenant-paths"
 import { createNotification } from "@/lib/notifications"
 import { generateRatingToken } from "@/lib/rating-token"
 import { buildDeliveryConfirmationHtml } from "@/lib/email-templates/delivery-confirmation"
@@ -89,9 +90,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const load = pre.load
 
-    // Upload to Vercel Blob
-    const filename = `pod/${loadId}/${Date.now()}-${file.name}`
-    const blob = await put(filename, file, { access: "public", addRandomSuffix: false })
+    // Upload to Vercel Blob — namespaced under tenants/{tenantId}/pods/ per Phase 3.4
+    const blobKey = tenantBlobKey(
+      ctx.tenantId,
+      "pods",
+      `${loadId}-${Date.now()}-${file.name}`,
+    )
+    const blob = await put(blobKey, file, { access: "public", addRandomSuffix: false })
 
     // Update DB + create invoice
     const result = await withTenant(ctx.tenantId, async (client) => {

@@ -1,7 +1,7 @@
 # SESSION_TIME_LOG.md
 
 > **Cadence:** Updated at the end of each session.
-> **Last update:** 2026-05-04 (Session 3 complete)
+> **Last update:** 2026-05-05 (Session 4 complete)
 > **Related:** [STACK_DRIFT_REPORT.md](./STACK_DRIFT_REPORT.md) §9 (revised time budget)
 
 This document tracks actual time spent per session against the budgeted estimate. Per Patrice's Confirmation 3, total budget is **21.5–28 hours** across 8 sessions.
@@ -19,7 +19,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | 1 | Phase 0 — Architecture decisions + audit | 2026-05-01 | 2–3h | ~3h | 0 to +50% (within range) | Single-day completion. Three rounds of input from Patrice (questions → answers → finalization). 8 ADR resolutions + 5 new docs added in the final pass extended scope; would have been ~2.5h without the new doc requirements. |
 | 2 | Phase 1 — Database foundation | 2026-05-01 | 5–6h | ~5h | within range | All deliverables produced: 3 migrations + 3 rollbacks, crypto module + 20 unit tests, tenant-context (Pool/WebSocket), defaults + validators, integration test suite (5 scenarios). One architectural deviation surfaced: HTTP `getDb()` cannot carry tenant context, so `withTenant` uses Pool/WebSocket. Materially affects the route-refactor shape in Session 3. Migrations not yet applied to staging — pending Patrice authorization (see STAGING_APPLY.md §7). |
 | 3 | Phase 2 — Application middleware + auth | 2026-05-01 → 2026-05-04 | 4h | ~5h | +25% (above 20% trigger) | All deliverables done: middleware ADR-002, JWT shape change with backfill, 71 tenant-scoped routes converted, 4 crons via new `forEachActiveTenant`, 6 Engine 2 routes deferred per Rule A, RankerWorker hotfix, pre-existing SQL injection fix in shippers PATCH. Production code typechecks clean; 232/237 tests pass (5 pre-existing Engine 2 cost-calculator failures). 25% overage tripped the 20% trigger — root cause: 2 unplanned items (RankerWorker hotfix + SQL injection fix) plus a heavier-than-expected workflow-engine test rewrite. See [SESSION_3_SUMMARY.md](./SESSION_3_SUMMARY.md) §6 for full breakdown. |
-| 4 | Phase 3 — Tenant onboarding system (backend) | TBD | 4–5h | — | — | |
+| 4 | Phase 3 — Tenant onboarding system (backend) | 2026-05-05 | 4–5h | ~4h | within range | All deliverables: `lib/tenants/config-schema.ts` with module-load coverage guard, `lib/blob/tenant-paths.ts`, `requireSuperAdmin` helper, 8 new admin route files (`/api/admin/config`, `/api/admin/tenants/*`), POD + document upload routes switched to tenant-prefixed Blob keys, 43 new unit tests. 275/280 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). Came in at mid-band, recovering from Session 3's +25% overage. See [SESSION_4_SUMMARY.md](./SESSION_4_SUMMARY.md) §3 for explicit deferrals (purge executor cron, zip-with-attachments export, user_invites enum widening). |
 | 5 | Phase 4 — Feature gating + subscription tiers (no billing) | TBD | 2h | — | — | Trimmed from 2–3h: billing deferred per [BILLING_DEFERRED.md](./BILLING_DEFERRED.md). |
 | 6 | Phase 5 — UI: tenant-aware shell + onboarding wizard | TBD | 3–4h | — | — | Patrice review gate before merging. |
 | 7 | Phase 6 (warehouse integration points only) + Phase 7 (testing & validation) | TBD | 3–4h | — | — | Phase 6 collapsed to 30 min documentation per Patrice Answer 5. |
@@ -27,7 +27,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | Post | Phase M5 — Engine 2 multi-tenanting | Post-Engine-2-v1-validation | 2–3h | — | — | Triggered by Engine 2 v1 in prod for ≥24h. |
 
 **Total budgeted:** 21.5–28h core + 2–3h post = **23.5–31h**
-**Total actual to date:** ~13h (54% of low estimate, 42% of high estimate) after Session 3
+**Total actual to date:** ~17h (71% of low estimate, 55% of high estimate) after Session 4
 
 ## §3 — Cumulative trend
 
@@ -36,7 +36,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | 1 | 3h | 2h | 3h | At high estimate; within tolerance |
 | 2 | 8h | 7h | 9h | Within tolerance; cumulative on track |
 | 3 | 13h | 11h | 13h | At high estimate; 20% per-session trigger tripped (root cause documented), cumulative still within tolerance |
-| 4 | TBD | 15h | 18h | |
+| 4 | 17h | 15h | 18h | Mid-band; recovered from Session 3's per-session trigger |
 | 5 | TBD | 17h | 20h | |
 | 6 | TBD | 20h | 24h | |
 | 7 | TBD | 23h | 28h | |
@@ -118,7 +118,35 @@ This document tracks actual time spent per session against the budgeted estimate
 - Rewriting the workflow-engine test mocks from `getDb`-style to `withTenant`-style was the single most expensive non-route task — 30 min for one test file. There are no other tests with that mocking pattern in scope, but if future sessions add new lib helpers with new test files, this is the recipe.
 - Engine 2's `db.sql: any` typing was the sneakiest defect surface this session: it lets a stale call signature compile when it should fail. Worth proposing a tighter type for `db.sql` when migration 030 is drafted.
 
-### Sessions 4–8 (and post-M5)
+### Session 4 (2026-05-05)
+
+**Budgeted:** 4–5h
+**Actual:** ~4h
+**Verdict:** Within range, recovering session-trigger budget from Session 3.
+
+**Time breakdown (rough):**
+- Discovery (read TENANT_CONFIG_SEMANTICS.md §3-§7, ADR-002 §Subdomain reservation, defaults.ts, tenant_users + tenant_audit_log schemas, existing user_invites): 15 min
+- `lib/tenants/config-schema.ts` (per-key Zod validators + module-load coverage guard): 25 min
+- `lib/blob/tenant-paths.ts` (path helpers + sanitization): 15 min
+- Wiring `documents/upload` + `loads/[id]/pod` to tenant-prefixed keys: 10 min
+- `requireSuperAdmin` helper in `lib/auth.ts`: 5 min
+- `app/api/admin/config/route.ts` (GET) + `[key]/route.ts` (PATCH with encrypt/audit): 30 min
+- `app/api/admin/tenants/route.ts` (GET list + POST create with slug validation): 25 min
+- `app/api/admin/tenants/[id]/route.ts` (GET/PATCH/DELETE soft): 25 min
+- `app/api/admin/tenants/[id]/onboard/route.ts` (idempotent provisioning): 25 min
+- `app/api/admin/tenants/[id]/users/route.ts` (list + invite): 25 min
+- `app/api/admin/tenants/[id]/purge/route.ts` (24h delay + double confirmation): 25 min
+- `app/api/admin/tenants/[id]/export/route.ts` (JSON dump to Blob, with bug fix on payload return): 30 min
+- Tests for config-schema + blob tenant-paths (43 cases): 25 min
+- Doc updates (SESSION_4_SUMMARY.md, SESSION_TIME_LOG.md, API_REFACTOR_LOG.md): 30 min
+
+**Lessons / takeaways:**
+- The module-load coverage guard in `config-schema.ts` (throwing if a default key has no validator) caught the test author's mistake immediately — would have been a runtime bug surfacing only at first PATCH otherwise. Worth doing for any future `Record<string, validator>`-shaped registry.
+- Using `tenant_audit_log` as the purge-state store avoids an extra migration but makes the query verbose (anti-join on later events). Acceptable trade-off; documented in summary §2.1.
+- The export endpoint's first attempt mutated a variable that didn't exist yet — Pattern: when a closure needs to "return" auxiliary data alongside the main result, put it in the discriminated-union return type, don't reach for outer-scope mutation.
+- Path-traversal sanitization regex (`replace(/\\.{2,}/g, "_")` after slash flattening) interacts subtly — got the test expectation wrong by 2 underscores on first try. Comment with the trace explanation now in the test.
+
+### Sessions 5–8 (and post-M5)
 
 (populated as sessions complete)
 

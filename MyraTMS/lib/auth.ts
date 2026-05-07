@@ -190,6 +190,30 @@ export function requireRole(
   })
 }
 
+/**
+ * Gate cross-tenant admin endpoints. Returns 401 if no JWT, 403 if the
+ * caller is not flagged as super-admin. Use BEFORE invoking asServiceAdmin
+ * so unauthorized callers never trigger the audit log.
+ *
+ * Returns null (allowed) or a Response (blocked).
+ */
+export function requireSuperAdmin(request: NextRequest): Response | null {
+  const user = getCurrentUser(request)
+  if (!user) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  if (!user.isSuperAdmin) {
+    return new Response(JSON.stringify({ error: "Forbidden — super-admin only" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  return null
+}
+
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 10)
 }

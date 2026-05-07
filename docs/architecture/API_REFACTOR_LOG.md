@@ -330,6 +330,31 @@ export async function GET(req: NextRequest) {
 `lib/pipeline/*` / `lib/workers/*` / BullMQ path and will be migrated when migration 030 lands
 and pipelines plumb per-load `tenant_id`).
 
+## Session 4 additions (admin onboarding API)
+
+These routes are NEW — they did not exist in the original 88-route catalog
+because they didn't need converting. They are listed here as the
+canonical inventory of the `/api/admin/**` surface introduced for
+Phase 3 (Tenant onboarding system).
+
+| Route | Method | Purpose |
+|---|---|---|
+| `app/api/admin/config/route.ts` | GET | List tenant config (encrypted values masked) |
+| `app/api/admin/config/[key]/route.ts` | PATCH | Update single config key with Zod validation + audit |
+| `app/api/admin/tenants/route.ts` | GET / POST | List all tenants (super-admin) / create tenant |
+| `app/api/admin/tenants/[id]/route.ts` | GET / PATCH / DELETE | Tenant CRUD (DELETE = soft) |
+| `app/api/admin/tenants/[id]/onboard/route.ts` | POST | Idempotent provisioning: clone defaults, seat owner |
+| `app/api/admin/tenants/[id]/users/route.ts` | GET / POST | List members / invite by email |
+| `app/api/admin/tenants/[id]/purge/route.ts` | POST / DELETE | Schedule 24h-delayed hard delete / cancel pending |
+| `app/api/admin/tenants/[id]/export/route.ts` | POST | Build JSON dump of tenant data, upload to Blob |
+
+Routes touched in Session 4 (existing but updated):
+
+| Route | Change |
+|---|---|
+| `app/api/documents/upload/route.ts` | Switched to tenant-prefixed Blob keys via `tenantBlobKey()` |
+| `app/api/loads/[id]/pod/route.ts` | Switched POD upload path to `tenants/{id}/pods/{...}` |
+
 ## Helpers introduced this session
 
 - `lib/auth.ts` — `getTenantContext`, `requireTenantContext`, `LEGACY_DEFAULT_TENANT_ID = 2`,

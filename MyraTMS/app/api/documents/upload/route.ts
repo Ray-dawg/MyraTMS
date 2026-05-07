@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { put } from "@vercel/blob"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { attachDocument } from "@/lib/documents"
+import { tenantBlobKey } from "@/lib/blob/tenant-paths"
 
 const ALLOWED_DOC_TYPES = ["BOL", "POD", "Rate Confirmation", "Insurance", "Contract", "Invoice"] as const
 type DocType = (typeof ALLOWED_DOC_TYPES)[number]
@@ -43,9 +44,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "File size exceeds 10MB limit" }, { status: 400 })
     }
 
-    const blob = await put(`myra-tms/${relatedType.toLowerCase()}/${relatedTo}/${file.name}`, file, {
-      access: "public",
-    })
+    // Per Phase 3.4 — namespace under tenants/{tenantId}/documents/ so per-tenant
+    // export and bucket-level deletion are tractable. Embed the relatedType and
+    // relatedTo in the filename so the legacy URL parsing scripts still find them.
+    const safeRelated = (relatedTo || "unattached").replace(/[\\/]/g, "_")
+    const safeRelatedType = relatedType.toLowerCase().replace(/[\\/]/g, "_")
+    const blobKey = tenantBlobKey(
+      ctx.tenantId,
+      "documents",
+      `${safeRelatedType}-${safeRelated}-${file.name}`,
+    )
+    const blob = await put(blobKey, file, { access: "public" })
 
     const uploadedBy = `${user.firstName || ""} ${user.lastName || ""}`.trim()
 
