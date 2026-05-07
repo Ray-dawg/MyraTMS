@@ -1,7 +1,7 @@
 # SESSION_TIME_LOG.md
 
 > **Cadence:** Updated at the end of each session.
-> **Last update:** 2026-05-06 (Session 5 complete)
+> **Last update:** 2026-05-06 (Session 6 complete — pending Patrice UI review gate)
 > **Related:** [STACK_DRIFT_REPORT.md](./STACK_DRIFT_REPORT.md) §9 (revised time budget)
 
 This document tracks actual time spent per session against the budgeted estimate. Per Patrice's Confirmation 3, total budget is **21.5–28 hours** across 8 sessions.
@@ -21,13 +21,13 @@ This document tracks actual time spent per session against the budgeted estimate
 | 3 | Phase 2 — Application middleware + auth | 2026-05-01 → 2026-05-04 | 4h | ~5h | +25% (above 20% trigger) | All deliverables done: middleware ADR-002, JWT shape change with backfill, 71 tenant-scoped routes converted, 4 crons via new `forEachActiveTenant`, 6 Engine 2 routes deferred per Rule A, RankerWorker hotfix, pre-existing SQL injection fix in shippers PATCH. Production code typechecks clean; 232/237 tests pass (5 pre-existing Engine 2 cost-calculator failures). 25% overage tripped the 20% trigger — root cause: 2 unplanned items (RankerWorker hotfix + SQL injection fix) plus a heavier-than-expected workflow-engine test rewrite. See [SESSION_3_SUMMARY.md](./SESSION_3_SUMMARY.md) §6 for full breakdown. |
 | 4 | Phase 3 — Tenant onboarding system (backend) | 2026-05-05 | 4–5h | ~4h | within range | All deliverables: `lib/tenants/config-schema.ts` with module-load coverage guard, `lib/blob/tenant-paths.ts`, `requireSuperAdmin` helper, 8 new admin route files (`/api/admin/config`, `/api/admin/tenants/*`), POD + document upload routes switched to tenant-prefixed Blob keys, 43 new unit tests. 275/280 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). Came in at mid-band, recovering from Session 3's +25% overage. See [SESSION_4_SUMMARY.md](./SESSION_4_SUMMARY.md) §3 for explicit deferrals (purge executor cron, zip-with-attachments export, user_invites enum widening). |
 | 5 | Phase 4 — Feature gating + subscription tiers (no billing) | 2026-05-06 | 2h | ~2h | within range | All deliverables: `lib/features/{index,tiers,gate,loader}.ts` (three-layer ADR-003 model + tenant subscription resolver), `lib/usage/tracker.ts` (Redis counters with monthly/daily/concurrent buckets), migration 031 (`tenant_usage` table + RLS policies, ENABLE deferred to Phase M3), 3 representative routes gated (`tms_advanced` on import + bulk-match, `data_export` on tenant export), 45 new unit tests. 320/325 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). On budget. See [SESSION_5_SUMMARY.md](./SESSION_5_SUMMARY.md) §3 for explicit deferrals (daily aggregation cron, full route audit, 80% threshold notifier, tier-aware UI hooks, tier-downgrade grandfather policy). |
-| 6 | Phase 5 — UI: tenant-aware shell + onboarding wizard | TBD | 3–4h | — | — | Patrice review gate before merging. |
+| 6 | Phase 5 — UI: tenant-aware shell + onboarding wizard | 2026-05-06 | 3–4h | ~3h | within range | All deliverables: `/api/me/tenant` endpoint, `TenantProvider` + `useTenant`/`useFeatures`/`useTenantBranding`/`useHasFeature` hooks, `TenantBrandingApplier` (CSS-var injection), tier-gated sidebar nav (Load Board / Intelligence / Reports / Workflows), `/admin/tenants` list page with create dialog, 3-step onboarding wizard at `/admin/tenants/[id]/onboard`, tenant-config editor at `/admin/settings`, reusable `<UsageMeter>` component. Typecheck clean. **Patrice UI review gate pending** before merge. See [SESSION_6_SUMMARY.md](./SESSION_6_SUMMARY.md) §3 for explicit deferrals (useUsage hook + topbar indicator, whitelabel domain UI, super-admin impersonation, user-search endpoint). |
 | 7 | Phase 6 (warehouse integration points only) + Phase 7 (testing & validation) | TBD | 3–4h | — | — | Phase 6 collapsed to 30 min documentation per Patrice Answer 5. |
 | 8 | Phase 8 — Production deployment + Phase 9 — Handoff | TBD | 2–3h | — | — | |
 | Post | Phase M5 — Engine 2 multi-tenanting | Post-Engine-2-v1-validation | 2–3h | — | — | Triggered by Engine 2 v1 in prod for ≥24h. |
 
 **Total budgeted:** 21.5–28h core + 2–3h post = **23.5–31h**
-**Total actual to date:** ~19h (79% of low estimate, 61% of high estimate) after Session 5
+**Total actual to date:** ~22h (92% of low estimate, 71% of high estimate) after Session 6
 
 ## §3 — Cumulative trend
 
@@ -38,7 +38,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | 3 | 13h | 11h | 13h | At high estimate; 20% per-session trigger tripped (root cause documented), cumulative still within tolerance |
 | 4 | 17h | 15h | 18h | Mid-band; recovered from Session 3's per-session trigger |
 | 5 | 19h | 17h | 20h | Mid-band; tracking the high end of cumulative budget |
-| 6 | TBD | 20h | 24h | |
+| 6 | 22h | 20h | 24h | Mid-band; pending UI review gate |
 | 7 | TBD | 23h | 28h | |
 | 8 | TBD | 25h | 31h | |
 | Post-M5 | TBD | 27h | 34h | Hard cap at 35h structural alarm |
@@ -170,7 +170,31 @@ This document tracks actual time spent per session against the budgeted estimate
 - The Redis usage tracker swallows errors and returns -1/0 — same convention as `lib/redis.ts` `getCached`/`setCache`. This matters: in a metered-billing future where under-counting would be revenue loss, this convention will need to be revisited at the call sites that care.
 - Three-layer model proved easy to test in isolation: every layer is pure functions over typed inputs, so the test file (45 cases) hit zero DB / zero Redis. The integration concerns (loadTenantSubscription) get tested separately when route-level integration tests are added.
 
-### Sessions 6–8 (and post-M5)
+### Session 6 (2026-05-06)
+
+**Budgeted:** 3–4h
+**Actual:** ~3h
+**Verdict:** Within range. Pending Patrice UI review gate per the session plan — code is merge-ready once review lands.
+
+**Time breakdown (rough):**
+- Discovery (re-read ADR-002 §subdomain, ADR-003 §UI cosmetic gating, scan existing `app/layout.tsx`, `app-shell.tsx`, `app-sidebar.tsx`): 15 min
+- `/api/me/tenant` endpoint (single-DB-hit branding + subscription join): 15 min
+- `components/tenant-context.tsx` (SWR-backed provider + 5 hooks + types): 25 min
+- `components/tenant-branding.tsx` (CSS-var applier with hex validation): 10 min
+- AppShell + sidebar wiring (TenantProvider wrap, `requiredFeature` filter on nav items, `superAdminOnly` flag, `/invite` to BARE_ROUTES): 20 min
+- `/admin/tenants/page.tsx` (table + create dialog + StatusBadge module-level): 30 min
+- `/admin/tenants/[id]/onboard/page.tsx` (3-step wizard, module-level step components per react-best-practices): 35 min
+- `/admin/settings/page.tsx` (sectioned config editor with edit dialog, encrypted vs plaintext branching): 30 min
+- `components/usage-meter.tsx` (5-band classifier matching gate.ts): 10 min
+- Doc updates (SESSION_6_SUMMARY.md, SESSION_TIME_LOG.md): 20 min
+
+**Lessons / takeaways:**
+- The single SWR provider + multiple hooks pattern (one fetch, many consumers) keeps the page-load network footprint sane. Each hook returns a slice of the SWR cache via `useContext`, never its own `useSWR` call. This is the cleanest match for the `react-best-practices` `client-swr-dedup` rule in a context-provider topology.
+- `TenantBrandingApplier` is the right shape for "imperatively touch the DOM after a piece of state is known". It renders nothing and only owns the side-effect — no JSX coupling means the rest of the tree doesn't need to know branding exists.
+- The 3-step wizard's biggest UX choice was the owner-userId free-text input. A user-search endpoint is the obvious upgrade path; today the operator-knows-the-userId assumption is correct for first-N tenant onboardings (Sudbury, etc.) but won't scale to self-serve.
+- Per-key audit reasons on settings edits are a small UX tax that pays off the first time someone has to forensically trace "who changed `walk_away_rate_factor` to 0.5 and why?" — strongly recommended pattern for any config-mutation UI.
+
+### Sessions 7–8 (and post-M5)
 
 (populated as sessions complete)
 

@@ -7,11 +7,13 @@ import { Topbar } from "@/components/topbar"
 import { CommandPalette } from "@/components/command-palette"
 import { AIAssistant } from "@/components/ai-assistant"
 import { WorkspaceProvider } from "@/lib/workspace-context"
+import { TenantProvider } from "@/components/tenant-context"
+import { TenantBrandingApplier } from "@/components/tenant-branding"
 import { Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
 // Routes that render without the app shell (sidebar, topbar, etc.)
-const BARE_ROUTES = ["/login"]
+const BARE_ROUTES = ["/login", "/invite"]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -39,7 +41,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <WorkspaceProvider>
+    <TenantProvider>
+      <TenantBrandingApplier />
+      <WorkspaceProvider>
       <div className="flex h-screen overflow-hidden bg-background">
         <AppSidebar
           collapsed={sidebarCollapsed}
@@ -70,6 +74,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Button>
         )}
       </div>
-    </WorkspaceProvider>
+      </WorkspaceProvider>
+    </TenantProvider>
   )
 }

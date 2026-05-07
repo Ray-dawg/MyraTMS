@@ -45,12 +45,26 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { useWorkspace } from "@/lib/workspace-context"
+import { useFeatures, useTenant } from "@/components/tenant-context"
+import type { Feature } from "@/lib/features"
 
-const adminNavigation = [
+// Nav items map to a tier-feature; missing feature → hidden in UI.
+// Server-side gate (lib/features/gate.ts requireFeature) is the source of truth.
+type NavItem = {
+  name: string
+  href: string
+  icon: typeof LayoutDashboard
+  /** If set, item is hidden when the tenant's tier doesn't grant this feature. */
+  requiredFeature?: Feature
+  /** If true, only super-admins see this item. */
+  superAdminOnly?: boolean
+}
+
+const adminNavigation: NavItem[] = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
   { name: "Calendar", href: "/dispatch/calendar", icon: Calendar },
-  { name: "Load Board", href: "/loadboard", icon: Globe },
+  { name: "Load Board", href: "/loadboard", icon: Globe, requiredFeature: "autobroker_pro" },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
   { name: "Quotes", href: "/quotes", icon: Calculator },
@@ -59,24 +73,25 @@ const adminNavigation = [
   { name: "Compliance", href: "/compliance", icon: ShieldCheck },
   { name: "Documents", href: "/documents", icon: FileText },
   { name: "Finance", href: "/finance", icon: DollarSign },
-  { name: "Intelligence", href: "/intelligence", icon: Brain },
-  { name: "Reports", href: "/reports", icon: BarChart3 },
-  { name: "Workflows", href: "/workflows", icon: ClipboardList },
+  { name: "Intelligence", href: "/intelligence", icon: Brain, requiredFeature: "data_lane_intelligence" },
+  { name: "Reports", href: "/reports", icon: BarChart3, requiredFeature: "tms_advanced" },
+  { name: "Workflows", href: "/workflows", icon: ClipboardList, requiredFeature: "tms_advanced" },
   { name: "Profile", href: "/profile", icon: UserCircle },
   { name: "Settings", href: "/settings", icon: Settings },
+  { name: "Tenants", href: "/admin/tenants", icon: Building2, superAdminOnly: true },
 ]
 
-const opsNavigation = [
+const opsNavigation: NavItem[] = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Briefing", href: "/dispatch/briefing", icon: Megaphone },
   { name: "Calendar", href: "/dispatch/calendar", icon: Calendar },
-  { name: "Load Board", href: "/loadboard", icon: Globe },
+  { name: "Load Board", href: "/loadboard", icon: Globe, requiredFeature: "autobroker_pro" },
   { name: "Loads", href: "/loads", icon: Truck },
   { name: "Map", href: "/map", icon: Map },
   { name: "Quotes", href: "/quotes", icon: Calculator },
   { name: "Carriers", href: "/carriers", icon: Users },
   { name: "Documents", href: "/documents", icon: FileText },
-  { name: "Workflows", href: "/workflows", icon: ClipboardList },
+  { name: "Workflows", href: "/workflows", icon: ClipboardList, requiredFeature: "tms_advanced" },
   { name: "Profile", href: "/profile", icon: UserCircle },
 ]
 
@@ -91,10 +106,19 @@ export function AppSidebar({
   const router = useRouter()
   const { theme, setTheme } = useTheme()
   const { view, setView, profile } = useWorkspace()
+  const features = useFeatures()
+  const tenant = useTenant()
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
 
-  const navigation = view === "admin" ? adminNavigation : opsNavigation
+  // Cosmetic gate — server still enforces. Items without requiredFeature are
+  // always shown; superAdminOnly items only appear when isSuperAdmin=true.
+  const baseNav = view === "admin" ? adminNavigation : opsNavigation
+  const navigation = baseNav.filter((item) => {
+    if (item.superAdminOnly && !tenant?.user.isSuperAdmin) return false
+    if (item.requiredFeature && !features.includes(item.requiredFeature)) return false
+    return true
+  })
 
   return (
     <TooltipProvider delayDuration={0}>
