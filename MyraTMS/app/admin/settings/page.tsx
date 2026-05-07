@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react"
 import useSWR from "swr"
-import { useTenant } from "@/components/tenant-context"
+import { useTenant, useTenantStatus } from "@/components/tenant-context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -56,10 +56,32 @@ function sectionFor(row: ConfigRow): string {
 
 export default function AdminSettingsPage() {
   const tenant = useTenant()
+  const tenantStatus = useTenantStatus()
   const { data, error, isLoading, mutate } = useSWR(
     tenant ? "/api/admin/config" : null,
     fetcher,
   )
+
+  // Tenant context failed — distinguish from "still loading" so the page
+  // doesn't show "Loading config…" forever when /api/me/tenant 500s.
+  if (!tenant && !tenantStatus.isLoading) {
+    return (
+      <div className="p-8 max-w-2xl">
+        <h1 className="text-2xl font-semibold mb-2">Tenant context unavailable</h1>
+        <p className="text-muted-foreground">
+          Could not load /api/me/tenant — settings require an active
+          tenant + subscription. Check that migrations 027–031 are applied
+          to the connected database, and that the user has an active
+          tenant_users row.
+        </p>
+        {tenantStatus.error && (
+          <pre className="mt-4 rounded bg-muted p-3 text-xs overflow-auto">
+            {String(tenantStatus.error.message ?? tenantStatus.error)}
+          </pre>
+        )}
+      </div>
+    )
+  }
 
   const [editing, setEditing] = useState<ConfigRow | null>(null)
 

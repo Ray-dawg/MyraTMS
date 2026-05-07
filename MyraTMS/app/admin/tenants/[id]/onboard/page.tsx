@@ -3,7 +3,7 @@
 import { useState, use } from "react"
 import { useRouter } from "next/navigation"
 import useSWR from "swr"
-import { useTenant } from "@/components/tenant-context"
+import { useTenant, useTenantStatus } from "@/components/tenant-context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -52,11 +52,30 @@ export default function OnboardWizardPage({
   const router = useRouter()
   const { id: rawId } = use(params)
   const tenant = useTenant()
+  const tenantStatus = useTenantStatus()
 
   const { data, error, isLoading, mutate } = useSWR(
     tenant?.user.isSuperAdmin ? `/api/admin/tenants/${rawId}` : null,
     tenantFetcher,
   )
+
+  if (!tenant && !tenantStatus.isLoading) {
+    return (
+      <div className="p-8 max-w-2xl">
+        <h1 className="text-2xl font-semibold mb-2">Tenant context unavailable</h1>
+        <p className="text-muted-foreground">
+          Could not load /api/me/tenant — wizard requires an active tenant
+          context. Check that migrations 027–031 are applied to the connected
+          database.
+        </p>
+        {tenantStatus.error && (
+          <pre className="mt-4 rounded bg-muted p-3 text-xs overflow-auto">
+            {String(tenantStatus.error.message ?? tenantStatus.error)}
+          </pre>
+        )}
+      </div>
+    )
+  }
 
   const [step, setStep] = useState<1 | 2 | 3>(1)
   const [ownerUserId, setOwnerUserId] = useState("")

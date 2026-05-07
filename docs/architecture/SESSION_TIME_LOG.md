@@ -1,7 +1,7 @@
 # SESSION_TIME_LOG.md
 
 > **Cadence:** Updated at the end of each session.
-> **Last update:** 2026-05-06 (Session 6 complete — pending Patrice UI review gate)
+> **Last update:** 2026-05-07 (Session 7 complete)
 > **Related:** [STACK_DRIFT_REPORT.md](./STACK_DRIFT_REPORT.md) §9 (revised time budget)
 
 This document tracks actual time spent per session against the budgeted estimate. Per Patrice's Confirmation 3, total budget is **21.5–28 hours** across 8 sessions.
@@ -22,12 +22,12 @@ This document tracks actual time spent per session against the budgeted estimate
 | 4 | Phase 3 — Tenant onboarding system (backend) | 2026-05-05 | 4–5h | ~4h | within range | All deliverables: `lib/tenants/config-schema.ts` with module-load coverage guard, `lib/blob/tenant-paths.ts`, `requireSuperAdmin` helper, 8 new admin route files (`/api/admin/config`, `/api/admin/tenants/*`), POD + document upload routes switched to tenant-prefixed Blob keys, 43 new unit tests. 275/280 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). Came in at mid-band, recovering from Session 3's +25% overage. See [SESSION_4_SUMMARY.md](./SESSION_4_SUMMARY.md) §3 for explicit deferrals (purge executor cron, zip-with-attachments export, user_invites enum widening). |
 | 5 | Phase 4 — Feature gating + subscription tiers (no billing) | 2026-05-06 | 2h | ~2h | within range | All deliverables: `lib/features/{index,tiers,gate,loader}.ts` (three-layer ADR-003 model + tenant subscription resolver), `lib/usage/tracker.ts` (Redis counters with monthly/daily/concurrent buckets), migration 031 (`tenant_usage` table + RLS policies, ENABLE deferred to Phase M3), 3 representative routes gated (`tms_advanced` on import + bulk-match, `data_export` on tenant export), 45 new unit tests. 320/325 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). On budget. See [SESSION_5_SUMMARY.md](./SESSION_5_SUMMARY.md) §3 for explicit deferrals (daily aggregation cron, full route audit, 80% threshold notifier, tier-aware UI hooks, tier-downgrade grandfather policy). |
 | 6 | Phase 5 — UI: tenant-aware shell + onboarding wizard | 2026-05-06 | 3–4h | ~3h | within range | All deliverables: `/api/me/tenant` endpoint, `TenantProvider` + `useTenant`/`useFeatures`/`useTenantBranding`/`useHasFeature` hooks, `TenantBrandingApplier` (CSS-var injection), tier-gated sidebar nav (Load Board / Intelligence / Reports / Workflows), `/admin/tenants` list page with create dialog, 3-step onboarding wizard at `/admin/tenants/[id]/onboard`, tenant-config editor at `/admin/settings`, reusable `<UsageMeter>` component. Typecheck clean. **Patrice UI review gate pending** before merge. See [SESSION_6_SUMMARY.md](./SESSION_6_SUMMARY.md) §3 for explicit deferrals (useUsage hook + topbar indicator, whitelabel domain UI, super-admin impersonation, user-search endpoint). |
-| 7 | Phase 6 (warehouse integration points only) + Phase 7 (testing & validation) | TBD | 3–4h | — | — | Phase 6 collapsed to 30 min documentation per Patrice Answer 5. |
+| 7 | Phase 6 (warehouse integration points only) + Phase 7 (testing & validation) + browser smoke | 2026-05-06 → 2026-05-07 | 3–4h | ~3h | within range | All deliverables: WAREHOUSE_INTEGRATION_POINTS.md (Phase 6), PERFORMANCE_NOTES.md (Phase 7.2), `lib/test-utils/cross-tenant-leak.ts` + 10 unit tests, subscription-lifecycle integration tests (16 cases), /api/me/tenant shape contract tests (9 cases). Browser smoke executed: dashboard + /loads work cleanly under Session 3 refactor; surfaced + fixed perpetual-loading bug on `/admin/tenants`, `/admin/settings`, `/admin/tenants/[id]/onboard` when /api/me/tenant fails. 355/360 passing (+35 vs Session 6). See [SESSION_7_SUMMARY.md](./SESSION_7_SUMMARY.md). |
 | 8 | Phase 8 — Production deployment + Phase 9 — Handoff | TBD | 2–3h | — | — | |
 | Post | Phase M5 — Engine 2 multi-tenanting | Post-Engine-2-v1-validation | 2–3h | — | — | Triggered by Engine 2 v1 in prod for ≥24h. |
 
 **Total budgeted:** 21.5–28h core + 2–3h post = **23.5–31h**
-**Total actual to date:** ~22h (92% of low estimate, 71% of high estimate) after Session 6
+**Total actual to date:** ~25h (104% of low estimate, 81% of high estimate) after Session 7
 
 ## §3 — Cumulative trend
 
@@ -39,7 +39,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | 4 | 17h | 15h | 18h | Mid-band; recovered from Session 3's per-session trigger |
 | 5 | 19h | 17h | 20h | Mid-band; tracking the high end of cumulative budget |
 | 6 | 22h | 20h | 24h | Mid-band; pending UI review gate |
-| 7 | TBD | 23h | 28h | |
+| 7 | 25h | 23h | 28h | Mid-band; smoke + bug fixes stayed within budget |
 | 8 | TBD | 25h | 31h | |
 | Post-M5 | TBD | 27h | 34h | Hard cap at 35h structural alarm |
 
@@ -194,7 +194,31 @@ This document tracks actual time spent per session against the budgeted estimate
 - The 3-step wizard's biggest UX choice was the owner-userId free-text input. A user-search endpoint is the obvious upgrade path; today the operator-knows-the-userId assumption is correct for first-N tenant onboardings (Sudbury, etc.) but won't scale to self-serve.
 - Per-key audit reasons on settings edits are a small UX tax that pays off the first time someone has to forensically trace "who changed `walk_away_rate_factor` to 0.5 and why?" — strongly recommended pattern for any config-mutation UI.
 
-### Sessions 7–8 (and post-M5)
+### Session 7 (2026-05-06 → 2026-05-07)
+
+**Budgeted:** 3–4h
+**Actual:** ~3h
+**Verdict:** Within range. Browser smoke + the two-bug fix added scope but stayed in budget — saved time by writing the warehouse-integration doc as documentation rather than infrastructure.
+
+**Time breakdown (rough):**
+- Discovery (re-read RLS_ROLLOUT.md, ADR-001 §schema-per-tenant, Phase 4.4 hot-path counter design): 10 min
+- WAREHOUSE_INTEGRATION_POINTS.md (Phase 6 — 9 sections): 25 min
+- `lib/test-utils/cross-tenant-leak.ts` (helper + multi-table sweep): 15 min
+- subscription-lifecycle.test.ts (16 cases): 15 min
+- cross-tenant-leak.test.ts (10 cases — incl. vi.hoisted hosting fix on first run): 15 min
+- me-tenant-shape.test.ts (9 cases): 10 min
+- PERFORMANCE_NOTES.md (8 sections incl. index-audit checklist): 20 min
+- Browser smoke execution + bug discovery: 20 min
+- Bug fix on 3 admin pages + verification reload: 15 min
+- SESSION_7_SUMMARY.md + SESSION_TIME_LOG.md: 25 min
+
+**Lessons / takeaways:**
+- The vi.hoisted pattern is now the canonical way to share a mock fn between a `vi.mock` factory and the test body. First attempt with a top-level `const` failed with "Cannot access before initialization" — vitest hoists factories above top-level decls. Pattern documented inline in the test file.
+- **Browser smoke is a different test surface than vitest.** Vitest catches type errors and unit-level logic bugs; browser smoke catches data-flow bugs (the perpetual-loading bug was invisible to vitest because no test exercised the admin pages with a permanently-null tenant context). Both are necessary; neither replaces the other.
+- The `useTenantStatus()` hook existed in Session 6 but wasn't used by the admin pages — they only checked `useTenant()` truthiness, conflating loading and failed. This is a pattern worth checking on every future tenant-context-dependent page: "did you handle the failed case, not just the loading case?"
+- Tier-gated routes 500 instead of 403 on unmigrated DBs because `loadTenantSubscription` throws inside the route's outer try/catch. Could be improved with finer-grained try/catch around the gate, but the right operator workflow is "apply migrations first" — not worth the code complexity to rescue an error path that shouldn't happen in production.
+
+### Session 8 (and post-M5)
 
 (populated as sessions complete)
 

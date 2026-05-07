@@ -4,7 +4,7 @@ import { useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import useSWR from "swr"
-import { useTenant } from "@/components/tenant-context"
+import { useTenant, useTenantStatus } from "@/components/tenant-context"
 import { Button } from "@/components/ui/button"
 import {
   Table,
@@ -58,12 +58,33 @@ const fetcher = async (url: string): Promise<{ tenants: TenantRow[]; count: numb
 export default function AdminTenantsPage() {
   const router = useRouter()
   const tenant = useTenant()
+  const tenantStatus = useTenantStatus()
   const { data, error, isLoading, mutate } = useSWR(
     tenant?.user.isSuperAdmin ? "/api/admin/tenants" : null,
     fetcher,
   )
 
   const [createOpen, setCreateOpen] = useState(false)
+
+  // Tenant context failed to load — distinguish from "still loading".
+  if (!tenant && !tenantStatus.isLoading) {
+    return (
+      <div className="p-8 max-w-2xl">
+        <h1 className="text-2xl font-semibold mb-2">Tenant context unavailable</h1>
+        <p className="text-muted-foreground">
+          Could not load /api/me/tenant — admin tools require an active
+          tenant + subscription. Check that migrations 027–031 are applied
+          to the connected database, and that the user has an active
+          tenant_users row.
+        </p>
+        {tenantStatus.error && (
+          <pre className="mt-4 rounded bg-muted p-3 text-xs overflow-auto">
+            {String(tenantStatus.error.message ?? tenantStatus.error)}
+          </pre>
+        )}
+      </div>
+    )
+  }
 
   // Server enforcement is in /api/admin/tenants — this is the cosmetic gate.
   if (tenant && !tenant.user.isSuperAdmin) {
