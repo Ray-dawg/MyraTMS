@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
+import { loadTenantSubscription } from "@/lib/features/loader"
+import { requireFeature, gateErrorResponse } from "@/lib/features/gate"
 import type { ImportType, ImportResult } from "@/lib/import/types"
 import { sanitizeRecord } from "@/lib/sanitize-csv"
 
@@ -9,6 +11,17 @@ export async function POST(req: NextRequest) {
     const ctx = requireTenantContext(req)
     const user = getCurrentUser(req)
     const assignedRep = user ? `${user.firstName} ${user.lastName}` : "Unknown"
+
+    // Bulk import is a tms_advanced capability. Starter tenants must use
+    // the per-resource POST endpoints instead.
+    try {
+      const sub = await loadTenantSubscription(ctx.tenantId)
+      requireFeature(sub, "tms_advanced")
+    } catch (err) {
+      const resp = gateErrorResponse(err)
+      if (resp) return resp
+      throw err
+    }
 
     const body = await req.json()
     const { import_type, rows } = body as {

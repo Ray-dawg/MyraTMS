@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { requireTenantContext } from "@/lib/auth"
+import { loadTenantSubscription } from "@/lib/features/loader"
+import { requireFeature, gateErrorResponse } from "@/lib/features/gate"
 import { matchCarriersWithClient, type MatchGrade } from "@/lib/matching"
 
 export async function POST(req: NextRequest) {
@@ -10,6 +12,17 @@ export async function POST(req: NextRequest) {
     const { load_ids, min_grade = "C" } = body as {
       load_ids: string[]
       min_grade?: MatchGrade
+    }
+
+    // Bulk-match is part of the tms_advanced + autobroker_pro feature set
+    // — Starter tenants must match loads one at a time.
+    try {
+      const sub = await loadTenantSubscription(ctx.tenantId)
+      requireFeature(sub, "tms_advanced")
+    } catch (err) {
+      const resp = gateErrorResponse(err)
+      if (resp) return resp
+      throw err
     }
 
     if (!load_ids || !Array.isArray(load_ids) || load_ids.length === 0) {

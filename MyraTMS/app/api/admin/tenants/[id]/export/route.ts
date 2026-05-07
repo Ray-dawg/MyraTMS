@@ -5,6 +5,8 @@ import { asServiceAdmin } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireSuperAdmin } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
 import { tenantBlobKey } from "@/lib/blob/tenant-paths"
+import { loadTenantSubscription } from "@/lib/features/loader"
+import { requireFeature, gateErrorResponse } from "@/lib/features/gate"
 
 /**
  * POST /api/admin/tenants/[id]/export
@@ -68,6 +70,19 @@ export async function POST(
   const tenantId = Number.parseInt(rawId, 10)
   if (!Number.isInteger(tenantId) || tenantId <= 0) {
     return apiError("Invalid tenant id", 400)
+  }
+
+  // Bulk export is gated on data_export — Starter tenants don't get this.
+  // The gate is on the SUBJECT tenant (the one being exported), not the
+  // super-admin caller, so a Starter tenant's data cannot be exported even
+  // by a super-admin via this endpoint.
+  try {
+    const sub = await loadTenantSubscription(tenantId)
+    requireFeature(sub, "data_export")
+  } catch (err) {
+    const resp = gateErrorResponse(err)
+    if (resp) return resp
+    throw err
   }
 
   type ExportPayload = {
