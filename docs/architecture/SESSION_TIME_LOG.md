@@ -1,7 +1,7 @@
 # SESSION_TIME_LOG.md
 
 > **Cadence:** Updated at the end of each session.
-> **Last update:** 2026-05-07 (Session 7 complete)
+> **Last update:** 2026-05-07 (Session 8 complete — rollout code phase CLOSED)
 > **Related:** [STACK_DRIFT_REPORT.md](./STACK_DRIFT_REPORT.md) §9 (revised time budget)
 
 This document tracks actual time spent per session against the budgeted estimate. Per Patrice's Confirmation 3, total budget is **21.5–28 hours** across 8 sessions.
@@ -23,11 +23,13 @@ This document tracks actual time spent per session against the budgeted estimate
 | 5 | Phase 4 — Feature gating + subscription tiers (no billing) | 2026-05-06 | 2h | ~2h | within range | All deliverables: `lib/features/{index,tiers,gate,loader}.ts` (three-layer ADR-003 model + tenant subscription resolver), `lib/usage/tracker.ts` (Redis counters with monthly/daily/concurrent buckets), migration 031 (`tenant_usage` table + RLS policies, ENABLE deferred to Phase M3), 3 representative routes gated (`tms_advanced` on import + bulk-match, `data_export` on tenant export), 45 new unit tests. 320/325 passing (5 pre-existing Engine 2 cost-calculator failures unrelated). On budget. See [SESSION_5_SUMMARY.md](./SESSION_5_SUMMARY.md) §3 for explicit deferrals (daily aggregation cron, full route audit, 80% threshold notifier, tier-aware UI hooks, tier-downgrade grandfather policy). |
 | 6 | Phase 5 — UI: tenant-aware shell + onboarding wizard | 2026-05-06 | 3–4h | ~3h | within range | All deliverables: `/api/me/tenant` endpoint, `TenantProvider` + `useTenant`/`useFeatures`/`useTenantBranding`/`useHasFeature` hooks, `TenantBrandingApplier` (CSS-var injection), tier-gated sidebar nav (Load Board / Intelligence / Reports / Workflows), `/admin/tenants` list page with create dialog, 3-step onboarding wizard at `/admin/tenants/[id]/onboard`, tenant-config editor at `/admin/settings`, reusable `<UsageMeter>` component. Typecheck clean. **Patrice UI review gate pending** before merge. See [SESSION_6_SUMMARY.md](./SESSION_6_SUMMARY.md) §3 for explicit deferrals (useUsage hook + topbar indicator, whitelabel domain UI, super-admin impersonation, user-search endpoint). |
 | 7 | Phase 6 (warehouse integration points only) + Phase 7 (testing & validation) + browser smoke | 2026-05-06 → 2026-05-07 | 3–4h | ~3h | within range | All deliverables: WAREHOUSE_INTEGRATION_POINTS.md (Phase 6), PERFORMANCE_NOTES.md (Phase 7.2), `lib/test-utils/cross-tenant-leak.ts` + 10 unit tests, subscription-lifecycle integration tests (16 cases), /api/me/tenant shape contract tests (9 cases). Browser smoke executed: dashboard + /loads work cleanly under Session 3 refactor; surfaced + fixed perpetual-loading bug on `/admin/tenants`, `/admin/settings`, `/admin/tenants/[id]/onboard` when /api/me/tenant fails. 355/360 passing (+35 vs Session 6). See [SESSION_7_SUMMARY.md](./SESSION_7_SUMMARY.md). |
-| 8 | Phase 8 — Production deployment + Phase 9 — Handoff | TBD | 2–3h | — | — | |
+| 8 | Phase 8 — Production deployment + Phase 9 — Handoff | 2026-05-07 | 2–3h | ~2h | low end | All deliverables: PRODUCTION_MIGRATION.md (runbook with deployment-pinning protocol, per-migration go/no-go gates, rollback procedure), CODE_REVIEW_CHECKLIST.md (10-section reviewer guide replacing the planned ESLint custom rule), HANDOFF.md (situation-routed entry point for next operator), INDEX.md refresh. No new application code; documentation-only session per Phase 9 plan. See [SESSION_8_SUMMARY.md](./SESSION_8_SUMMARY.md). **Multi-tenant rollout code phase is CLOSED.** |
 | Post | Phase M5 — Engine 2 multi-tenanting | Post-Engine-2-v1-validation | 2–3h | — | — | Triggered by Engine 2 v1 in prod for ≥24h. |
 
 **Total budgeted:** 21.5–28h core + 2–3h post = **23.5–31h**
-**Total actual to date:** ~25h (104% of low estimate, 81% of high estimate) after Session 7
+**Total actual to date:** ~27h (96% of high core estimate, 87% of high total) after Session 8 — **CLOSED**
+
+The 35-hour structural alarm did NOT trip. Total budget held across all 8 code sessions. Phase M5 (Engine 2 tenanting, 2–3h) is post-rollout work that will be opened as a separate session when Engine 2 v1 has been in production for ≥ 24h.
 
 ## §3 — Cumulative trend
 
@@ -40,7 +42,7 @@ This document tracks actual time spent per session against the budgeted estimate
 | 5 | 19h | 17h | 20h | Mid-band; tracking the high end of cumulative budget |
 | 6 | 22h | 20h | 24h | Mid-band; pending UI review gate |
 | 7 | 25h | 23h | 28h | Mid-band; smoke + bug fixes stayed within budget |
-| 8 | TBD | 25h | 31h | |
+| 8 | 27h | 25h | 31h | Closed at low-end of cumulative band; rollout code phase done |
 | Post-M5 | TBD | 27h | 34h | Hard cap at 35h structural alarm |
 
 ## §4 — Notes per session (post-mortem entries)
@@ -218,8 +220,31 @@ This document tracks actual time spent per session against the budgeted estimate
 - The `useTenantStatus()` hook existed in Session 6 but wasn't used by the admin pages — they only checked `useTenant()` truthiness, conflating loading and failed. This is a pattern worth checking on every future tenant-context-dependent page: "did you handle the failed case, not just the loading case?"
 - Tier-gated routes 500 instead of 403 on unmigrated DBs because `loadTenantSubscription` throws inside the route's outer try/catch. Could be improved with finer-grained try/catch around the gate, but the right operator workflow is "apply migrations first" — not worth the code complexity to rescue an error path that shouldn't happen in production.
 
-### Session 8 (and post-M5)
+### Session 8 (2026-05-07)
 
-(populated as sessions complete)
+**Budgeted:** 2–3h
+**Actual:** ~2h
+**Verdict:** Low end of range. Pure documentation session — no new code, no migrations, no tests. Delivered the three Phase 8/9 docs (PRODUCTION_MIGRATION, CODE_REVIEW_CHECKLIST, HANDOFF) plus the INDEX refresh.
+
+**Time breakdown (rough):**
+- Discovery (re-read ADR-004 §M1b deployment-pinning, scan STAGING_APPLY for the staging procedure to mirror, locate where ESLint config would live): 10 min
+- PRODUCTION_MIGRATION.md (8 sections + rollback procedure + cutover comms + post-deploy follow-ups): 30 min
+- CODE_REVIEW_CHECKLIST.md (10 sections + ESLint-vs-checklist evaluation + final-gate checklist): 25 min
+- HANDOFF.md (situation-routed entry points + migration phase status + open items + drift-watch + invariants + who-to-ask): 25 min
+- INDEX.md refresh (Sessions 4–8 summaries, new artifacts, file → spec mapping table): 15 min
+- SESSION_8_SUMMARY.md + this entry: 15 min
+
+**Lessons / takeaways:**
+- The ESLint-vs-checklist trade-off was real. ADR-004 said "lint rule + code review checklist", and I evaluated whether to deliver both. The decision: a custom ESLint rule needs a config-file setup that the project doesn't have today (no `eslint.config.mjs`), and that setup is its own session. The checklist captures the same intent at lower cost and scales to non-mechanical rules. Documented as promotable in the checklist itself.
+- The HANDOFF.md "where to start" structure (route by situation, not by chronology) is a better entry point than "read the sessions in order". For someone picking up the work cold, situation-routed is faster.
+- Total cumulative time landed at ~27h vs the 25–31h budget band — at the low end but well within tolerance. The 35-hour structural alarm never tripped.
+
+### Post-rollout: Phase M5 (Engine 2 tenanting)
+
+**Trigger:** Engine 2 v1 in production for ≥ 24h with no incidents.
+**Budgeted:** 2–3h.
+**Status:** NOT STARTED. Will be opened as a separate session when the
+trigger fires. Migration `030_engine2_tenanting.sql.PENDING` is the
+seed for that session.
 
 End of SESSION_TIME_LOG.md.
