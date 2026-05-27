@@ -2,7 +2,8 @@
 
 import { use, useState } from "react"
 import Link from "next/link"
-import { ArrowLeft, Shield, ShieldCheck, ShieldAlert, ShieldX, Phone, AlertTriangle, MapPin, Sparkles, FileText, TrendingUp, RefreshCw, Clock } from "lucide-react"
+import { ArrowLeft, Shield, ShieldCheck, ShieldAlert, ShieldX, Phone, AlertTriangle, MapPin, Sparkles, FileText, TrendingUp, RefreshCw, Clock, CheckCircle2 } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
@@ -13,7 +14,11 @@ import { LoadQuickView } from "@/components/load-quick-view"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useCarrier, useLoads, useDocuments } from "@/lib/api"
+import { useTenant } from "@/components/tenant-context"
 import { cn } from "@/lib/utils"
+import { useSWRConfig } from "swr"
+
+const PROMOTE_ROLES = new Set(["admin", "owner", "service_admin"])
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(value)
@@ -22,10 +27,36 @@ function formatCurrency(value: number) {
 export default function CarrierDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const [quickViewLoadId, setQuickViewLoadId] = useState<string | null>(null)
+  const [promoting, setPromoting] = useState(false)
 
+  const tenant = useTenant()
+  const { mutate } = useSWRConfig()
   const { data: rawCarrier } = useCarrier(id)
   const { data: rawLoads = [] } = useLoads()
   const { data: rawDocs = [] } = useDocuments({ relatedTo: id, relatedType: "Carrier" })
+
+  const canPromote = !!tenant && (tenant.user.isSuperAdmin || PROMOTE_ROLES.has(tenant.user.role))
+
+  async function handlePromote() {
+    setPromoting(true)
+    try {
+      const res = await fetch(`/api/carriers/${id}/promote`, {
+        method: "PATCH",
+        credentials: "include",
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        toast.error(err.error ?? "Failed to promote carrier")
+        return
+      }
+      toast.success("Carrier promoted to active")
+      await mutate((key) => typeof key === "string" && key.startsWith("/api/carriers"), undefined, { revalidate: true })
+    } catch (e) {
+      toast.error("Failed to promote carrier")
+    } finally {
+      setPromoting(false)
+    }
+  }
 
   // Map DB snake_case to camelCase
   const carrier = rawCarrier ? {
@@ -48,6 +79,7 @@ export default function CarrierDetailPage({ params }: { params: Promise<{ id: st
     lastFmcsaSync: (rawCarrier.last_fmcsa_sync || "") as string,
     vehicleOosPercent: Number(rawCarrier.vehicle_oos_percent) || 0,
     driverOosPercent: Number(rawCarrier.driver_oos_percent) || 0,
+    carrierStatus: (rawCarrier.carrier_status || "active") as string,
   } : null
 
   // Map loads from DB rows
@@ -281,6 +313,11 @@ export default function CarrierDetailPage({ params }: { params: Promise<{ id: st
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-semibold tracking-tight text-foreground">{carrier.company}</h1>
               <StatusBadge status={carrier.insuranceStatus} />
+              {carrier.carrierStatus === "prospect" && (
+                <Badge variant="outline" className="text-warning border-warning/30 text-[10px]">
+                  Prospect
+                </Badge>
+              )}
               {carrier.riskFlag && (
                 <Badge variant="outline" className="text-warning border-warning/30 text-[10px] gap-1">
                   <AlertTriangle className="h-3 w-3" />
@@ -291,6 +328,18 @@ export default function CarrierDetailPage({ params }: { params: Promise<{ id: st
             <p className="text-xs text-muted-foreground">{carrier.id} &middot; {carrier.mcNumber}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {carrier.carrierStatus === "prospect" && canPromote && (
+              <Button
+                variant="default"
+                size="sm"
+                className="h-8 text-xs gap-1.5"
+                onClick={handlePromote}
+                disabled={promoting}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                {promoting ? "Promoting…" : "Promote to Active"}
+              </Button>
+            )}
             <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
               <Phone className="h-3.5 w-3.5" />
               Call

@@ -96,6 +96,27 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       throw new Error(`pipeline_load ${pipelineLoadId} has no top_carrier_id — cannot dispatch`);
     }
 
+    // Prospect gate: the Ranker matches both 'prospect' and 'active' carriers
+    // so shadow drains exercise the full pipeline, but real dispatch requires
+    // 'active'. Carriers backfilled from FMCSA registries default to 'prospect'
+    // and are promoted via PATCH /api/carriers/[id]/promote after human review.
+    const carrierStatus = await this.fetchCarrierStatus(load.top_carrier_id);
+    if (carrierStatus !== 'active') {
+      await this.escalateProspect(pipelineLoadId, load.top_carrier_id, carrierStatus, callId);
+      return {
+        success: true,
+        pipelineLoadId,
+        stage: 'escalated',
+        duration: 0,
+        details: {
+          escalated: true,
+          reason: 'top_carrier_not_active',
+          carrierId: load.top_carrier_id,
+          carrierStatus,
+        },
+      };
+    }
+
     const carrierRate = await this.fetchCarrierRate(load.load_id, load.top_carrier_id);
 
     const cookie = `auth-token=${signServiceToken(this.serviceTokenTtl)}`;
@@ -152,6 +173,31 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       [id],
     );
     return r.rows[0] ?? null;
+  }
+
+  private async fetchCarrierStatus(carrierId: string): Promise<string | null> {
+    const r = await db.query<{ carrier_status: string }>(
+      `SELECT carrier_status FROM carriers WHERE id = $1`,
+      [carrierId],
+    );
+    return r.rows[0]?.carrier_status ?? null;
+  }
+
+  private async escalateProspect(
+    pipelineLoadId: number,
+    carrierId: string,
+    carrierStatus: string | null,
+    callId: string,
+  ): Promise<void> {
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'escalated', stage_updated_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [pipelineLoadId],
+    );
+    logger.warn(
+      `[Dispatcher] Load ${pipelineLoadId} escalated: top carrier ${carrierId} has carrier_status='${carrierStatus ?? 'unknown'}' (must be 'active' to dispatch); call=${callId}`,
+    );
   }
 
   private async fetchCarrierRate(loadId: string, carrierId: string): Promise<number> {
