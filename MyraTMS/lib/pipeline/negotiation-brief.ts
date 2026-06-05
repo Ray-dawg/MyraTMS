@@ -633,7 +633,10 @@ export interface ValidationResult {
   warnings: string[];
 }
 
-export function validateBrief(brief: NegotiationBrief): ValidationResult {
+export function validateBrief(
+  brief: NegotiationBrief,
+  opts?: { shadowMode?: boolean },
+): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -676,7 +679,18 @@ export function validateBrief(brief: NegotiationBrief): ValidationResult {
     errors.push('DNC not verified. Must check before calling.');
   }
   if (!brief.compliance.callingHoursOk) {
-    errors.push('Outside calling hours for shipper timezone.');
+    // In shadow mode (MAX_CONCURRENT_CALLS=0) no real call is placed, so the
+    // legal calling-hours window does not apply — downgrade to a warning so
+    // briefs can be exercised end-to-end at any wall-clock time. In live mode
+    // this stays a hard error (the Voice agent re-checks calling hours before
+    // dialing regardless).
+    if (opts?.shadowMode) {
+      warnings.push(
+        'Outside calling hours for shipper timezone — downgraded to warning in shadow mode (no call placed).',
+      );
+    } else {
+      errors.push('Outside calling hours for shipper timezone.');
+    }
   }
 
   // Fatigue check

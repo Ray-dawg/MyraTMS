@@ -182,7 +182,7 @@ async function checkCarriers(): Promise<void> {
   const rows = (await sql`
     SELECT COUNT(*)::int AS active
     FROM carriers
-    WHERE authority_status = 'active'
+    WHERE authority_status = 'Active'
       AND (insurance_expiry IS NULL OR insurance_expiry > NOW())
   `) as Array<{ active: number }>;
   const active = rows[0]?.active ?? 0;

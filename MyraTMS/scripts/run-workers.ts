@@ -21,8 +21,19 @@
 
 import { Queue } from 'bullmq';
 import { redisConnection } from '../lib/pipeline/redis-bullmq';
+import { neonConfig } from '@neondatabase/serverless';
+import ws from 'ws';
 import { logger } from '../lib/logger';
 import { QualifierWorker } from '../lib/workers/qualifier-worker';
+
+// The Neon serverless Pool used by lib/db/tenant-context.ts (tenant-scoped
+// transactions via SET LOCAL) requires an explicit WebSocket constructor when
+// running under Node. Vercel's serverless runtime supplies one; this Railway
+// worker host does not. Without it, every withTenant() call fails with
+// "All attempts to open a WebSocket to connect to the database failed" — which
+// takes down the Ranker (matchCarriers runs inside withTenant) and stalls the
+// parallel gate. Set it once here, before any worker processes a job.
+neonConfig.webSocketConstructor = ws;
 import { ResearcherWorker } from '../lib/workers/researcher-worker';
 import { RankerWorker } from '../lib/workers/ranker-worker';
 import { CompilerWorker } from '../lib/workers/compiler-worker';

@@ -4,12 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-MyraTMS is a freight brokerage Transportation Management System (TMS) built as a monorepo with four Next.js projects sharing a single Neon PostgreSQL database:
+MyraTMS is a freight brokerage Transportation Management System (TMS) built as a monorepo of five Next.js projects plus a standalone scraper, all sharing a single Neon PostgreSQL database and Upstash Redis instance. Only **MyraTMS** owns the API and the bulk of the schema; the other apps are pure clients (or static), and the scraper writes to a focused subset of tables.
 
-- **MyraTMS/** — Main full-stack TMS application (admin/broker-facing). Hosts all backend API routes. Port 3000.
-- **DApp/** — Driver progressive web app (mobile-first PWA). Communicates with MyraTMS API via Bearer token auth. Port 3000 (default).
-- **One_pager tracking/** — Customer-facing shipment tracking page. Read-only, token-based access. Port 3002.
+- **MyraTMS/** — Main full-stack TMS application (admin/broker-facing). Hosts all backend API routes, DB migrations, Engine 2 pipeline code (`lib/pipeline/`, `lib/workers/`, `lib/loadboards/`), and the Railway worker host entry-point. Port 3000.
+- **DApp/** — Driver progressive web app (mobile-first PWA). Communicates with MyraTMS API via Bearer token auth. `next.config.mjs` proxies `/api/*` to `NEXT_PUBLIC_API_URL` so the PWA can call the TMS without CORS. Port 3000.
+- **One_pager tracking/** — Customer-facing shipment tracking page. Read-only, token-based access at `/track/[token]`. Port 3002 (`next dev -p 3002`).
+- **myra-landing/** — Marketing site. `next.config.ts` uses `output: 'export'` (static HTML), with content sourced from Sanity CMS (`@sanity/client`, `next-sanity`) plus JSON in `content/`. No DB or API.
 - **Driver_App/** — Legacy driver app prototype (superseded by DApp). Port 3001. Not actively maintained.
+- **scraper/** — Standalone TypeScript/Playwright headless scraper (DAT, Truckstop, 123LB, Loadlink). Not a Next.js app. Deploys to Railway, writes load-board rows into the shared Neon DB. See dedicated section below and `scraper/README.md`.
+- **`Engine 2/`** — **Not a project.** Spec material for the 7-agent AI pipeline whose source was copied into `MyraTMS/` during Sprint 0. Has its own `CLAUDE.md` explaining the layout. Don't run anything from inside it.
 
 ## Tech Stack
 
@@ -26,8 +29,9 @@ MyraTMS is a freight brokerage Transportation Management System (TMS) built as a
 - **Maps:** Mapbox GL (`mapbox-gl` + `react-map-gl`) in all 3 active apps
 - **File Storage:** Vercel Blob
 - **AI:** Vercel AI SDK v6 streaming with `xai/grok-3-mini-fast`
-- **Testing:** Vitest (MyraTMS only)
-- **Deployment:** Vercel (MyraTMS, DApp, One_pager tracking, myra-landing all deployed separately)
+- **Testing:** Vitest (MyraTMS + scraper)
+- **Queues:** BullMQ on ioredis (Engine 2 pipeline workers + scraper)
+- **Deployment:** Vercel for the four Next.js apps (each deployed as a separate project); Railway for the MyraTMS worker host (`scripts/run-workers.ts`) and the headless scraper (two separate Railway services). See Deployments section.
 
 ## Build & Development Commands
 
@@ -90,8 +94,24 @@ Schema defined across migration scripts in `MyraTMS/scripts/`:
 | `010-m1-migration.sql` | drivers, location_pings, load_events, check_calls, tracking_tokens, settings, workflows; adds lat/lng/tracking columns to loads |
 | `012-workflow-columns.sql` | Workflow column additions |
 | `013-push-subscriptions.sql` | push_subscriptions |
+| `011-seed-drivers.sql` | Seed driver accounts |
 | `014-carrier-matching-engine.sql` | carrier_equipment, carrier_lanes, match_results; adds home_lat/lng/city, communication_rating, overall_match_score to carriers |
 | `020-quoting-engine.sql` | quotes, rate_cache, distance_cache, fuel_index, quote_corrections; integrations table |
+| `021-check-call-reminder.sql` | Check-call reminder scheduling |
+| `021-delivery-ratings-report-log.sql` | Delivery ratings + report execution log |
+| `022-user-invites.sql` | User invitation tokens |
+| `023-pipeline-schema-corrections.sql` | Engine 2 integration: corrections to `pipeline_migrations.sql` after schema drift was found against the real DB |
+| `024-pipeline-brief-schema-corrections.sql` | Engine 2: corrections to the negotiation-brief JSON shape persisted in `pipeline_loads` |
+| `025-compliance-audit-table.sql` | Engine 2: `compliance_audit_log` — append-only audit of consent + DNC checks |
+| `026-loadboard-sources.sql` | Engine 2: `loadboard_sources` registry (single source of truth shared by Vercel API path and the Railway scraper) |
+| `027_multi_tenant_foundation.sql` | Multi-tenant Phase 1: `tenants`, `tenant_users`, `is_super_admin` flag on users |
+| `028_add_tenant_id.sql` | Multi-tenant Phase 2: adds `tenant_id` to all TMS-core "Category A" tables. Every API query must filter by tenant. |
+| `029_create_rls_policies.sql` | Multi-tenant Phase 3: creates RLS policies but **does NOT enable them**. App-layer scoping is the live mechanism; RLS is staged for later activation. |
+| `031_tenant_usage.sql` | Multi-tenant Phase 4: `tenant_usage` table for per-tenant metering (loads/month, seats, etc.) |
+| `032-carrier-status-prospect.sql` | Carrier `status` enum: `prospect` vs `active` — used by FMCSA seed + dispatcher prospect-gate |
+| `pipeline_migrations.sql` | Engine 2 baseline: `pipeline_loads`, `pipeline_calls`, `pipeline_briefs`, `pipeline_research`, `pipeline_carrier_matches`, `pipeline_feedback`, `pipeline_personas` (superseded in places by 023–026 corrections) |
+
+Each multi-tenant migration has a paired `*_rollback.sql`. Multi-tenant migrations are numbered with underscores (`027_...`), pre-multi-tenant ones with hyphens (`027-...` style).
 
 **Critical: snake_case vs camelCase mismatch.** DB columns are snake_case. API routes return raw Neon rows (snake_case). Frontend components must manually map fields. Canonical TypeScript interfaces are in `lib/types.ts` (camelCase) and `lib/mock-data.ts` (legacy camelCase).
 
@@ -106,6 +126,16 @@ Fully implemented JWT auth with RBAC:
 - **MyraTMS login** — JWT stored as `httpOnly` cookie `auth-token` (24h expiry)
 - **DApp login** — Driver PIN auth via `/api/auth/driver-login`, JWT stored in `localStorage` as `driver-token`, sent as `Authorization: Bearer` header
 
+### Multi-tenancy
+
+Phases 1–9 shipped (sessions 1–8 FINAL). Every API route is now tenant-scoped. The runbook lives at `docs/architecture/PRODUCTION_MIGRATION_LOG.md`.
+
+- **JWT shape** — Tokens now carry `tenant_id` (from `tenant_users`) and `is_super_admin` (from `users`). `lib/auth.ts > createToken()` reads both at login time. Super-admin bypasses tenant scoping for cross-tenant admin actions only.
+- **Scoping mechanism** — Application-layer: every query in `app/api/**/route.ts` that touches a Category A table (loads, carriers, shippers, invoices, drivers, etc.) must include `WHERE tenant_id = $1`. **RLS policies exist in migration 029 but are NOT enabled** — they're staged for activation later. Do not assume the DB will catch a missing tenant filter.
+- **Feature gating (`lib/features/`)** — Three-layer check: plan limits → tenant overrides → user role. Used by sidebar nav, dialogs, and API guards (`requireFeature('quoting')`).
+- **Usage tracking (`lib/usage/`)** — Writes to `tenant_usage` on load creation, seat changes, etc. Read by billing and admin dashboards.
+- **Admin surface** — `app/api/admin/**` and `app/admin/**` are super-admin-only; the middleware checks `is_super_admin` before allowing the request through.
+
 ### API Routes
 
 REST conventions under `MyraTMS/app/api/`:
@@ -115,7 +145,12 @@ REST conventions under `MyraTMS/app/api/`:
 - Error helper: `apiError(message, status)` from `lib/api-error.ts`
 - ID generation: `LD-${Date.now().toString(36).toUpperCase()}` for loads, `DOC-` for documents, `CAR-` for carriers, `SHP-` for shippers
 
-Key route groups: `ai`, `auth`, `carriers`, `check-calls`, `compliance`, `cron`, `dispatch`, `documents`, `drivers`, `exceptions`, `finance`, `fuel-index`, `import`, `integrations`, `invoices`, `loadboard`, `loads`, `matching`, `notes`, `notifications`, `push`, `quotes`, `rates`, `settings`, `shippers`, `tracking`, `workflows`
+Key route groups (under `MyraTMS/app/api/`): `admin`, `ai`, `auth`, `carriers`, `check-calls`, `compliance`, `cron`, `dispatch`, `documents`, `drivers`, `exceptions`, `finance`, `fuel-index`, `health`, `import`, `integrations`, `invoices`, `loadboard`, `loadboard-sources`, `loads`, `matching`, `me`, `notes`, `notifications`, `pipeline`, `push`, `quotes`, `rate`, `rates`, `settings`, `shippers`, `tracking`, `webhooks`, `workflows`. Notes:
+- `rate/` (singular) and `rates/` (plural with `[token]` and `import` sub-routes) are intentionally separate — verify which one a new endpoint belongs in.
+- `loadboard/` is the broker-facing CRUD; `loadboard-sources/` is the Engine 2 ingest registry shared with the Railway scraper.
+- `webhooks/` hosts Retell call-event ingestion (Engine 2 voice agent).
+- `pipeline/` is the Engine 2 operator surface (job queueing, stage transitions, brief preview).
+- `health/` is `/api/health` for uptime checks (added for Railway worker host preflight).
 
 Additional sub-routes added:
 - `loads/[id]/invoice/route.ts` — Invoice generation for a specific load
@@ -129,7 +164,13 @@ Configured in `MyraTMS/vercel.json`:
 |----------|-------|---------|
 | `0 2 * * *` (2 AM daily) | `/api/cron/fmcsa-reverify` | Carrier compliance re-verification |
 | `0 8 * * *` (8 AM daily) | `/api/cron/invoice-alerts` | Invoice payment reminders |
-| `*/5 * * * *` (every 5 min) | `/api/cron/exception-detect` | Proactive load exception detection |
+| `0 12 * * *` (noon daily) | `/api/cron/exception-detect` | Proactive load exception detection |
+| `0 6 1 * *` (6 AM, 1st of month) | `/api/cron/shipper-reports` | Monthly shipper performance reports |
+| `0 10 * * *` (10 AM daily) | `/api/cron/pipeline-scan` | Engine 2: kicks off Scanner agent to pull fresh load-board candidates |
+| `0 11 * * *` (11 AM daily) | `/api/cron/pipeline-health` | Engine 2: stuck-job + dead-letter health check across all 7 BullMQ queues |
+| `0 7 * * *` (7 AM daily) | `/api/cron/feedback-aggregation` | Engine 2: aggregates Feedback worker outputs into the carrier scoring tables |
+
+Crons run on Vercel. Engine 2 *workers* do not — they run on a separate Railway host (see Engine 2 section below).
 
 ### Carrier Matching Engine
 
@@ -168,6 +209,39 @@ Configured in `MyraTMS/vercel.json`:
 - `lib/rates/ai-estimator.ts` — AI-powered rate estimation
 - DB tables: `quotes`, `rate_cache`, `distance_cache`, `fuel_index`, `quote_corrections` (migration `020`)
 - API: `/api/quotes` (GET/POST), `/api/rates/*`
+
+### Engine 2 AI Pipeline (7-agent autonomous booking)
+
+7-agent BullMQ pipeline that auto-scans load boards, qualifies/researches/ranks carriers, compiles negotiation briefs, places Retell voice calls, dispatches, and feeds outcomes back into scoring. Sprints 0–6.5 + Sprint 6 shipped; **code complete, pre-production.** Migrations 023–026 + `pipeline_migrations.sql`.
+
+**Where the code lives (in `MyraTMS/`, not in `Engine 2/`):**
+- `lib/pipeline/` — Stages, queues, payloads, gate, Claude service, compliance service, cost calculator, brief schema, Retell webhook, redis-bullmq adapter, db-adapter (Neon v1 quirk: `sql.query(text, params)` required), service-token (mints admin JWTs so Dispatcher can call existing TMS routes).
+- `lib/workers/` — 9 workers: `base-worker`, `scanner`, `qualifier`, `researcher`, `ranker`, `compiler`, `voice`, `dispatcher`, `feedback`, plus `index.ts`.
+- `lib/loadboards/` — Third ingest pathway after CSV + scraper: official-API clients (DAT, Truckstop, etc., currently stubs) + the `loadboard_sources` registry.
+- `lib/cron/` — Cron handlers wired to `/api/cron/pipeline-*`.
+- `scripts/run-workers.ts` — Single-process Railway entry-point booting all workers on one ioredis connection.
+- `scripts/sprint6-shadow/` — 7 operator scripts (preflight, synthetic load gen, observation SQL, metrics, live-call gate, cleanup, emergency stop) + runbook.
+
+**Key kill switches** (env vars read by `run-workers.ts`):
+- `PIPELINE_ENABLED=false` — all workers stay paused.
+- `SCANNER_ENABLED=false` — scanner cron heartbeat is a noop.
+- `MAX_CONCURRENT_CALLS=0` — Voice worker enters shadow mode (logs without calling).
+
+**Critical:**
+- The `Engine 2/` directory at the repo root is **spec material only.** Source files there are the original delivery package — they were placed into `MyraTMS/lib/` during Sprint 0 and have since been debugged. **Do not re-copy them.** Do not run `pnpm install` inside `Engine 2/` — no package.json. See `Engine 2/CLAUDE.md` for the full integration map.
+- The completion tracker at `Engine 2/docs/superpowers/plans/completion.md` is the live source of truth for sprint progress — keep it in sync as Engine 2 plan tasks finish; do not batch.
+- Workers run on **Railway**, not Vercel. Vercel hosts the Next.js app (API routes + cron triggers); Railway hosts the long-running BullMQ consumers. They share the same Upstash Redis and same Neon DB.
+- `lib/pipeline/redis-bullmq.ts` (ioredis TCP connection) and `lib/redis.ts` (Upstash REST client) must coexist — BullMQ needs a real socket; the TMS app reads cached values over REST. See Known Issues.
+
+### Headless Scraper (`scraper/`)
+
+Standalone sibling project — not part of the MyraTMS workspace, not deployed on Vercel.
+
+- **Purpose:** Bridge layer until DAT / Truckstop / 123LB / Loadlink official API access lands. Scrapes load boards via Playwright + stealth plugins, normalizes results, writes to the same Neon DB and Upstash Redis as MyraTMS.
+- **Stack:** TypeScript, Playwright + `puppeteer-extra-plugin-stealth`, BullMQ, ioredis, raw `pg` (not Neon serverless).
+- **Build/test:** `pnpm build`, `pnpm dev` (tsx watch), `pnpm test` (Vitest). Manual login helper: `pnpm dat:manual-login`. Migrations: `pnpm migrate` (uses `scraper/migrations/001_scraper_tables.sql`).
+- **Deploy:** Railway (`Dockerfile` in the root of `scraper/`). Sibling deploy unit to the worker host — they're separate Railway services but share infra.
+- **Integration point:** Writes into the same `loadboard_sources` registry used by Engine 2's `lib/loadboards/`, so the scraper, official APIs, and CSV import all flow into one unified source pool.
 
 ### AI Integration — Two Patterns
 
@@ -214,6 +288,15 @@ Cache invalidation: mutations call `mutate((key) => key.startsWith("/api/resourc
 - `lib/quoting/geo/region-mapper.ts` — Geographic region mapping for rate zones
 - `lib/quoting/rates/benchmark.ts` — Rate benchmarking against market data
 - `lib/quoting/rates/fuel-index.ts` — Fuel surcharge index calculations
+- `lib/logger.ts` — Pino logger shared by API routes and workers (worker host expects this exact shape)
+- `lib/tenants/` — Tenant lookup, `tenant_users` join, super-admin checks (consumed by `lib/auth.ts` at login time)
+- `lib/features/` — Three-layer feature gate: plan → tenant override → user role
+- `lib/usage/` — Per-tenant metering helpers (writes to `tenant_usage`)
+- `lib/exceptions/` — Server-side error classes used by API guards
+- `lib/blob/` — `@vercel/blob` upload helpers (POD, documents, brief artifacts)
+- `lib/crypto/` — App-layer encryption helpers (compliance audit log, tracking tokens)
+- `lib/geo/` — Shared distance/region utilities (extracted from `lib/quoting/geo/` for use by the matching engine and pipeline researcher)
+- `lib/email-templates/` — React Email templates (rendered server-side, sent via nodemailer)
 
 ## Key Conventions
 
@@ -243,18 +326,31 @@ Cache invalidation: mutations call `mutate((key) => key.startsWith("/api/resourc
 | DApp | `true` (relaxed) | `true` (unoptimized) |
 | One_pager tracking | `false` (strict) | `false` (optimized) |
 
-## Vercel Deployments
+## Deployments
 
-| Project | Vercel Project Name | URL |
-|---------|--------------------|----|
+### Vercel (Next.js apps + crons)
+
+| Project | Vercel Project Name | Notes |
+|---------|--------------------|-------|
+| MyraTMS | `myratms` | Production. Hosts API routes, the Vercel cron schedule (see Cron Jobs), and the admin/broker UI. Node 24.x runtime. |
 | DApp | `myra-driver-app` | https://myra-driver-app.vercel.app |
 | One_pager tracking | `v0-enterprise-logistic-one-pager` | https://v0-enterprise-logistic-one-pager.vercel.app |
-| myra-landing | `myra-landing` | https://myra-landing.vercel.app |
+| myra-landing | `myra-landing` | https://myra-landing.vercel.app — static export |
 
-MyraTMS is not yet deployed to Vercel as a standalone project (runs locally or via custom deployment).
+### Railway (long-running processes)
+
+| Service | Start command | Purpose |
+|---------|---------------|---------|
+| MyraTMS worker host | `pnpm tsx scripts/run-workers.ts` (from `MyraTMS/`, via `railway.json`) | Boots all 7 Engine 2 BullMQ workers on a single ioredis connection. Honors `PIPELINE_ENABLED`, `SCANNER_ENABLED`, `MAX_CONCURRENT_CALLS` kill switches. Restart policy: ON_FAILURE, max 5 retries. |
+| Headless scraper | (Dockerfile in `scraper/`) | Playwright-driven load board scraper. Separate Railway service from the worker host. Writes to same Neon DB + Upstash Redis. |
+
+Cross-app linking: `NEXT_PUBLIC_API_URL` (DApp, One_pager → MyraTMS API) and `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_DRIVER_APP_URL` / `NEXT_PUBLIC_TRACKING_URL` (MyraTMS → other apps for outbound links and CORS allowlist).
 
 ## Known Issues
 
-- **`styles/globals.css`** (MyraTMS) is a stale duplicate of `app/globals.css` — only `app/globals.css` is imported
 - **Notifications dual source:** `useNotifications()` SWR hook polls DB every 30s. Topbar bell reads from `useWorkspace()` context (in-memory mock data). These are not synchronized.
 - **PATCH atomicity:** `loads/[id]/route.ts` runs separate `UPDATE` per field using `sql.unsafe()` (not atomic)
+- **Edge-runtime JWT verification:** `MyraTMS/middleware.ts` re-implements HMAC-SHA256 verification via Web Crypto because `jsonwebtoken` cannot run in Edge runtime. Keep this in sync with `lib/auth.ts` if the signing scheme changes. Must also stay aligned with the multi-tenant JWT shape (`tenant_id`, `is_super_admin`) — middleware reads these for admin-route gating.
+- **Two Redis clients on purpose:** `lib/redis.ts` is the Upstash REST client used by API routes for cache reads/writes; `lib/pipeline/redis-bullmq.ts` is an ioredis TCP client used by BullMQ workers and queues. They cannot be merged — BullMQ requires a real socket connection. When adding caching to a worker, prefer the BullMQ ioredis client to avoid two connections per process.
+- **RLS exists but is off.** Migration 029 creates row-level security policies but does NOT enable them. Application code is the live tenant boundary. Forgetting `WHERE tenant_id = $1` in a query will leak data across tenants until RLS is turned on.
+- **Engine 2 placement is one-way.** Files in `Engine 2/` look like working source but are spec material. Editing or re-copying them changes nothing the workers run; the live copies are under `MyraTMS/lib/pipeline/` and `MyraTMS/lib/workers/`.

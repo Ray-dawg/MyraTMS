@@ -115,7 +115,12 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
 
     const brief = await this.assembleBrief(load, carriers, persona, compliance, shipperHistory);
 
-    const validation = validateBrief(brief);
+    // Shadow mode (MAX_CONCURRENT_CALLS=0) places no real call, so the
+    // calling-hours window is not a hard blocker for brief compilation — let
+    // validateBrief downgrade it to a warning. The Voice agent still enforces
+    // calling hours at dial time in live mode.
+    const shadowMode = process.env.MAX_CONCURRENT_CALLS === '0';
+    const validation = validateBrief(brief, { shadowMode });
     if (!validation.valid) {
       logger.error(
         `[Compiler] Brief validation failed for load ${pipelineLoadId}: ${validation.errors.join('; ')}`,
