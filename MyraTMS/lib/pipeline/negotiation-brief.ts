@@ -424,20 +424,38 @@ export interface RetellMetadata {
 // This is the function that Agent 5 calls after assembling the brief.
 // ============================================================================
 
-const OUTBOUND_NUMBERS = [
+// Placeholder pool — used only when no real Retell number is configured via env
+// (e.g. shadow mode / tests). These are fictional 555 numbers and will be
+// REJECTED by Retell's /v2/create-phone-call if a live call is attempted with
+// them, which is intentional: a live call must run with a real provisioned
+// caller ID. Set RETELL_FROM_NUMBER (single E.164) or RETELL_FROM_NUMBERS
+// (comma-separated E.164 pool) to the Retell-provisioned number(s) before
+// going live.
+const PLACEHOLDER_OUTBOUND_NUMBERS = [
   '+14165551001',  // Toronto 416 number — rotation slot 1
   '+14165551002',  // Toronto 416 number — rotation slot 2
   '+17055551001',  // Sudbury 705 number — for Northern Ontario shippers
 ];
 
+function configuredOutboundNumbers(): string[] {
+  const pool = (process.env.RETELL_FROM_NUMBERS ?? process.env.RETELL_FROM_NUMBER ?? '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+  return pool.length > 0 ? pool : PLACEHOLDER_OUTBOUND_NUMBERS;
+}
+
 function selectOutboundNumber(shipperPhone: string): string {
-  // Use 705 number when calling 705 area code (Northern Ontario rapport)
+  const numbers = configuredOutboundNumbers();
+  // Northern-Ontario rapport: prefer a 705 caller ID when calling a 705 number,
+  // if one exists in the configured pool.
   if (shipperPhone.startsWith('+1705') || shipperPhone.startsWith('705')) {
-    return OUTBOUND_NUMBERS[2];
+    const ontario705 = numbers.find((n) => n.startsWith('+1705') || n.startsWith('705'));
+    if (ontario705) return ontario705;
   }
-  // Rotate 416 numbers to prevent caller ID fatigue
-  const slot = Date.now() % 2;
-  return OUTBOUND_NUMBERS[slot];
+  // Rotate across the pool to prevent caller-ID fatigue.
+  const slot = Date.now() % numbers.length;
+  return numbers[slot];
 }
 
 function formatCurrency(amount: number, currency: Currency): string {
