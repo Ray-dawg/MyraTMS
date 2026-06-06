@@ -58,10 +58,12 @@ export class VoiceWorker extends BaseWorker<CallJobPayload> {
     const config: WorkerConfig = {
       queueName: 'call-queue',
       expectedStage: 'briefed',
-      // nextStage left undefined — updatePipelineLoad does its own stage write
-      // because we also need to insert into agent_calls atomically with the
-      // stage transition.
-      nextStage: undefined,
+      // nextStage MUST be set: BaseWorker.handleJob only calls updatePipelineLoad
+      // when config.nextStage is truthy (base-worker.ts). Our override writes the
+      // 'calling' stage itself (hardcoded) AND inserts the agent_calls row, so we
+      // set it to 'calling' to satisfy that guard. Leaving it undefined silently
+      // skipped the persist — calls fired but left no record and stayed 'briefed'.
+      nextStage: 'calling',
       concurrency: 100,
       retryConfig: {
         // Voice calls don't get auto-retried — non-conversation outcomes
