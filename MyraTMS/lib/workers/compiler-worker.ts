@@ -501,7 +501,9 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
       dncHit = dnc.rows.length > 0;
     }
 
-    const callingHoursOk = this.isWithinCallingHours();
+    const callingHoursOk = this.isWithinCallingHours(
+      this.timezoneForState(load.shipper_phone || '', load.origin_state),
+    );
 
     return {
       consentType: 'implied_load_post' as any,
@@ -771,8 +773,24 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
     }).format(amount);
   }
 
-  private isWithinCallingHours(): boolean {
-    const hour = new Date().getHours();
+  private isWithinCallingHours(timeZone: string): boolean {
+    // Must evaluate the hour in the SHIPPER's timezone, not the server's. Worker
+    // containers (Railway) run in UTC, so new Date().getHours() returned the UTC
+    // hour and rejected valid daytime calls. Mirror the Voice worker's Intl-based
+    // localHour() so source-of-truth is consistent across compile + dial.
+    let hour: number;
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        hour: 'numeric',
+        hour12: false,
+        timeZone,
+      }).formatToParts(new Date());
+      const h = parts.find((p) => p.type === 'hour')?.value;
+      hour = h ? parseInt(h, 10) : new Date().getUTCHours();
+      if (hour === 24) hour = 0; // some locales render midnight as 24
+    } catch {
+      hour = new Date().getUTCHours();
+    }
     return hour >= 8 && hour < 20;
   }
 
