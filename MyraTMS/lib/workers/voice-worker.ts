@@ -30,6 +30,7 @@
 import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import { hourInZone } from '@/lib/pipeline/time';
 import type {
   RetellCreatePhoneCallPayload,
   NegotiationBrief,
@@ -180,20 +181,9 @@ export class VoiceWorker extends BaseWorker<CallJobPayload> {
   }
 
   private localHour(now: Date, timeZone: string): number {
-    try {
-      const fmt = new Intl.DateTimeFormat('en-US', {
-        hour: 'numeric',
-        hour12: false,
-        timeZone,
-      });
-      const parts = fmt.formatToParts(now);
-      const h = parts.find((p) => p.type === 'hour')?.value;
-      const n = h ? parseInt(h, 10) : now.getUTCHours();
-      // Intl returns "24" for midnight in some locales; normalize.
-      return n === 24 ? 0 : n;
-    } catch {
-      return now.getHours();
-    }
+    // Delegates to the shared lib/pipeline/time helper (single source of truth
+    // shared with the Compiler's calling-hours gate).
+    return hourInZone(timeZone, now);
   }
 
   /**
