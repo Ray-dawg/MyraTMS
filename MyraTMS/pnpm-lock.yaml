@@ -191,6 +191,9 @@ importers:
       recharts:
         specifier: 2.15.4
         version: 2.15.4(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      retell-sdk:
+        specifier: ^5.35.0
+        version: 5.35.0
       sonner:
         specifier: ^1.7.4
         version: 1.7.4(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -2971,6 +2974,9 @@ packages:
 
   restructure@3.0.2:
     resolution: {integrity: sha512-gSfoiOEA0VPE6Tukkrr7I0RBdE0s7H1eFCDBk05l1KIQT1UIKNc5JZy6jdyW6eYH3aR3g5b3PuL77rq0hvwtAw==}
+
+  retell-sdk@5.35.0:
+    resolution: {integrity: sha512-DfOHd5dW9zeteEhvtFN8GBY3zzqAo2AVB54DYzfB127jo8DMgIllP98eroS/1zgMspUeXWBbVMYoA31gAddnLw==}
 
   retry@0.13.1:
     resolution: {integrity: sha512-XQBQ3I8W1Cge0Seh+6gjj03LbmRFWuoszgK9ooCpwYIrhhoO80pfq4cUkU5DkknwfOfFteRwlZ56PYOGYyFWdg==}
@@ -5871,6 +5877,8 @@ snapshots:
       protocol-buffers-schema: 3.6.0
 
   restructure@3.0.2: {}
+
+  retell-sdk@5.35.0: {}
 
   retry@0.13.1: {}
 

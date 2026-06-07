@@ -79,12 +79,16 @@ async function cleanup(f: Fixture) {
 
 function signedRequest(payload: RetellWebhookPayload, secret: string | null) {
   const raw = JSON.stringify(payload);
+  // Retell scheme: header `v={ts},d={HMAC-SHA256(rawBody+ts)}` (hex), keyed by the
+  // webhook-badged API key, with a 5-minute freshness window.
+  const ts = String(Date.now());
   const sig =
     secret === null
       ? ''
-      : crypto.createHmac('sha256', secret).update(raw).digest('hex');
+      : `v=${ts},d=${crypto.createHmac('sha256', secret).update(raw + ts).digest('hex')}`;
   return {
     headers: { 'x-retell-signature': sig },
+    text: async () => raw,
     json: async () => JSON.parse(raw),
   };
 }

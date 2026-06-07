@@ -34,6 +34,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const adapted = {
       headers,
+      // Signature verification needs the EXACT raw bytes Retell signed — never a
+      // re-serialized parse. Expose text() (used for verify) and json().
+      text: async () => rawBody,
       json: async () => JSON.parse(rawBody),
     };
 

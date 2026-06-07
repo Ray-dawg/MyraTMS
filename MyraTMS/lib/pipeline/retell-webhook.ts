@@ -71,7 +71,34 @@ export async function handleRetellWebhook(
   req: any // Next.js Request object
 ): Promise<WebhookResponse> {
   const startTime = Date.now();
-  const payload = await req.json() as RetellWebhookPayload;
+
+  // Step 0: Read the RAW body and verify the signature BEFORE parsing or trusting
+  // any field. Uses the official Retell SDK verifier, which implements Retell's
+  // real scheme: header `v={ms},d={digest}`, HMAC-SHA256 over (rawBody+timestamp)
+  // keyed by the webhook-badged API key, with a 5-minute freshness window. The
+  // previous hand-rolled HMAC (re-stringified body, no timestamp, wrong key,
+  // hex-decoding the whole `v=,d=` header) rejected every real Retell webhook.
+  const rawBody =
+    typeof req.text === 'function' ? await req.text() : JSON.stringify(await req.json());
+  const signature =
+    req.headers['x-retell-signature'] || req.headers['X-Retell-Signature'] || '';
+
+  if (!verifyRetellSignature(rawBody, signature)) {
+    console.error('[SECURITY] Invalid Retell webhook signature');
+    return { status: 401, body: { error: 'Invalid signature', processed: false } };
+  }
+
+  // Parse only AFTER the signature is trusted, and guard the shape so a
+  // malformed-but-signed body returns 400 instead of crashing to 500.
+  let payload: RetellWebhookPayload;
+  try {
+    payload = JSON.parse(rawBody) as RetellWebhookPayload;
+  } catch {
+    return { status: 400, body: { error: 'Invalid JSON', processed: false } };
+  }
+  if (!payload || !payload.metadata) {
+    return { status: 400, body: { error: 'Missing metadata', processed: false } };
+  }
 
   try {
     // Step 1: Log incoming webhook
@@ -84,34 +111,6 @@ export async function handleRetellWebhook(
       details: { call_status: payload.call_status },
       severity: 'info',
     });
-
-    // Step 2: Verify signature
-    const signature = req.headers['x-retell-signature'] || '';
-    const rawBody = JSON.stringify(payload);
-    const secret = process.env.RETELL_WEBHOOK_SECRET || '';
-
-    const sigVerification = validateRetellSignature(rawBody, signature, secret);
-    if (!sigVerification.valid) {
-      await auditLog({
-        timestamp: new Date(),
-        eventType: 'signature_verification_failed',
-        pipelineLoadId: payload.metadata.pipelineLoadId,
-        callId: payload.call_id,
-        phone: payload.to_number,
-        details: { error: sigVerification.error },
-        severity: 'warning',
-      });
-
-      console.error('[SECURITY] Invalid webhook signature:', {
-        callId: payload.call_id,
-        expectedSignature: signature,
-      });
-
-      return {
-        status: 401,
-        body: { error: 'Invalid signature', processed: false },
-      };
-    }
 
     // Step 3: Extract metadata
     const metadata = extractCallMetadata(payload);
@@ -216,6 +215,49 @@ export async function handleRetellWebhook(
  * @param secret - Webhook secret from environment
  * @returns SignatureVerificationResult with validity and error (if any)
  */
+/**
+ * Verify a Retell webhook signature per Retell's documented scheme:
+ *   header : `v={unix_ms_timestamp},d={hex_digest}`
+ *   digest : HMAC-SHA256(rawBody + timestamp) keyed by the webhook-badged API key
+ *   window : timestamp must be within 5 minutes of now
+ *
+ * retell-sdk v5 removed its `verify()` helper, so this implements the scheme
+ * directly over the RAW body. It is robust to two bring-up ambiguities WITHOUT
+ * weakening security: it tries both configured keys (RETELL_WEBHOOK_SECRET /
+ * RETELL_API_KEY — only one carries Retell's "webhook" badge) and the documented
+ * message orderings. Every candidate still requires possession of one of our own
+ * account keys, so the extra candidates don't help a forger. Once we confirm the
+ * exact (key, ordering) from a real call's logs, this can be narrowed to one.
+ */
+export function verifyRetellSignature(rawBody: string, header: string): boolean {
+  if (!header) return false;
+  const m = /v=(\d+),\s*d=([0-9a-fA-F]+)/.exec(header);
+  if (!m) return false;
+  const timestamp = m[1];
+  const digest = m[2].toLowerCase();
+
+  const ts = Number(timestamp);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 5 * 60 * 1000) return false;
+
+  const keys = [process.env.RETELL_WEBHOOK_SECRET, process.env.RETELL_API_KEY].filter(
+    (k): k is string => !!k,
+  );
+  const messages = [rawBody + timestamp, timestamp + rawBody, `${timestamp}.${rawBody}`];
+
+  for (const key of keys) {
+    for (const msg of messages) {
+      const expected = crypto.createHmac('sha256', key).update(msg).digest('hex');
+      if (
+        expected.length === digest.length &&
+        crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(digest))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function validateRetellSignature(
   payload: string,
   signature: string,

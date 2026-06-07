@@ -72,6 +72,7 @@
     "react-map-gl": "^8.1.0",
     "react-resizable-panels": "^2.1.7",
     "recharts": "2.15.4",
+    "retell-sdk": "^5.35.0",
     "sonner": "^1.7.4",
     "swr": "^2.3.3",
     "tailwind-merge": "^3.3.1",
