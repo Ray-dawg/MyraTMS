@@ -37,7 +37,11 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type         VARCHAR(30)  NOT NULL,
     entity_id           INTEGER      NOT NULL,
 
-    pipeline_load_id    INTEGER      REFERENCES pipeline_loads(id),
+    -- ON DELETE CASCADE: pipeline_loads is never deleted in production
+    -- code (only test fixtures and one-off ops cleanup scripts do), so a
+    -- load's events should go with it rather than blocking the delete with
+    -- an FK violation or leaving orphaned rows.
+    pipeline_load_id    INTEGER      REFERENCES pipeline_loads(id) ON DELETE CASCADE,
 
     source              VARCHAR(40)  NOT NULL,
     actor_type          VARCHAR(20)  NOT NULL DEFAULT 'agent',
