@@ -49,10 +49,23 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 
 **Spec:** [T18_Agent_Runtime_Governance.md](../../../T18_Agent_Runtime_Governance.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t18-agent-runtime-governance-design.md`
-**Status:** 🔄 In progress — design approved 2026-08-24, writing implementation plan next
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-24-t18-agent-runtime-governance.md`
+**Status:** 🔄 In progress — plan approved 2026-08-24, executing next
 
 - [x] Design doc — traced `AUTO_BOOK_PROFIT_THRESHOLD` and found it's not wired into any real decision path today (aspirational parity only, unlike the other 3 kill-switch env vars); split `evaluateAuthority()` into a pure `applyEnvelope()` core + thin DB wrapper for fast unit testing; `lib/governance/` chosen as the new directory (done 2026-08-24)
-- [ ] Implementation plan
+- [x] Implementation plan — 12 tasks. Self-review caught and fixed a dead variable in a test and a tenant-scoping gap in the envelope POST route (done 2026-08-24)
+- [ ] Task 1: Neon verification branch
+- [ ] Task 2: Migration `034-agent-runtime-governance.sql`
+- [ ] Task 3: Apply + verify on branch
+- [ ] Task 4: Shared governance types
+- [ ] Task 5: Pure `applyEnvelope()` core + 24 unit test scenarios (acceptance criterion 3)
+- [ ] Task 6: `evaluateAuthority()` DB wrapper + integration tests
+- [ ] Task 7: Seed script (acceptance criteria 1, 2)
+- [ ] Task 8: Replay harness (acceptance criterion 4)
+- [ ] Task 9: Disagreement report (acceptance criterion 5)
+- [ ] Task 10: 5 API endpoints + tests (acceptance criterion 7)
+- [ ] Task 11: Full regression suite (acceptance criterion 6)
+- [ ] Task 12: Final acceptance checklist + handoff report
 - [ ] Migration: `agents`, `authority_envelopes`, `authority_evaluations`, `escalations`
 - [ ] Seed script: 8 agents + `negotiation` + `dispatch_one`, default envelopes mapped from real env var values (not hardcoded)
 - [ ] `evaluateAuthority()` runtime library + ≥20 unit test scenarios
