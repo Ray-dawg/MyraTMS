@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-24
-**Status:** Phase 1 (Instrument) in progress — T-17 shipped to production, T-18 starting.
+**Last updated:** 2026-08-24 (T-18 design doc approved)
+**Status:** Phase 1 (Instrument) in progress — T-17 shipped to production, T-18 design approved, writing implementation plan.
 
 ## How to use this file
 
@@ -48,9 +48,11 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 ### T-18 — Agent Runtime & Governance
 
 **Spec:** [T18_Agent_Runtime_Governance.md](../../../T18_Agent_Runtime_Governance.md)
-**Status:** 🔄 In progress — brainstorming/design phase started 2026-08-24
+**Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t18-agent-runtime-governance-design.md`
+**Status:** 🔄 In progress — design approved 2026-08-24, writing implementation plan next
 
-- [ ] Design doc + implementation plan
+- [x] Design doc — traced `AUTO_BOOK_PROFIT_THRESHOLD` and found it's not wired into any real decision path today (aspirational parity only, unlike the other 3 kill-switch env vars); split `evaluateAuthority()` into a pure `applyEnvelope()` core + thin DB wrapper for fast unit testing; `lib/governance/` chosen as the new directory (done 2026-08-24)
+- [ ] Implementation plan
 - [ ] Migration: `agents`, `authority_envelopes`, `authority_evaluations`, `escalations`
 - [ ] Seed script: 8 agents + `negotiation` + `dispatch_one`, default envelopes mapped from real env var values (not hardcoded)
 - [ ] `evaluateAuthority()` runtime library + ≥20 unit test scenarios
