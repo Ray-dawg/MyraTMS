@@ -11,6 +11,16 @@
 --
 -- Idempotent: every statement uses IF NOT EXISTS / CREATE OR REPLACE, safe
 -- to re-run.
+--
+-- NOTE on timestamp types: fn_insert_event's p_occurred_at is declared plain
+-- TIMESTAMP (matching pipeline_loads.stage_updated_at, agent_calls.*_at,
+-- agent_jobs.*_at, consent_log.consent_date, scraper_runs.*_at — all
+-- `timestamp without time zone`). Every fallback in this file uses
+-- LOCALTIMESTAMP (returns `timestamp without time zone`), never
+-- CURRENT_TIMESTAMP/NOW() (return `timestamptz`) — mixing the two inside a
+-- COALESCE with a real timestamp column resolves to timestamptz, which then
+-- fails to match fn_insert_event's overload and is silently swallowed by
+-- its (required, per T-17 §5.2) exception handler.
 -- ============================================================================
 
 BEGIN;
@@ -43,7 +53,15 @@ CREATE TABLE IF NOT EXISTS events (
     derived_from_id     INTEGER      NOT NULL,
     correlation_id      VARCHAR(100),
 
-    UNIQUE (derived_from_table, derived_from_id, event_type)
+    -- occurred_at is part of the idempotency key, not just an attribute:
+    -- event types like load.stage_changed legitimately fire more than once
+    -- per source row (once per transition). Without occurred_at here, the
+    -- second transition on the same load would collide with the first on
+    -- (derived_from_table, derived_from_id, event_type) and be silently
+    -- dropped by ON CONFLICT ... DO NOTHING. Re-deriving the SAME transition
+    -- (e.g. a backfill re-run) still produces the same occurred_at, so
+    -- idempotency is preserved.
+    UNIQUE (derived_from_table, derived_from_id, event_type, occurred_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_tenant_time ON events(tenant_id, occurred_at DESC);
@@ -88,9 +106,9 @@ BEGIN
     ) VALUES (
         COALESCE(p_tenant_id, 1), p_event_type, p_entity_type, p_entity_id, p_pipeline_load_id,
         p_source, p_actor_type, COALESCE(p_payload, '{}'::jsonb), p_stage_from, p_stage_to,
-        COALESCE(p_occurred_at, CURRENT_TIMESTAMP), p_derived_from_table, p_derived_from_id, p_correlation_id
+        COALESCE(p_occurred_at, LOCALTIMESTAMP), p_derived_from_table, p_derived_from_id, p_correlation_id
     )
-    ON CONFLICT (derived_from_table, derived_from_id, event_type) DO NOTHING;
+    ON CONFLICT (derived_from_table, derived_from_id, event_type, occurred_at) DO NOTHING;
 EXCEPTION WHEN OTHERS THEN
     -- Never let event derivation break the write that triggered it.
     NULL;
@@ -142,7 +160,7 @@ BEGIN
             'system', 'system',
             jsonb_build_object('load_id', NEW.load_id, 'source', NEW.load_board_source),
             OLD.stage, NEW.stage,
-            COALESCE(NEW.stage_updated_at, CURRENT_TIMESTAMP), 'pipeline_loads', NEW.id, 'load-' || NEW.id
+            COALESCE(NEW.stage_updated_at, LOCALTIMESTAMP), 'pipeline_loads', NEW.id, 'load-' || NEW.id
         );
 
         IF fn_stage_event_type(NEW.stage) IS NOT NULL THEN
@@ -151,7 +169,7 @@ BEGIN
                 'system', 'system',
                 jsonb_build_object('load_id', NEW.load_id, 'source', NEW.load_board_source),
                 OLD.stage, NEW.stage,
-                COALESCE(NEW.stage_updated_at, CURRENT_TIMESTAMP), 'pipeline_loads', NEW.id, 'load-' || NEW.id
+                COALESCE(NEW.stage_updated_at, LOCALTIMESTAMP), 'pipeline_loads', NEW.id, 'load-' || NEW.id
             );
         END IF;
     END IF;
@@ -227,7 +245,7 @@ BEGIN
             'voice', 'agent',
             jsonb_build_object('call_id', NEW.call_id, 'outcome', NEW.outcome, 'agreed_rate', NEW.agreed_rate),
             NULL, NULL,
-            COALESCE(NEW.call_ended_at, CURRENT_TIMESTAMP), 'agent_calls', NEW.id,
+            COALESCE(NEW.call_ended_at, LOCALTIMESTAMP), 'agent_calls', NEW.id,
             CASE WHEN NEW.pipeline_load_id IS NOT NULL THEN 'load-' || NEW.pipeline_load_id ELSE NULL END
         );
     END IF;
@@ -256,7 +274,7 @@ BEGIN
             NEW.queue_name, 'system',
             jsonb_build_object('job_id', NEW.job_id, 'attempts', NEW.attempts, 'error_message', NEW.error_message),
             NULL, NULL,
-            COALESCE(NEW.completed_at, NEW.failed_at, CURRENT_TIMESTAMP), 'agent_jobs', NEW.id,
+            COALESCE(NEW.completed_at, NEW.failed_at, LOCALTIMESTAMP), 'agent_jobs', NEW.id,
             CASE WHEN NEW.pipeline_load_id IS NOT NULL THEN 'load-' || NEW.pipeline_load_id ELSE NULL END
         );
     END IF;
@@ -320,7 +338,7 @@ BEGIN
                 'error_message', NEW.error_message
             ),
             NULL, NULL,
-            COALESCE(NEW.completed_at, CURRENT_TIMESTAMP), 'scraper_runs', NEW.id, NULL
+            COALESCE(NEW.completed_at, LOCALTIMESTAMP), 'scraper_runs', NEW.id, NULL
         );
     END IF;
     RETURN NEW;
