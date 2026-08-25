@@ -50,6 +50,9 @@ const REQUIRED_ENV: Record<string, 'required' | 'shadow_safe'> = {
   CRON_SECRET: 'required',
   PIPELINE_ENABLED: 'shadow_safe',
   MAX_CONCURRENT_CALLS: 'shadow_safe',
+  // Retired (T-18/T-19) — see getMarginFloor() in lib/tenants/margin-floor.ts.
+  // Left in this map as a no-op so this preflight doesn't need restructuring;
+  // the check below no longer gates on it.
   AUTO_BOOK_PROFIT_THRESHOLD: 'shadow_safe',
 };
 
@@ -70,6 +73,9 @@ async function checkEnvVars(): Promise<void> {
         record(`env.${name}`, 'FAIL', `MUST be '0' for shadow mode (got '${v}'). Set to '1+' only AFTER 6A passes.`);
         continue;
       }
+      // Retired (T-18/T-19): AUTO_BOOK_PROFIT_THRESHOLD is never read by any
+      // decision path. This check is now a soft warning, not a gate — the
+      // real margin floor lives in lib/tenants/margin-floor.ts.
       if (name === 'AUTO_BOOK_PROFIT_THRESHOLD' && parseInt(v, 10) < 1000) {
         record(`env.${name}`, 'FAIL', `must be very high (e.g. 999999) to disable auto-booking; got '${v}'`);
         continue;

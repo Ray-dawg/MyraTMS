@@ -89,7 +89,12 @@ async function main() {
     PIPELINE_ENABLED: process.env.PIPELINE_ENABLED ?? 'false',
     SCANNER_ENABLED: process.env.SCANNER_ENABLED ?? 'false',
     MAX_CONCURRENT_CALLS: process.env.MAX_CONCURRENT_CALLS ?? '1',
-    AUTO_BOOK_PROFIT_THRESHOLD: process.env.AUTO_BOOK_PROFIT_THRESHOLD ?? '999999',
+    // AUTO_BOOK_PROFIT_THRESHOLD retired (T-18/T-19) — never read by any
+    // decision path. The real margin-floor mechanism is
+    // lib/tenants/margin-floor.ts getMarginFloor(), backed by T-18's
+    // authority_envelopes. Kept here only as a startup-log breadcrumb in
+    // case an old .env still sets it, so an operator sees it's inert.
+    AUTO_BOOK_PROFIT_THRESHOLD: `${process.env.AUTO_BOOK_PROFIT_THRESHOLD ?? '(unset)'} (inert — see getMarginFloor())`,
   }));
 
   let shuttingDown = false;

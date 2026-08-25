@@ -74,12 +74,16 @@ function checkEnv(): void {
     record('env.MAX_CONCURRENT_CALLS', 'PASS', '0 (will flip to 1+ after green)');
   }
 
+  // AUTO_BOOK_PROFIT_THRESHOLD retired (T-18/T-19) — never read by any
+  // decision path; the real margin-floor/auto-book gate is T-18's
+  // authority_envelopes, read via lib/tenants/margin-floor.ts
+  // getMarginFloor(). This check is now informational only — it no longer
+  // blocks the live-call gate (record() below always reports PASS,
+  // never FAIL, for this variable) — but is left in place so an operator
+  // relying on old muscle memory sees that the variable is inert rather
+  // than silently vanishing from the preflight output.
   const autobook = parseInt(process.env.AUTO_BOOK_PROFIT_THRESHOLD ?? '999999', 10);
-  if (autobook < 1000) {
-    record('env.AUTO_BOOK_PROFIT_THRESHOLD', 'FAIL', `must be high (e.g. 999999) for first 10 calls — got ${autobook}`);
-  } else {
-    record('env.AUTO_BOOK_PROFIT_THRESHOLD', 'PASS', `${autobook} (auto-book disabled)`);
-  }
+  record('env.AUTO_BOOK_PROFIT_THRESHOLD', 'PASS', `${autobook} — retired (T-18/T-19), not read by any decision path; see getMarginFloor()`);
 }
 
 async function checkPersonas(): Promise<void> {

@@ -41,7 +41,11 @@ Both phases share the same pipeline code that's been live since Sprint 5. **No p
 PIPELINE_ENABLED=true          # workers will process jobs
 SCANNER_ENABLED=false          # cron pipeline-scan stays a noop (no API ingest)
 MAX_CONCURRENT_CALLS=0         # SHADOW MODE — Voice worker skips calls
-AUTO_BOOK_PROFIT_THRESHOLD=999999   # belt and suspenders — auto-book disabled
+# AUTO_BOOK_PROFIT_THRESHOLD retired (T-18/T-19) — no longer read by any
+# decision path. The real auto-book/margin-floor gate is T-18's
+# authority_envelopes (see lib/tenants/margin-floor.ts). Setting this
+# variable has no effect; left documented here only so it doesn't look
+# like a missing step if you're following an older run of this file.
 JWT_SECRET=<existing>
 DATABASE_URL=<existing>
 KV_REST_API_URL=<existing>
@@ -133,7 +137,7 @@ pnpm tsx --env-file=.env.local scripts/sprint6-shadow/06-cleanup.ts
 MAX_CONCURRENT_CALLS=1          # ← KEY CHANGE: 0 (shadow) → 1 (one live call at a time)
 PIPELINE_ENABLED=true
 SCANNER_ENABLED=false           # still no API/scrape ingest — feeding loads manually
-AUTO_BOOK_PROFIT_THRESHOLD=999999  # still off — review every booking manually
+# AUTO_BOOK_PROFIT_THRESHOLD retired (T-18/T-19) — see the note above.
 RETELL_API_KEY=<from Retell dashboard>
 RETELL_WEBHOOK_SECRET=<random shared with Retell webhook config>
 ANTHROPIC_API_KEY=<for webhook outcome parser fallback>
