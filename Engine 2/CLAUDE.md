@@ -24,6 +24,8 @@ The files in this directory are now **spec material** — the historical record 
 - Run `pnpm install` / `pnpm build` / `pnpm test` from this directory. There's no `package.json` here. The live tests run from `MyraTMS/` (`pnpm vitest run __tests__/pipeline/`).
 - Edit imports in the files here to "make them resolve". They don't resolve here on purpose — the copies under `MyraTMS/lib/...` have the corrected paths.
 
+**Related, one directory up:** `../Engine 3/` is the roadmap phase that wraps Engine 2 as a service rather than replacing it (T-17/T-18/T-19 shipped 2026-08-25 — event layer, agent governance, tenant policy). See `../Engine 3/wave1.md` if you need to understand what that layer now observes about this pipeline's tables, or `../Engine 3/CLAUDE.md` for the fuller picture. Nothing in Engine 3 Phase 1 writes to or gates any table/file in this pipeline.
+
 ## The Authoritative Documents (in order of how often you'll need them)
 
 1. **`docs/superpowers/plans/completion.md`** — **The live source of truth.** Task-by-task progress through 6 sprints, schema gaps discovered, the Production Ship Roadmap from "code complete" to "first real booking", and a Change Log. Per saved user feedback: **keep this in sync as Engine 2 plan tasks finish; do not batch.**

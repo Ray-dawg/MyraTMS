@@ -13,6 +13,7 @@ MyraTMS is a freight brokerage Transportation Management System (TMS) built as a
 - **Driver_App/** — Legacy driver app prototype (superseded by DApp). Port 3001. Not actively maintained.
 - **scraper/** — Standalone TypeScript/Playwright headless scraper (DAT, Truckstop, 123LB, Loadlink). Not a Next.js app. Deploys to Railway, writes load-board rows into the shared Neon DB. See dedicated section below and `scraper/README.md`.
 - **`Engine 2/`** — **Not a project.** Spec material for the 7-agent AI pipeline whose source was copied into `MyraTMS/` during Sprint 0. Has its own `CLAUDE.md` explaining the layout. Don't run anything from inside it.
+- **`Engine 3/`** — **Not a project.** Spec material for "Autonomous Brokerage Operating System," the roadmap phase wrapping Engine 2 as a service. T-17/T-18/T-19 (event layer, agent governance, tenant policy) shipped to production 2026-08-25 — the code lives in `MyraTMS/lib/governance/`, `MyraTMS/lib/tenants/`, migrations 033–035, not here. Has its own `CLAUDE.md` and `wave1.md` (outcomes doc for T-18/T-19). Don't run anything from inside it.
 
 ## Tech Stack
 
@@ -109,6 +110,9 @@ Schema defined across migration scripts in `MyraTMS/scripts/`:
 | `029_create_rls_policies.sql` | Multi-tenant Phase 3: creates RLS policies but **does NOT enable them**. App-layer scoping is the live mechanism; RLS is staged for later activation. |
 | `031_tenant_usage.sql` | Multi-tenant Phase 4: `tenant_usage` table for per-tenant metering (loads/month, seats, etc.) |
 | `032-carrier-status-prospect.sql` | Carrier `status` enum: `prospect` vs `active` — used by FMCSA seed + dispatcher prospect-gate |
+| `033-event-data-layer.sql` | Engine 3 T-17: `events` table + 5 exception-safe triggers deriving from Engine 2's existing tables (never a call-path code change), 4 metric views |
+| `034-agent-runtime-governance.sql` | Engine 3 T-18: `agents`, `authority_envelopes`, `authority_evaluations`, `escalations` — shadow-mode-only agent authority envelopes |
+| `035-t19-tenant-policy-model.sql` | Engine 3 T-19: `fn_myra_tenant_id()` slug resolver (fixes a real production tenant-id mislabeling bug in 033/034 — see Known Issues), `tenants.freight_business_type`, `tenant_type_policy_templates`, `tenant_policies`, `co_broker_agreements`, margin-floor threshold consolidation |
 | `pipeline_migrations.sql` | Engine 2 baseline: `pipeline_loads`, `pipeline_calls`, `pipeline_briefs`, `pipeline_research`, `pipeline_carrier_matches`, `pipeline_feedback`, `pipeline_personas` (superseded in places by 023–026 corrections) |
 
 Each multi-tenant migration has a paired `*_rollback.sql`. Multi-tenant migrations are numbered with underscores (`027_...`), pre-multi-tenant ones with hyphens (`027-...` style).
@@ -233,6 +237,18 @@ Crons run on Vercel. Engine 2 *workers* do not — they run on a separate Railwa
 - Workers run on **Railway**, not Vercel. Vercel hosts the Next.js app (API routes + cron triggers); Railway hosts the long-running BullMQ consumers. They share the same Upstash Redis and same Neon DB.
 - `lib/pipeline/redis-bullmq.ts` (ioredis TCP connection) and `lib/redis.ts` (Upstash REST client) must coexist — BullMQ needs a real socket; the TMS app reads cached values over REST. See Known Issues.
 
+### Engine 3 Autonomous Ops Layer (T-17/T-18/T-19 — shipped 2026-08-25)
+
+The roadmap phase after Engine 2: an event layer, agent-governance envelopes, and a tenant/policy model, all wrapping Engine 2 as a service rather than modifying it. Phase 1 (T-17–T-19) is done and live in production; Phase 2+ (carrier intelligence, pricing, negotiation, dispatch monitoring, etc.) is blocked on the Engine 2 → Engine 3 handoff gate (Pilot 1 must be green — see `Engine 3/CLAUDE.md` §"handoff gate").
+
+**Where the code lives (in `MyraTMS/`, not in `Engine 3/`):**
+- `lib/governance/` — T-18's `applyEnvelope()`/`evaluateAuthority()` (pure-core + DB-wrapper split) and T-19's `applyPolicy()`/`evaluatePolicy()` (same split, decides load-source policy against `tenant_policies`).
+- `lib/tenants/margin-floor.ts` — `getMarginFloor(currency)`, the single source of truth for the $270 CAD / $200 USD auto-book threshold, replacing three independent hardcoded copies in `compiler-worker.ts`/`qualifier-worker.ts`/`researcher-worker.ts`.
+- `app/api/{agents,evaluations,escalations}/` — T-18's 5 governance API routes.
+- `scripts/033-event-data-layer.sql`, `034-agent-runtime-governance.sql`, `035-t19-tenant-policy-model.sql` — see Database & Schema above.
+
+**Critical:** `Engine 3/wave1.md` documents exactly what T-18/T-19 built, every real bug found while verifying them, and what's still deferred (T-19 has no API endpoints yet; `evaluatePolicy()` has no caller yet — it's built and tested but not wired into Qualifier/Compiler/Dispatcher). Read it before touching `lib/governance/`, `lib/tenants/`, or migrations 034/035. `Engine 3/docs/superpowers/plans/completion.md` is the living task tracker — keep it in sync as new modules land, don't batch.
+
 ### Headless Scraper (`scraper/`)
 
 Standalone sibling project — not part of the MyraTMS workspace, not deployed on Vercel.
@@ -354,3 +370,5 @@ Cross-app linking: `NEXT_PUBLIC_API_URL` (DApp, One_pager → MyraTMS API) and `
 - **Two Redis clients on purpose:** `lib/redis.ts` is the Upstash REST client used by API routes for cache reads/writes; `lib/pipeline/redis-bullmq.ts` is an ioredis TCP client used by BullMQ workers and queues. They cannot be merged — BullMQ requires a real socket connection. When adding caching to a worker, prefer the BullMQ ioredis client to avoid two connections per process.
 - **RLS exists but is off.** Migration 029 creates row-level security policies but does NOT enable them. Application code is the live tenant boundary. Forgetting `WHERE tenant_id = $1` in a query will leak data across tenants until RLS is turned on.
 - **Engine 2 placement is one-way.** Files in `Engine 2/` look like working source but are spec material. Editing or re-copying them changes nothing the workers run; the live copies are under `MyraTMS/lib/pipeline/` and `MyraTMS/lib/workers/`.
+- **Never hardcode a tenant id.** Production has two low-numbered tenants — `id=1` is `_system`, `id=2` is `myra` — and migrations 033/034 originally hardcoded `tenant_id = 1` everywhere, silently mislabeling every T-17/T-18 row to the wrong tenant until T-19 (migration 035) found and backfilled it. Always resolve Myra's tenant id via `fn_myra_tenant_id()` in SQL, or the equivalent lookup in TS (see `lib/tenants/margin-floor.ts`) — not even the literal `2` is safe to hardcode. Full story in `Engine 3/wave1.md`.
+- **"Applied to production" has two independent halves for any Neon-migration-plus-code module: the database and the deployed code.** A clean `run_sql` against the production Neon branch says nothing about whether the corresponding commits ever reached `origin/master`/Vercel. T-17/T-18/T-19's migrations were live in the database for a full day before anyone noticed the application code had never been pushed to GitHub. Check `git log --oneline origin/master..master` before assuming code parity with a live migration.
