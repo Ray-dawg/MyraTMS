@@ -10,7 +10,7 @@ import { db } from '@/lib/pipeline/db-adapter';
  * per-tenant once T-19b wires this into a tenant-scoped call path.
  */
 export async function getMarginFloor(currency: 'CAD' | 'USD'): Promise<number> {
-  const key = currency === 'CAD' ? 'margin_floor_cad' : 'margin_floor_usd';
+  const key = `margin_floor_${currency.toLowerCase()}`;
   const r = await db.query<{ value: string }>(
     `SELECT value FROM tenant_config
       WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'myra') AND key = $1`,
