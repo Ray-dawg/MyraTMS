@@ -77,7 +77,7 @@ ALTER TABLE pipeline_loads
   ADD COLUMN IF NOT EXISTS carrier_agreed_currency   VARCHAR(3),
   ADD COLUMN IF NOT EXISTS carrier_call_outcome      VARCHAR(30),
       -- 'accept' | 'decline' | 'voicemail' | 'no_answer' | 'disconnected' | 'exhausted' | NULL
-  ADD COLUMN IF NOT EXISTS carrier_id_secured        INTEGER REFERENCES carriers(id),
+  ADD COLUMN IF NOT EXISTS carrier_id_secured        TEXT REFERENCES carriers(id),
   ADD COLUMN IF NOT EXISTS carrier_cascade_position  INTEGER,
   ADD COLUMN IF NOT EXISTS carrier_profit            DECIMAL(10,2);
 
