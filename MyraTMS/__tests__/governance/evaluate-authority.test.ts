@@ -40,6 +40,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await db.query(`DELETE FROM escalations WHERE evaluation_id IN (SELECT id FROM authority_evaluations WHERE agent_id = $1)`, [agentId]);
   await db.query(`DELETE FROM authority_evaluations WHERE agent_id = $1`, [agentId]);
+  await db.query(`DELETE FROM events WHERE derived_from_table = $1`, [`${RUN_ID}-idempotency`]);
   await db.query(`DELETE FROM authority_envelopes WHERE id = $1`, [envelopeId]);
   await db.query(`DELETE FROM agents WHERE id = $1`, [agentId]);
 });
@@ -77,11 +78,19 @@ describe('evaluateAuthority', () => {
   });
 
   it('is idempotent on source_event_id: a second call with the same sourceEventId does not duplicate', async () => {
-    // source_event_id has an FK to events(id), so use a real row rather than a synthetic id.
-    const realEvent = await db.query<{ id: number }>(
-      `SELECT id FROM events ORDER BY id DESC LIMIT 1`,
+    // source_event_id has an FK to events(id). A dedicated row, not "the
+    // latest event" -- picking the latest races against every other test
+    // file's own concurrent event inserts/deletes under a full-suite run,
+    // which can delete the chosen row between this test's two calls.
+    const ownEvent = await db.query<{ id: number }>(
+      `INSERT INTO events (
+         tenant_id, event_type, entity_type, entity_id, source, actor_type,
+         occurred_at, derived_from_table, derived_from_id
+       ) VALUES (1, 'test.authority_idempotency', 'test', 1, 'test', 'system', LOCALTIMESTAMP, $1, 1)
+       RETURNING id`,
+      [`${RUN_ID}-idempotency`],
     );
-    const eventId = realEvent.rows[0].id;
+    const eventId = ownEvent.rows[0].id;
 
     const first = await evaluateAuthority({
       agentKey: `${RUN_ID}-agent`,

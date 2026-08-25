@@ -15,6 +15,10 @@
  * occurred_at, so two genuine transitions sharing a stale/unset timestamp
  * would incorrectly collide, and the agent_calls INSERT trigger branch
  * only ever emits call.initiated — it does not inspect call_connected_at.
+ *
+ * tenant_id is resolved via fn_myra_tenant_id() rather than hardcoded,
+ * since T-19 (migration 035) corrected the default from the literal 1
+ * (the _system tenant) to Myra's real id.
  */
 
 import { describe, it, expect, afterAll } from 'vitest';
@@ -60,7 +64,8 @@ describe('T-17 metric views', () => {
     );
 
     const r = await db.query<{ stage: string; entries: string }>(
-      `SELECT stage, entries::text FROM v_stage_conversion WHERE tenant_id = 1 AND stage IN ('qualified', 'matched')`,
+      `SELECT stage, entries::text FROM v_stage_conversion
+        WHERE tenant_id = fn_myra_tenant_id() AND stage IN ('qualified', 'matched')`,
     );
     const byStage = Object.fromEntries(r.rows.map((row) => [row.stage, Number(row.entries)]));
     expect(byStage.qualified).toBeGreaterThanOrEqual(2);
@@ -84,7 +89,8 @@ describe('T-17 metric views', () => {
     await db.query(`UPDATE agent_calls SET outcome = 'declined' WHERE id = $1`, [insertedCalls[1]]);
 
     const r = await db.query<{ calls_initiated: string; calls_connected: string; calls_booked: string }>(
-      `SELECT calls_initiated::text, calls_connected::text, calls_booked::text FROM v_call_funnel WHERE tenant_id = 1`,
+      `SELECT calls_initiated::text, calls_connected::text, calls_booked::text FROM v_call_funnel
+        WHERE tenant_id = fn_myra_tenant_id()`,
     );
     expect(Number(r.rows[0].calls_initiated)).toBeGreaterThanOrEqual(2);
     expect(Number(r.rows[0].calls_connected)).toBeGreaterThanOrEqual(2);
@@ -118,7 +124,7 @@ describe('T-17 metric views', () => {
     callIds.push(r.rows[0].id);
 
     const view = await db.query<{ calls_total: string; calls_with_cost_data: string }>(
-      `SELECT calls_total::text, calls_with_cost_data::text FROM v_cost_per_call WHERE tenant_id = 1`,
+      `SELECT calls_total::text, calls_with_cost_data::text FROM v_cost_per_call WHERE tenant_id = fn_myra_tenant_id()`,
     );
     expect(Number(view.rows[0].calls_total)).toBeGreaterThanOrEqual(1);
     expect(Number(view.rows[0].calls_with_cost_data)).toBeGreaterThanOrEqual(0);

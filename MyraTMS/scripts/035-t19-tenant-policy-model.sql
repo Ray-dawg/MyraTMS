@@ -74,7 +74,7 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'load.scanned', 'load', NEW.id, NEW.id,
+            fn_myra_tenant_id()::integer, 'load.scanned', 'load', NEW.id, NEW.id,
             'system', 'system',
             jsonb_build_object('load_id', NEW.load_id, 'source', NEW.load_board_source),
             NULL, NEW.stage,
@@ -85,7 +85,7 @@ BEGIN
 
     IF TG_OP = 'UPDATE' AND OLD.stage IS DISTINCT FROM NEW.stage THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'load.stage_changed', 'load', NEW.id, NEW.id,
+            fn_myra_tenant_id()::integer, 'load.stage_changed', 'load', NEW.id, NEW.id,
             'system', 'system',
             jsonb_build_object('load_id', NEW.load_id, 'source', NEW.load_board_source),
             OLD.stage, NEW.stage,
@@ -94,7 +94,7 @@ BEGIN
 
         IF fn_stage_event_type(NEW.stage) IS NOT NULL THEN
             PERFORM fn_insert_event(
-                fn_myra_tenant_id(), fn_stage_event_type(NEW.stage), 'load', NEW.id, NEW.id,
+                fn_myra_tenant_id()::integer, fn_stage_event_type(NEW.stage), 'load', NEW.id, NEW.id,
                 'system', 'system',
                 jsonb_build_object('load_id', NEW.load_id, 'source', NEW.load_board_source),
                 OLD.stage, NEW.stage,
@@ -107,7 +107,7 @@ BEGIN
        AND OLD.research_completed_at IS DISTINCT FROM NEW.research_completed_at
        AND NEW.research_completed_at IS NOT NULL THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'load.researched', 'load', NEW.id, NEW.id,
+            fn_myra_tenant_id()::integer, 'load.researched', 'load', NEW.id, NEW.id,
             'researcher', 'agent',
             jsonb_build_object('market_rate_mid', NEW.market_rate_mid, 'recommended_strategy', NEW.recommended_strategy),
             NULL, NULL,
@@ -126,7 +126,7 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'call.initiated', 'call', NEW.id, NEW.pipeline_load_id,
+            fn_myra_tenant_id()::integer, 'call.initiated', 'call', NEW.id, NEW.pipeline_load_id,
             'voice', 'agent',
             jsonb_build_object('call_id', NEW.call_id, 'persona', NEW.persona, 'call_type', NEW.call_type),
             NULL, NULL,
@@ -139,7 +139,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.call_connected_at IS DISTINCT FROM NEW.call_connected_at
        AND NEW.call_connected_at IS NOT NULL THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'call.connected', 'call', NEW.id, NEW.pipeline_load_id,
+            fn_myra_tenant_id()::integer, 'call.connected', 'call', NEW.id, NEW.pipeline_load_id,
             'voice', 'agent', jsonb_build_object('call_id', NEW.call_id),
             NULL, NULL, NEW.call_connected_at, 'agent_calls', NEW.id,
             CASE WHEN NEW.pipeline_load_id IS NOT NULL THEN 'load-' || NEW.pipeline_load_id ELSE NULL END
@@ -149,7 +149,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.call_ended_at IS DISTINCT FROM NEW.call_ended_at
        AND NEW.call_ended_at IS NOT NULL THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'call.ended', 'call', NEW.id, NEW.pipeline_load_id,
+            fn_myra_tenant_id()::integer, 'call.ended', 'call', NEW.id, NEW.pipeline_load_id,
             'voice', 'agent',
             jsonb_build_object('call_id', NEW.call_id, 'duration_seconds', NEW.duration_seconds),
             NULL, NULL, NEW.call_ended_at, 'agent_calls', NEW.id,
@@ -160,7 +160,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.outcome IS DISTINCT FROM NEW.outcome
        AND NEW.outcome IS NOT NULL THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'call.outcome_recorded', 'call', NEW.id, NEW.pipeline_load_id,
+            fn_myra_tenant_id()::integer, 'call.outcome_recorded', 'call', NEW.id, NEW.pipeline_load_id,
             'voice', 'agent',
             jsonb_build_object('call_id', NEW.call_id, 'outcome', NEW.outcome, 'agreed_rate', NEW.agreed_rate),
             NULL, NULL,
@@ -181,7 +181,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.status IS DISTINCT FROM NEW.status
        AND NEW.status IN ('completed', 'failed') THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'job.' || NEW.status, 'job', NEW.id, NEW.pipeline_load_id,
+            fn_myra_tenant_id()::integer, 'job.' || NEW.status, 'job', NEW.id, NEW.pipeline_load_id,
             NEW.queue_name, 'system',
             jsonb_build_object('job_id', NEW.job_id, 'attempts', NEW.attempts, 'error_message', NEW.error_message),
             NULL, NULL,
@@ -200,7 +200,7 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
         PERFORM fn_insert_event(
-            fn_myra_tenant_id(), 'consent.logged', 'consent', NEW.id, NULL,
+            fn_myra_tenant_id()::integer, 'consent.logged', 'consent', NEW.id, NULL,
             'compliance-service', 'system',
             jsonb_build_object(
                 'phone_last4', RIGHT(NEW.phone, 4),
@@ -223,7 +223,7 @@ BEGIN
     IF TG_OP = 'UPDATE' AND OLD.status IS DISTINCT FROM NEW.status
        AND NEW.status IN ('success', 'partial', 'failed') THEN
         PERFORM fn_insert_event(
-            COALESCE(NEW.tenant_id, fn_myra_tenant_id()), 'scraper.run_completed', 'scraper_run', NEW.id, NULL,
+            COALESCE(NEW.tenant_id, fn_myra_tenant_id()::integer), 'scraper.run_completed', 'scraper_run', NEW.id, NULL,
             'scanner', 'system',
             jsonb_build_object(
                 'source_board', NEW.source, 'status', NEW.status,
@@ -243,7 +243,7 @@ $$ LANGUAGE plpgsql;
 -- v_cost_per_call's two COALESCE(e.tenant_id, 1) fallbacks corrected.
 CREATE OR REPLACE VIEW v_cost_per_call AS
 SELECT
-    COALESCE(e.tenant_id, fn_myra_tenant_id()) AS tenant_id,
+    COALESCE(e.tenant_id, fn_myra_tenant_id()::integer) AS tenant_id,
     COUNT(ac.id) AS calls_total,
     COUNT(ac.id) FILTER (WHERE ac.retell_cost_cents IS NOT NULL OR ac.claude_cost_cents IS NOT NULL) AS calls_with_cost_data,
     ROUND(
@@ -256,7 +256,7 @@ LEFT JOIN events e
        ON e.derived_from_table = 'agent_calls'
       AND e.derived_from_id = ac.id
       AND e.event_type = 'call.initiated'
-GROUP BY COALESCE(e.tenant_id, fn_myra_tenant_id());
+GROUP BY COALESCE(e.tenant_id, fn_myra_tenant_id()::integer);
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- T-18 fixes: the three table defaults.
@@ -354,6 +354,31 @@ INSERT INTO tenant_policies (tenant_id, version, load_source_policy, dispatch_ag
 SELECT fn_myra_tenant_id(), 1, 'shipper_direct_or_coBroker', true, 'both',
        '{"domestic_only": true, "countries": ["CA"]}'::jsonb, 'system'
 WHERE NOT EXISTS (SELECT 1 FROM tenant_policies WHERE tenant_id = fn_myra_tenant_id());
+-- ──────────────────────────────────────────────────────────────────────────────
+-- policy_engine agent + minimal default envelope. evaluatePolicy() logs into
+-- T-18's authority_evaluations (a policy decision and an authority decision
+-- are the same kind of record, per T-19 §5) which requires a valid
+-- envelope_id -- this is a shell envelope, not a real authority boundary;
+-- the actual rules live in tenant_policies, not here.
+-- ──────────────────────────────────────────────────────────────────────────────
+INSERT INTO agents (agent_key, display_name, agent_type, status, description)
+VALUES ('policy_engine', 'Policy Engine', 'decision', 'shadow',
+        'T-19 tenant policy evaluator -- load-source / geographic-scope rule engine.')
+ON CONFLICT (agent_key) DO NOTHING;
+
+INSERT INTO authority_envelopes (
+    agent_id, tenant_id, version, envelope_name, permissions, tools, budget, policies,
+    confidence_threshold, autonomy_default, escalation_rules, created_by
+)
+SELECT (SELECT id FROM agents WHERE agent_key = 'policy_engine'), fn_myra_tenant_id(), 1,
+       'policy-engine-myra-default',
+       '{"can": ["evaluate_load_source_policy"], "cannot": []}'::jsonb,
+       '[]'::jsonb, '{}'::jsonb, '{}'::jsonb, 0.700, 'L2', '[]'::jsonb, 'system'
+WHERE NOT EXISTS (
+    SELECT 1 FROM authority_envelopes
+     WHERE agent_id = (SELECT id FROM agents WHERE agent_key = 'policy_engine')
+       AND tenant_id = fn_myra_tenant_id()
+);
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- co_broker_agreements — empty at launch. Myra has none yet.

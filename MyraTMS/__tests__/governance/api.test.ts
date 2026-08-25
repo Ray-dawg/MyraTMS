@@ -17,7 +17,7 @@ const RUN_ID = `T18-API-${Date.now()}`;
 function tokenFor(role: string): string {
   return createToken({
     userId: 'test-user', email: 'test@myra.dev', role,
-    firstName: 'Test', lastName: 'User', tenantId: 1, tenantIds: [1],
+    firstName: 'Test', lastName: 'User', tenantId: 2, tenantIds: [2],
   });
 }
 
@@ -44,12 +44,12 @@ beforeAll(async () => {
     `INSERT INTO authority_evaluations (envelope_id, agent_id, tenant_id, action, autonomy_level_applied, decision, shadow_mode)
      VALUES (
        (SELECT id FROM authority_envelopes LIMIT 1),
-       $1, 1, 'test_action', 'L3', 'escalate', true
+       $1, 2, 'test_action', 'L3', 'escalate', true
      ) RETURNING id`,
     [agentId],
   );
   const escalation = await db.query<{ id: number }>(
-    `INSERT INTO escalations (evaluation_id, tenant_id, severity, status) VALUES ($1, 1, 'medium', 'pending') RETURNING id`,
+    `INSERT INTO escalations (evaluation_id, tenant_id, severity, status) VALUES ($1, 2, 'medium', 'pending') RETURNING id`,
     [evaluation.rows[0].id],
   );
   escalationId = escalation.rows[0].id;
