@@ -115,3 +115,131 @@ describe('QualifierWorker', () => {
     expect(result.details?.reason).toMatch(/4 hours/);
   });
 });
+
+/**
+ * Shadow shipper-direct classification + evaluatePolicy() wiring (E2-01 M1 +
+ * T-19, 2026-08-25). SHIPPER_DIRECT_GATE_ENABLED defaults to unset/false in
+ * every other test in this file (and in production) — these tests are the
+ * only place it's flipped on, and restore it afterward.
+ */
+describe('QualifierWorker — shadow shipper-direct classification', () => {
+  let pipelineLoadId: number;
+  let researchQueue: Queue;
+  let matchQueue: Queue;
+  let worker: QualifierWorker;
+  const loadId = `TEST-Q-SHADOW-${Date.now()}`;
+  const originalGateEnv = process.env.SHIPPER_DIRECT_GATE_ENABLED;
+
+  beforeAll(async () => {
+    researchQueue = new Queue('research-queue-test-shadow', { connection: redisConnection });
+    matchQueue = new Queue('match-queue-test-shadow', { connection: redisConnection });
+    worker = new QualifierWorker(redisConnection, researchQueue, matchQueue);
+
+    const res = await db.query<{ id: number }>(
+      `INSERT INTO pipeline_loads (
+         load_id, load_board_source, origin_city, origin_state, origin_country,
+         destination_city, destination_state, destination_country,
+         pickup_date, equipment_type,
+         posted_rate, posted_rate_currency, distance_miles, stage
+       ) VALUES (
+         $1, 'csv', 'Chicago', 'IL', 'US',
+         'Dallas', 'TX', 'US',
+         NOW() + INTERVAL '3 days', 'Dry Van',
+         2400, 'USD', 920, 'scanned'
+       ) RETURNING id`,
+      [loadId],
+    );
+    pipelineLoadId = res.rows[0].id;
+  });
+
+  afterAll(async () => {
+    process.env.SHIPPER_DIRECT_GATE_ENABLED = originalGateEnv;
+    await db.query(`DELETE FROM authority_evaluations WHERE pipeline_load_id = $1`, [pipelineLoadId]);
+    await db.query(`DELETE FROM pipeline_loads WHERE id = $1`, [pipelineLoadId]);
+    await researchQueue.obliterate({ force: true });
+    await matchQueue.obliterate({ force: true });
+    await researchQueue.close();
+    await matchQueue.close();
+  });
+
+  function basePayload(): QualifyJobPayload {
+    return {
+      pipelineLoadId,
+      loadId,
+      loadBoardSource: 'csv',
+      enqueuedAt: new Date().toISOString(),
+      priority: 0,
+      origin: { city: 'Chicago', state: 'IL', country: 'US' },
+      destination: { city: 'Dallas', state: 'TX', country: 'US' },
+      equipmentType: 'Dry Van',
+      postedRate: 2400,
+      postedRateCurrency: 'USD',
+      distanceMiles: 920,
+      pickupDate: new Date(Date.now() + 3 * 86400_000).toISOString(),
+      shipperPhone: null,
+    };
+  }
+
+  it('gate disabled (default): no classification runs, nothing is persisted, qualification is unaffected', async () => {
+    delete process.env.SHIPPER_DIRECT_GATE_ENABLED;
+
+    const result = await worker.process(basePayload());
+    expect(result.details?.passed).toBe(true);
+    expect(result.details?.sourceClassification).toBeNull();
+
+    await (worker as any).updatePipelineLoad(pipelineLoadId, result);
+    const after = await db.query<{ stage: string; load_source_class: string | null }>(
+      `SELECT stage, load_source_class FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId],
+    );
+    expect(after.rows[0].stage).toBe('qualified');
+    expect(after.rows[0].load_source_class).toBeNull();
+  });
+
+  it('gate enabled, no poster identity captured: classifies unresolved, evaluatePolicy() rejects, but the load still qualifies normally', async () => {
+    process.env.SHIPPER_DIRECT_GATE_ENABLED = 'true';
+
+    const result = await worker.process(basePayload());
+    // The real filter chain (freshness/equipment/margin/DNC/fatigue) still
+    // decides qualify/disqualify — the shadow classification must never
+    // change this outcome.
+    expect(result.details?.passed).toBe(true);
+
+    const shadow = result.details?.sourceClassification;
+    expect(shadow).not.toBeNull();
+    expect(shadow.classification.class).toBe('unresolved');
+    expect(shadow.classification.reasonCode).toBe('poster_identity_missing');
+    expect(shadow.policyResult).not.toBeNull();
+    expect(shadow.policyResult.decision).toBe('reject'); // no MC number can match a co-broker agreement
+
+    await (worker as any).updatePipelineLoad(pipelineLoadId, result);
+
+    const after = await db.query<{
+      stage: string;
+      load_source_class: string | null;
+      load_source_evaluated_at: string | null;
+      qualification_detail: string | null;
+    }>(
+      `SELECT stage, load_source_class, load_source_evaluated_at, qualification_detail
+         FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId],
+    );
+    // Still qualified — the real qualification_reason column (asserted via
+    // stage here) was set by the real filter chain, not by the shadow gate.
+    expect(after.rows[0].stage).toBe('qualified');
+    expect(after.rows[0].load_source_class).toBe('unresolved');
+    expect(after.rows[0].load_source_evaluated_at).not.toBeNull();
+    expect(after.rows[0].qualification_detail).toContain('evaluatePolicy=reject');
+
+    // evaluatePolicy() really ran end-to-end, not just returned a value in
+    // memory — it logged its own audit row under the policy_engine agent.
+    const evalRow = await db.query<{ decision: string }>(
+      `SELECT ae.decision FROM authority_evaluations ae
+         JOIN agents a ON a.id = ae.agent_id
+        WHERE a.agent_key = 'policy_engine' AND ae.pipeline_load_id = $1`,
+      [pipelineLoadId],
+    );
+    expect(evalRow.rows.length).toBeGreaterThan(0);
+    expect(evalRow.rows[0].decision).toBe('deny');
+  });
+});

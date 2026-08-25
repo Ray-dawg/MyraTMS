@@ -22,6 +22,17 @@ import { logger } from '@/lib/logger';
 import { extractRegion } from '@/lib/matching/regions';
 import { getBenchmarkRate } from '@/lib/quoting/rates/benchmark';
 import { getMarginFloor } from '@/lib/tenants/margin-floor';
+import { getMyraTenantId } from '@/lib/tenants/get-myra-tenant-id';
+import {
+  classifyLoadSource,
+  findActiveAgreement,
+  findRegistryHit,
+  normalizeCompanyName,
+  type ClassifyLoadSourceResult,
+} from '@/lib/pipeline/load-source-classifier';
+import { lookupAuthority } from '@/lib/verification/authority-lookup';
+import { evaluatePolicy } from '@/lib/governance/evaluate-policy-db';
+import type { PolicyEvaluationResult } from '@/lib/governance/policy-types';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
@@ -36,6 +47,29 @@ export interface QualifyJobPayload extends BaseJobPayload {
   distanceMiles: number;
   pickupDate: string;
   shipperPhone: string | null;
+  // Poster identity (E2-01 M1 §4.2) — optional because no ingest path
+  // populates these yet (DAT scraper detail-panel capture and the official
+  // ingest APIs are separate, not-yet-built follow-ups). When absent, the
+  // shadow classification below correctly reports 'unresolved' /
+  // 'poster_identity_missing' rather than guessing.
+  posterCompanyRaw?: string | null;
+  posterMcNumber?: string | null;
+  posterDotNumber?: string | null;
+  isManualImport?: boolean;
+}
+
+/**
+ * Result of the shadow shipper-direct/tenant-policy classification (E2-01 M1
+ * + T-19). Always computed when SHIPPER_DIRECT_GATE_ENABLED=true, never
+ * affects the qualify/disqualify decision — see the module-level comment
+ * above process(). Persisted alongside the real qualification outcome so
+ * the classifier's and evaluatePolicy()'s accuracy can be measured before
+ * either is ever allowed to gate a real load.
+ */
+interface ShadowSourceClassification {
+  classification: ClassifyLoadSourceResult;
+  policyResult: PolicyEvaluationResult | null;
+  policyError: string | null;
 }
 
 /**
@@ -74,6 +108,20 @@ function formatLocation(loc: { city: string; state: string }): string {
 
 /**
  * Qualifier worker - filters loads to eliminate unprofitable ones early
+ *
+ * Shadow shipper-direct / tenant-policy classification (E2-01 M1 + T-19,
+ * wired 2026-08-25): behind SHIPPER_DIRECT_GATE_ENABLED (default false/off).
+ * When enabled, every load is classified via classifyLoadSource() and
+ * evaluated via evaluatePolicy() — both real, both writing their own audit
+ * trail (load_source_class/etc. on pipeline_loads; authority_evaluations
+ * under the policy_engine agent) — but the result NEVER changes the
+ * qualify/disqualify decision below. This is intentionally shadow-only:
+ * no ingest path captures poster identity (company/MC/DOT) yet, so today
+ * every real load classifies as 'unresolved' / 'poster_identity_missing'.
+ * Enforcing on that would silently reject the entire live pipeline. Once
+ * poster-identity capture lands at the scanner (a separate, not-yet-built
+ * change), this same code starts seeing real signal — flipping enforcement
+ * on from there is a follow-up change, not a re-wire.
  */
 export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
   private researchQueue: Queue;
@@ -103,6 +151,10 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
   public async process(payload: QualifyJobPayload): Promise<ProcessResult> {
     const { pipelineLoadId } = payload;
     logger.debug(`[Qualifier] Processing load ${pipelineLoadId}`);
+
+    // Shadow-only — see class-level comment. Never throws, never affects
+    // qualResult below.
+    const sourceClassification = await this.runShadowSourceClassification(payload);
 
     const qualResult = await this.qualifyLoad(payload);
 
@@ -167,6 +219,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
           },
           carrierMatchCount: qualResult.carrierMatchCount,
           isRepeatShipper: qualResult.isRepeatShipper,
+          sourceClassification,
         },
       };
     }
@@ -181,8 +234,96 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       details: {
         passed: false,
         reason: qualResult.reason,
+        sourceClassification,
       },
     };
+  }
+
+  /**
+   * Shadow-only shipper-direct classification + tenant-policy evaluation.
+   * See class-level comment for why this never gates the load today.
+   * Fails safe: any error (missing FMCSA webKey, DB hiccup, etc.) is caught
+   * and logged, never thrown — a classification failure must never look
+   * like a qualification failure.
+   */
+  private async runShadowSourceClassification(
+    payload: QualifyJobPayload,
+  ): Promise<ShadowSourceClassification | null> {
+    if (process.env.SHIPPER_DIRECT_GATE_ENABLED !== 'true') {
+      return null;
+    }
+
+    try {
+      const companyNormalized = payload.posterCompanyRaw
+        ? normalizeCompanyName(payload.posterCompanyRaw)
+        : null;
+      const poster = {
+        companyRaw: payload.posterCompanyRaw ?? null,
+        companyNormalized,
+        mcNumber: payload.posterMcNumber ?? null,
+        dotNumber: payload.posterDotNumber ?? null,
+      };
+      const originCountry = payload.origin.country;
+
+      const registryHit = await findRegistryHit(
+        poster.mcNumber,
+        poster.dotNumber,
+        poster.companyNormalized,
+        originCountry,
+      );
+
+      // External lookup only on registry miss, and only if there's an
+      // identity to look up (per E2-01 §4.6 — the registry cache is the
+      // cost control).
+      const hasIdentity = Boolean(poster.mcNumber || poster.dotNumber || poster.companyNormalized);
+      const lookupResult =
+        !registryHit && hasIdentity
+          ? await lookupAuthority({
+              mcNumber: poster.mcNumber ?? undefined,
+              dotNumber: poster.dotNumber ?? undefined,
+              companyName: poster.companyRaw ?? undefined,
+              country: originCountry === 'CA' ? 'CA' : 'US',
+            })
+          : null;
+
+      const tenantId = await getMyraTenantId();
+      const agreementMatch = await findActiveAgreement(poster.mcNumber, poster.companyNormalized, tenantId);
+
+      const classification = classifyLoadSource({
+        poster,
+        isManualImport: payload.isManualImport ?? false,
+        attestation: null,
+        registryHit,
+        lookupResult,
+        agreementMatch,
+      });
+
+      let policyResult: PolicyEvaluationResult | null = null;
+      let policyError: string | null = null;
+      try {
+        policyResult = await evaluatePolicy({
+          tenantId,
+          load: {
+            isDirect: classification.class === 'shipper_direct',
+            postingSource: payload.loadBoardSource,
+            postingCompanyMcNumber: poster.mcNumber ?? undefined,
+            originCountry,
+            destinationCountry: payload.destination.country,
+          },
+          pipelineLoadId: payload.pipelineLoadId,
+        });
+      } catch (err) {
+        policyError = err instanceof Error ? err.message : String(err);
+        logger.warn(`[Qualifier] shadow evaluatePolicy() failed for load ${payload.pipelineLoadId}`, { error: policyError });
+      }
+
+      return { classification, policyResult, policyError };
+    } catch (err) {
+      logger.warn(`[Qualifier] shadow source classification failed for load ${payload.pipelineLoadId}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   /**
@@ -378,6 +519,54 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
         [pipelineLoadId, result.details?.reason ?? 'unspecified'],
       );
     }
+
+    await this.persistShadowClassification(pipelineLoadId, result.details?.sourceClassification ?? null);
+
     logger.debug(`[Qualifier] Pipeline load ${pipelineLoadId} → ${result.details?.passed ? 'qualified' : 'disqualified'}`);
+  }
+
+  /**
+   * Writes the shadow classification (if any ran) into the columns E2-01 M1's
+   * migration 040 already added. Separate UPDATE from the real qualify/
+   * disqualify write above — deliberately: a failure here must never roll
+   * back or interfere with the real decision, and this only ever fires
+   * when the load has already been persisted by the caller above.
+   */
+  private async persistShadowClassification(
+    pipelineLoadId: number,
+    shadow: ShadowSourceClassification | null,
+  ): Promise<void> {
+    if (!shadow) return;
+
+    const { classification, policyResult, policyError } = shadow;
+    const detail = [
+      `class=${classification.class} verdict=${classification.verdict} method=${classification.method ?? 'none'} reason=${classification.reasonCode ?? 'none'}`,
+      policyResult ? `evaluatePolicy=${policyResult.decision} (${policyResult.reason})` : `evaluatePolicy=error (${policyError})`,
+    ].join(' | ');
+
+    try {
+      await db.query(
+        `UPDATE pipeline_loads
+         SET load_source_class = $2,
+             load_source_method = $3,
+             load_source_confidence = $4,
+             load_source_evaluated_at = NOW(),
+             load_source_evidence = $5,
+             qualification_detail = $6
+         WHERE id = $1`,
+        [
+          pipelineLoadId,
+          classification.class,
+          classification.method,
+          classification.confidence,
+          JSON.stringify(classification.evidence),
+          detail,
+        ],
+      );
+    } catch (err) {
+      logger.warn(`[Qualifier] failed to persist shadow classification for load ${pipelineLoadId}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
