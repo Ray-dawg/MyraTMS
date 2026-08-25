@@ -62,6 +62,11 @@ interface CreatedLoad {
   id: string;
 }
 
+interface CarrierRateResult {
+  rate: number;
+  estimated: boolean;
+}
+
 export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
   private tmsApiUrl: string;
   private serviceTokenTtl: string;
@@ -146,7 +151,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       };
     }
 
-    const carrierRate = await this.fetchCarrierRate(load.load_id, load.top_carrier_id);
+    const carrierRateResult = await this.fetchCarrierRate(load.load_id, load.top_carrier_id);
 
     const cookie = `auth-token=${signServiceToken(this.serviceTokenTtl)}`;
 
@@ -165,13 +170,14 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
        SET pipeline_load_id = $2,
            source_type = 'ai_agent',
            booked_via = 'ai_auto',
+           carrier_cost_estimated = $3,
            updated_at = NOW()
        WHERE id = $1`,
-      [tmsLoad.id, pipelineLoadId],
+      [tmsLoad.id, pipelineLoadId, carrierRateResult.estimated],
     );
 
     // Step 3: assign the carrier (also flips loads.status to 'Dispatched').
-    await this.assignCarrier(tmsLoad.id, load.top_carrier_id, carrierRate, cookie);
+    await this.assignCarrier(tmsLoad.id, load.top_carrier_id, carrierRateResult.rate, cookie);
 
     // Step 4 + 5: tracking token + email link. Best-effort, non-fatal.
     if (load.shipper_email) {
@@ -192,7 +198,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       details: {
         tmsLoadId: tmsLoad.id,
         carrierId: load.top_carrier_id,
-        carrierRate,
+        carrierRate: carrierRateResult.rate,
         agreedRate,
         profit,
       },
@@ -273,7 +279,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     );
   }
 
-  private async fetchCarrierRate(loadId: string, carrierId: string): Promise<number> {
+  private async fetchCarrierRate(loadId: string, carrierId: string): Promise<CarrierRateResult> {
     const r = await db.query<{ breakdown: any }>(
       `SELECT breakdown FROM match_results
        WHERE load_id = $1 AND carrier_id = $2
@@ -281,7 +287,16 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       [loadId, carrierId],
     );
     const carrierAvg = r.rows[0]?.breakdown?.rate?.carrier_avg_rate;
-    return typeof carrierAvg === 'number' && carrierAvg > 0 ? carrierAvg : 0;
+    if (typeof carrierAvg === 'number' && carrierAvg > 0) {
+      return { rate: carrierAvg, estimated: false };
+    }
+    // E2-02 §4 item 3: no real rate history for this carrier. Returning 0
+    // silently made margin = revenue (100% margin), indistinguishable from a
+    // genuine zero-cost load. `estimated: true` is the honesty flag — it
+    // doesn't fix the underlying "no real carrier rate" problem (M2 does
+    // that by actually negotiating one), it stops the number from lying
+    // about its own confidence in the interim.
+    return { rate: 0, estimated: true };
   }
 
   private async createTMSLoad(
