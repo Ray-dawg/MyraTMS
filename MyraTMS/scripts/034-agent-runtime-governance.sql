@@ -29,10 +29,15 @@ CREATE TABLE IF NOT EXISTS agents (
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- authority_envelopes — versioned policy object per (agent, tenant).
+--
+-- ON DELETE CASCADE on agent_id: agents is a brand-new T-18 table, never
+-- deleted by live worker code (agents are deactivated via status, not
+-- removed) — only test/ops cleanup ever deletes a row here, same reasoning
+-- as T-17's pipeline_loads cascade.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS authority_envelopes (
     id                    SERIAL PRIMARY KEY,
-    agent_id              INTEGER NOT NULL REFERENCES agents(id),
+    agent_id              INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tenant_id             INTEGER NOT NULL DEFAULT 1,
     version               INTEGER NOT NULL DEFAULT 1,
 
@@ -65,11 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_envelopes_active ON authority_envelopes(agent_id,
 -- (ad-hoc evaluateAuthority() calls with no source event) are never
 -- considered duplicates of each other — standard SQL NULL semantics — so
 -- this only dedupes actual replay-harness re-runs.
+--
+-- agent_id also cascades, same reasoning as authority_envelopes above.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS authority_evaluations (
     id                     BIGSERIAL PRIMARY KEY,
     envelope_id            INTEGER NOT NULL REFERENCES authority_envelopes(id),
-    agent_id               INTEGER NOT NULL REFERENCES agents(id),
+    agent_id               INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tenant_id              INTEGER NOT NULL DEFAULT 1,
     pipeline_load_id       INTEGER REFERENCES pipeline_loads(id) ON DELETE CASCADE,
 
