@@ -55,6 +55,7 @@ interface PipelineLoadRow {
   shipper_email: string | null;
   shipper_phone: string | null;
   top_carrier_id: string | null;
+  tms_load_id: string | null;
 }
 
 interface CreatedLoad {
@@ -149,8 +150,14 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
 
     const cookie = `auth-token=${signServiceToken(this.serviceTokenTtl)}`;
 
-    // Step 1: create the TMS load row.
-    const tmsLoad = await this.createTMSLoad(load, agreedRate, payload.agreedRateCurrency, cookie);
+    // Step 1: create the TMS load row — or reuse one from a prior attempt.
+    // E2-02 §4 item 2: a dispatch-queue retry after a downstream failure
+    // (e.g. assignCarrier throws) used to re-run from the top and create a
+    // second loads row for the same pipeline_loads entry. tms_load_id is
+    // the natural idempotency key — once set, it's never re-created.
+    const tmsLoad = load.tms_load_id
+      ? { id: load.tms_load_id }
+      : await this.createTMSLoad(load, agreedRate, payload.agreedRateCurrency, cookie);
 
     // Step 2: patch the pipeline-linkage columns the route doesn't handle.
     await db.query(
@@ -196,7 +203,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     const r = await db.query<PipelineLoadRow>(
       `SELECT id, load_id, origin_city, origin_state, destination_city, destination_state,
               pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
-              shipper_company, shipper_email, shipper_phone, top_carrier_id
+              shipper_company, shipper_email, shipper_phone, top_carrier_id, tms_load_id
        FROM pipeline_loads WHERE id = $1`,
       [id],
     );
