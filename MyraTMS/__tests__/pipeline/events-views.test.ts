@@ -78,7 +78,7 @@ describe('T-17 metric views', () => {
     for (let i = 0; i < 2; i++) {
       const r = await db.query<{ id: number }>(
         `INSERT INTO agent_calls (pipeline_load_id, call_id, call_type)
-         VALUES ($1, $2, 'negotiation') RETURNING id`,
+         VALUES ($1, $2, 'outbound_shipper') RETURNING id`,
         [loadId, `${RUN_ID}-CF-${i}`],
       );
       insertedCalls.push(r.rows[0].id);
@@ -118,7 +118,7 @@ describe('T-17 metric views', () => {
   it('v_cost_per_call reports coverage even when cost columns are null', async () => {
     const loadId = await insertLoad('CPC');
     const r = await db.query<{ id: number }>(
-      `INSERT INTO agent_calls (pipeline_load_id, call_id, call_type) VALUES ($1, $2, 'negotiation') RETURNING id`,
+      `INSERT INTO agent_calls (pipeline_load_id, call_id, call_type) VALUES ($1, $2, 'outbound_shipper') RETURNING id`,
       [loadId, `${RUN_ID}-CPC-1`],
     );
     callIds.push(r.rows[0].id);

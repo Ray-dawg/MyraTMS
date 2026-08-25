@@ -95,7 +95,7 @@ describe('T-17 event triggers', () => {
     const loadId = await insertTestLoad('CALL');
     const r = await db.query<{ id: number }>(
       `INSERT INTO agent_calls (pipeline_load_id, call_id, call_type)
-       VALUES ($1, $2, 'negotiation') RETURNING id`,
+       VALUES ($1, $2, 'outbound_shipper') RETURNING id`,
       [loadId, `${RUN_ID}-CALL-1`],
     );
     const id = r.rows[0].id;
