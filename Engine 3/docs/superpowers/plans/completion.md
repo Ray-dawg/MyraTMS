@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-25 (T-19 verified on branch, full regression suite green, not yet applied to production)
-**Status:** Phase 1 (Instrument) in progress — T-17 and T-18 shipped to production. T-19 redesigned against the real schema, migration 035 verified on a disposable Neon branch (`t19-verify`), pending production apply.
+**Last updated:** 2026-08-25 (T-19 shipped to production; T-17/T-18/T-19 code pushed to GitHub for the first time)
+**Status:** Phase 1 (Instrument) — T-17, T-18, T-19 all shipped to production. Phase 1 exit gate met: every Engine 2 event emitted to the event layer, one agent running under a governance envelope, Myra tenant row exists with correct id, all loads carry `tenant_id`.
 
 ## How to use this file
 
@@ -81,7 +81,7 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 
 **Spec:** [T19_Tenant_Policy_Model.md](../../../T19_Tenant_Policy_Model.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t19-tenant-policy-model-design.md`
-**Status:** ⏳ **Verified on branch (`t19-verify`, `br-floral-glade-ai96qqkc`), zero regressions — not yet applied to production**
+**Status:** ✅ **DONE — shipped to production 2026-08-25**
 
 Redesigned against the real production schema rather than the base spec's assumptions (see design doc): reuses `tenants`/`tenant_users` as-is instead of creating new tables, fixes a real production tenant_id mislabeling bug (T-17/T-18 hardcoded `1`, the `_system` tenant, instead of resolving Myra's real id by slug), adds `freight_business_type` as a new column distinct from `tenants.type`, and consolidates three disconnected margin-floor values down to the one actually driving `auto_book_eligible` in production ($270 CAD / $200 USD).
 
@@ -91,7 +91,8 @@ Redesigned against the real production schema rather than the base spec's assump
 - [x] Applied to `t19-verify`, idempotent re-apply confirmed (done 2026-08-25)
 - [x] Full regression suite (36 test files, 439 tests): 433 passing, 6 failing — all 6 pre-existing and unrelated to T-19 (`ranker.test.ts`'s already-documented 207-real-carrier timeout from T-17, and 5 `cost-calculator.test.ts` pure-arithmetic failures with zero DB/tenant involvement, confirmed untouched in this working tree) (done 2026-08-25)
 - [ ] API endpoints (`GET/POST /api/tenants`, `/api/tenants/:id/policy`, `/api/tenants/:id/co-broker-agreements`, `/api/policy-evaluations`) — not yet built
-- [ ] Apply to production (pending explicit go-ahead, per the T-17/T-18 branch-verify-then-ask pattern)
+- [x] Applied to production: migration 035 run against the real Neon production branch (`br-rough-forest-aif4a3vf`), all objects verified — tenant_id backfill (events/authority_envelopes/authority_evaluations/escalations all at 0 rows remaining at tenant_id=1), `freight_business_type='broker'` on Myra, 4 policy templates, Myra's v1 policy, `policy_engine` agent + envelope, `margin_floor_cad/usd` corrected to 270/200, dead threshold key removed (done 2026-08-25)
+- [x] **Discovered during this apply:** local `master` had never been pushed to GitHub — all of T-17, T-18, and T-19 (30 commits) existed only in the local repo, meaning the corresponding application code (e.g. T-18's API routes) was never actually live in the Vercel-deployed app even though the DB migrations had been run directly against production. Fixed: merged `t19-tenant-policy-model` into local `master` and pushed all 30 commits to `origin/master` (`147e92f..35d9903`, clean fast-forward) so deployed code now matches the live database schema (done 2026-08-25)
 
 **Bugs found and fixed during verification:**
 1. `v_cost_per_call`'s `CREATE OR REPLACE VIEW` failed outright: `fn_myra_tenant_id()` returns `BIGINT` (matching `tenants.id`), but the view's `tenant_id` output column was `INTEGER` (from the old `COALESCE(e.tenant_id, 1)`), and Postgres refuses to change a view column's type via `CREATE OR REPLACE`. Fixed: cast to `::integer` at both call sites within the view only — narrow, no behavior change (tenant ids fit well within int4).
