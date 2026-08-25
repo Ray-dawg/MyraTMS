@@ -71,7 +71,11 @@ CREATE INDEX IF NOT EXISTS idx_envelopes_active ON authority_envelopes(agent_id,
 -- considered duplicates of each other — standard SQL NULL semantics — so
 -- this only dedupes actual replay-harness re-runs.
 --
--- agent_id also cascades, same reasoning as authority_envelopes above.
+-- agent_id and source_event_id both cascade: agents (above) and events
+-- (T-17) are each only ever deleted by test/ops cleanup, never live code.
+-- Found the source_event_id case via the full regression suite — a T-18
+-- evaluation referencing an event that T-17's own test cleanup later tried
+-- to delete blocked that deletion until this was added.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS authority_evaluations (
     id                     BIGSERIAL PRIMARY KEY,
@@ -88,7 +92,7 @@ CREATE TABLE IF NOT EXISTS authority_evaluations (
     reason                 TEXT,
 
     shadow_mode            BOOLEAN NOT NULL DEFAULT true,
-    source_event_id        BIGINT REFERENCES events(id),
+    source_event_id        BIGINT REFERENCES events(id) ON DELETE CASCADE,
 
     evaluated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     correlation_id         VARCHAR(100),
