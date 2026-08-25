@@ -201,6 +201,7 @@ export function LoadQuickView({
     status: rawLoad.status as string,
     revenue: Number(rawLoad.revenue) || 0,
     carrierCost: Number(rawLoad.carrier_cost) || 0,
+    carrierCostEstimated: Boolean(rawLoad.carrier_cost_estimated) || false,
     margin: Number(rawLoad.margin) || 0,
     marginPercent: Number(rawLoad.margin_percent) || 0,
     pickupDate: (rawLoad.pickup_date || "") as string,
@@ -428,7 +429,14 @@ export function LoadQuickView({
               <p className="text-lg font-semibold text-foreground font-mono mt-0.5">{formatCurrency(load.revenue)}</p>
             </div>
             <div className="text-center p-3 rounded-md bg-secondary/30">
-              <p className="text-[10px] text-muted-foreground">Carrier Pay</p>
+              <p className="text-[10px] text-muted-foreground">
+                Carrier Pay
+                {load.carrierCostEstimated && (
+                  <span className="ml-1 text-warning" title="No real carrier rate history — this is a fallback estimate, not a negotiated number. Margin below is not reliable until a real rate is captured.">
+                    (est.)
+                  </span>
+                )}
+              </p>
               <p className="text-lg font-semibold text-muted-foreground font-mono mt-0.5">{formatCurrency(load.carrierCost)}</p>
             </div>
             <div className="text-center p-3 rounded-md bg-success/5">
