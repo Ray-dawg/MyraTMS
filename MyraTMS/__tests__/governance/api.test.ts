@@ -21,8 +21,12 @@ function tokenFor(role: string): string {
   });
 }
 
-function requestWithCookie(path: string, token?: string, init?: RequestInit): NextRequest {
-  const headers = new Headers(init?.headers);
+function requestWithCookie(
+  path: string,
+  token?: string,
+  init?: { method?: string; body?: string },
+): NextRequest {
+  const headers = new Headers();
   if (token) headers.set('cookie', `auth-token=${token}`);
   return new NextRequest(`http://localhost${path}`, { ...init, headers });
 }

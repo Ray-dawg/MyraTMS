@@ -28,3 +28,6 @@ Thumbs.db
 **/next-env.d.ts
 
 .vercel
+
+# Git worktrees (per-session isolated workspaces)
+.worktrees/

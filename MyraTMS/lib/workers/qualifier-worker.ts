@@ -21,6 +21,7 @@ import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { extractRegion } from '@/lib/matching/regions';
 import { getBenchmarkRate } from '@/lib/quoting/rates/benchmark';
+import { getMarginFloor } from '@/lib/tenants/margin-floor';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
@@ -248,7 +249,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
     const postedRate = payload.postedRate ?? benchmarkRevenueMid;
     const estimatedMarginHigh = postedRate - expectedCarrierRate;
     const estimatedMarginLow = estimatedMarginHigh * 0.7;
-    const minMargin = payload.origin.country === 'CA' ? 270 : 200;
+    const minMargin = await getMarginFloor(payload.origin.country === 'CA' ? 'CAD' : 'USD');
 
     if (estimatedMarginHigh < minMargin * 0.5) {
       return fail(`Best-case margin $${estimatedMarginHigh.toFixed(0)} < 50% of minimum $${minMargin}`);
