@@ -17,7 +17,7 @@ async function main() {
      WHERE conname = 'chk_agent_calls_call_type' AND conrelid = 'agent_calls'::regclass`,
     [],
   );
-  console.log(`\n[1/4] agent_calls.chk_agent_calls_call_type constraint present: ${callTypeConstraint.length === 1}`);
+  console.log(`\n[1/5] agent_calls.chk_agent_calls_call_type constraint present: ${callTypeConstraint.length === 1}`);
   if (callTypeConstraint.length !== 1) console.log('      MISSING: chk_agent_calls_call_type');
 
   // 2. pipeline_loads carrier-outcome columns
@@ -30,7 +30,7 @@ async function main() {
      WHERE table_name='pipeline_loads' AND column_name = ANY($1::text[])`,
     [pipelineLoadsCols],
   );
-  console.log(`\n[2/4] pipeline_loads carrier columns (expected ${pipelineLoadsCols.length}): ${foundPipelineCols.length}`);
+  console.log(`\n[2/5] pipeline_loads carrier columns (expected ${pipelineLoadsCols.length}): ${foundPipelineCols.length}`);
   const missingPipelineCols = pipelineLoadsCols.filter(
     (c) => !foundPipelineCols.some((r: any) => r.column_name === c),
   );
@@ -42,7 +42,7 @@ async function main() {
      WHERE table_name='loads' AND column_name='carrier_cost_estimated'`,
     [],
   );
-  console.log(`\n[3/4] loads.carrier_cost_estimated present: ${loadsCol.length === 1}`);
+  console.log(`\n[3/5] loads.carrier_cost_estimated present: ${loadsCol.length === 1}`);
   if (loadsCol.length !== 1) console.log('      MISSING: loads.carrier_cost_estimated');
 
   // 4. carriers verification columns

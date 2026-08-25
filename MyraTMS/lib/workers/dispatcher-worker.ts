@@ -67,6 +67,11 @@ interface CarrierRateResult {
   estimated: boolean;
 }
 
+interface CarrierInfo {
+  carrierStatus: string | null;
+  phone: string | null;
+}
+
 export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
   private tmsApiUrl: string;
   private serviceTokenTtl: string;
@@ -79,9 +84,22 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     const config: WorkerConfig = {
       queueName: 'dispatch-queue',
       expectedStage: 'booked',
-      // nextStage handled inside updatePipelineLoad — we also need to write
-      // tms_load_id alongside the stage transition.
-      nextStage: undefined,
+      // nextStage MUST be set: BaseWorker.handleJob only calls
+      // updatePipelineLoad when config.nextStage is truthy (base-worker.ts).
+      // Our updatePipelineLoad() override writes the 'dispatched' stage
+      // itself (hardcoded, alongside tms_load_id) — this value only exists
+      // to satisfy that guard. Leaving it undefined silently skipped the
+      // persist on the real queue-processing path: dispatch calls succeeded
+      // against the TMS but pipeline_loads.tms_load_id was NEVER written,
+      // which meant Task 3's idempotency guard (`load.tms_load_id ? reuse :
+      // createTMSLoad()`) never actually triggered in production — the
+      // duplicate-loads-row bug it was meant to close stayed open. This is
+      // the identical bug already found and fixed for voice-worker.ts (see
+      // its nextStage comment for the twin case). updatePipelineLoad()
+      // still no-ops safely for the two escalation branches below — it
+      // early-returns with a warning when result.details has no tmsLoadId,
+      // which is true for both 'escalated' outcomes.
+      nextStage: 'dispatched',
       concurrency: 10,
       retryConfig: {
         attempts: 3,
@@ -98,7 +116,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     // state (fabricates a carrier commitment that was never obtained), not
     // the guarded one. Flip only after M2's real carrier-calling cascade is
     // live and validated end to end.
-    this.carrierAutoAssignEnabled = opts.carrierAutoAssignEnabled ?? process.env.CARRIER_AUTO_ASSIGN_ENABLED === 'true';
+    // .trim().toLowerCase() so a trailing newline or stray casing on the
+    // Vercel/Railway env value (a documented prior incident across all 4
+    // kill-switch vars) can't silently defeat the exact-match check.
+    this.carrierAutoAssignEnabled =
+      opts.carrierAutoAssignEnabled ?? process.env.CARRIER_AUTO_ASSIGN_ENABLED?.trim().toLowerCase() === 'true';
   }
 
   public async process(payload: DispatchJobPayload): Promise<ProcessResult> {
@@ -115,9 +137,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     // so shadow drains exercise the full pipeline, but real dispatch requires
     // 'active'. Carriers backfilled from FMCSA registries default to 'prospect'
     // and are promoted via PATCH /api/carriers/[id]/promote after human review.
-    const carrierStatus = await this.fetchCarrierStatus(load.top_carrier_id);
-    if (carrierStatus !== 'active') {
-      await this.escalateProspect(pipelineLoadId, load.top_carrier_id, carrierStatus, callId);
+    // Also fetches the carrier's phone number up front — needed later if the
+    // carrier-confirmation escalation branch fires below.
+    const carrierInfo = await this.fetchCarrierStatus(load.top_carrier_id);
+    if (carrierInfo.carrierStatus !== 'active') {
+      await this.escalateProspect(pipelineLoadId, load.top_carrier_id, carrierInfo.carrierStatus, callId);
       return {
         success: true,
         pipelineLoadId,
@@ -127,7 +151,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
           escalated: true,
           reason: 'top_carrier_not_active',
           carrierId: load.top_carrier_id,
-          carrierStatus,
+          carrierStatus: carrierInfo.carrierStatus,
         },
       };
     }
@@ -137,7 +161,14 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     // it's live, assigning here would tell the shipper a carrier is moving
     // their freight when no carrier has agreed to anything.
     if (!this.carrierAutoAssignEnabled) {
-      await this.escalateCarrierConfirmation(pipelineLoadId, load, callId);
+      await this.escalateCarrierConfirmation(
+        pipelineLoadId,
+        load,
+        callId,
+        agreedRate,
+        payload.agreedRateCurrency,
+        carrierInfo.phone,
+      );
       return {
         success: true,
         pipelineLoadId,
@@ -216,12 +247,13 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     return r.rows[0] ?? null;
   }
 
-  private async fetchCarrierStatus(carrierId: string): Promise<string | null> {
-    const r = await db.query<{ carrier_status: string }>(
-      `SELECT carrier_status FROM carriers WHERE id = $1`,
+  private async fetchCarrierStatus(carrierId: string): Promise<CarrierInfo> {
+    const r = await db.query<{ carrier_status: string | null; contact_phone: string | null }>(
+      `SELECT carrier_status, contact_phone FROM carriers WHERE id = $1`,
       [carrierId],
     );
-    return r.rows[0]?.carrier_status ?? null;
+    const row = r.rows[0];
+    return { carrierStatus: row?.carrier_status ?? null, phone: row?.contact_phone ?? null };
   }
 
   private async escalateProspect(
@@ -245,6 +277,9 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     pipelineLoadId: number,
     load: PipelineLoadRow,
     callId: string,
+    agreedRate: number,
+    agreedRateCurrency: string,
+    carrierPhone: string | null,
   ): Promise<void> {
     await db.query(
       `UPDATE pipeline_loads
@@ -257,10 +292,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     const pickup = load.pickup_date ? this.toIsoDate(load.pickup_date) : 'unknown';
     const detail =
       `AI carrier calling is not yet live. Secure carrier ${load.top_carrier_id} for this load by phone. ` +
+      (carrierPhone ? `Carrier phone: ${carrierPhone}. ` : '') +
       `Pickup ${pickup}, equipment ${load.equipment_type}` +
       (load.weight_lbs ? `, ${load.weight_lbs} lbs` : '') +
       (load.shipper_company ? `. Shipper: ${load.shipper_company}` : '') +
-      `.`;
+      `. Agreed rate: $${agreedRate} ${agreedRateCurrency}.`;
     const suggestedAction = 'Secure a carrier for this load by phone. AI carrier calling is not yet live.';
 
     await db.query(

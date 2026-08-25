@@ -50,10 +50,6 @@ const REQUIRED_ENV: Record<string, 'required' | 'shadow_safe'> = {
   CRON_SECRET: 'required',
   PIPELINE_ENABLED: 'shadow_safe',
   MAX_CONCURRENT_CALLS: 'shadow_safe',
-  // Retired (T-18/T-19) — see getMarginFloor() in lib/tenants/margin-floor.ts.
-  // Left in this map as a no-op so this preflight doesn't need restructuring;
-  // the check below no longer gates on it.
-  AUTO_BOOK_PROFIT_THRESHOLD: 'shadow_safe',
 };
 
 async function checkEnvVars(): Promise<void> {
@@ -71,13 +67,6 @@ async function checkEnvVars(): Promise<void> {
       }
       if (name === 'MAX_CONCURRENT_CALLS' && v !== '0') {
         record(`env.${name}`, 'FAIL', `MUST be '0' for shadow mode (got '${v}'). Set to '1+' only AFTER 6A passes.`);
-        continue;
-      }
-      // Retired (T-18/T-19): AUTO_BOOK_PROFIT_THRESHOLD is never read by any
-      // decision path. This check is now a soft warning, not a gate — the
-      // real margin floor lives in lib/tenants/margin-floor.ts.
-      if (name === 'AUTO_BOOK_PROFIT_THRESHOLD' && parseInt(v, 10) < 1000) {
-        record(`env.${name}`, 'FAIL', `must be very high (e.g. 999999) to disable auto-booking; got '${v}'`);
         continue;
       }
     }
@@ -99,6 +88,23 @@ function maskEnv(name: string, value: string): string {
     }
   }
   return value;
+}
+
+/**
+ * AUTO_BOOK_PROFIT_THRESHOLD is retired (T-18/T-19) - never read by any
+ * decision path; the real margin-floor/auto-book gate is T-18's
+ * authority_envelopes, read via lib/tenants/margin-floor.ts
+ * getMarginFloor(). This check is informational only - it always reports
+ * PASS, never FAIL, for this variable (mirrors 05-live-call-preflight.ts).
+ */
+async function checkAutoBookThreshold(): Promise<void> {
+  const raw = process.env.AUTO_BOOK_PROFIT_THRESHOLD;
+  const autobook = parseInt(raw ?? '999999', 10);
+  record(
+    'env.AUTO_BOOK_PROFIT_THRESHOLD',
+    'PASS',
+    `${autobook} - retired (T-18/T-19), not read by any decision path; see getMarginFloor()`,
+  );
 }
 
 async function checkDatabase(): Promise<void> {
@@ -314,6 +320,7 @@ function summary(): number {
 
 async function main(): Promise<void> {
   await checkEnvVars();
+  await checkAutoBookThreshold();
   await checkDatabase();
   await checkPipelineSchema();
   await checkPersonas();
