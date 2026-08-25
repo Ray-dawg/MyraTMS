@@ -1,6 +1,6 @@
 # Wave 1 — T-18 (Agent Runtime & Governance) + T-19 (Tenant & Policy Model)
 
-**Status as of 2026-08-25: both modules shipped to production — database migrations applied to the real Neon production branch, and application code pushed to GitHub / deployed via Vercel (build `73c750e`, confirmed successful).**
+**Status as of 2026-08-25: both modules shipped to production — database migrations applied to the real Neon production branch, and application code pushed to GitHub / deployed via Vercel (build `73c750e`, confirmed successful). `evaluatePolicy()` now has its first real caller — see §7.**
 
 This doc is a single reference for a future session picking up Engine 3 work: what these two modules actually built, the real bugs found while verifying them, the schema realities that forced a redesign away from the original specs, and what's still open. Read this before touching anything under `lib/governance/`, `lib/tenants/`, or migrations `034`/`035`. The design docs (linked below) have the full rationale; this doc is the "what actually happened and what to watch out for" summary.
 
@@ -91,7 +91,7 @@ T-19 consolidated all of it into one path: `tenant_config.margin_floor_cad`/`mar
 
 Geographic scope (`domestic_only` + `countries`) is checked *before* load-source policy — a cross-border load is rejected under a domestic-only policy regardless of source. 17 pure-function test scenarios cover this; 4 integration tests cover the DB wrapper (load active policy, evaluate, log the decision under a `policy_engine` agent envelope — reusing T-18's `authority_evaluations` table, since a policy decision and an authority decision are the same kind of record).
 
-**`evaluatePolicy()` is not yet called from anywhere in the live pipeline.** It exists, it's tested, it's deployed — but no caller invokes it. Wiring it into Qualifier/Compiler/Dispatcher is explicitly deferred, because it depends on a shipper-direct/double-brokering signal (`isDirect`, `postingCompanyMcNumber`) that a **separate, concurrent session** was building at the same time (`e2-01-m1-session1`, migration `040_shipper_direct_gate.sql`). Check whether that work has landed and aligns with `PolicyEvaluationLoad`'s shape before wiring `evaluatePolicy()` into a real call site.
+**`evaluatePolicy()` was not called from anywhere in the live pipeline as of this section's original writing.** It existed, was tested, was deployed — but no caller invoked it, pending the shipper-direct/double-brokering signal (`isDirect`, `postingCompanyMcNumber`) that a **separate, concurrent session** was building at the same time (`e2-01-m1-session1`, migration `040_shipper_direct_gate.sql`). **That dependency landed the same day and the wiring is done — see §7.**
 
 ---
 
@@ -130,11 +130,49 @@ Both migrations (`034`, `035`) were applied directly to the real Neon production
 ## 5. What's explicitly NOT done yet
 
 - **T-19's API endpoints** (`GET/POST /api/tenants`, `/api/tenants/:id/policy`, `/api/tenants/:id/co-broker-agreements`, `/api/policy-evaluations`) — not built. The data model, seed data, and evaluation logic exist; the HTTP surface doesn't.
-- **`evaluatePolicy()` has no caller.** It's tested and deployed but not wired into Qualifier, Compiler, or Dispatcher — deliberately deferred pending the shipper-direct/double-brokering gate from the concurrent `e2-01-m1-session1` session (migration `040`). Check that work's actual shape before wiring this in; don't assume it matches `PolicyEvaluationLoad` without checking.
+- **`evaluatePolicy()` is wired into the Qualifier but strictly in shadow mode — see §6.** Real enforcement needs poster-identity capture at ingestion (the DAT scraper doesn't extract company/MC/DOT yet) before it can safely gate anything.
 - **T-18's replay harness and disagreement report** report "no data" honestly, not a bug — there's been no real Retell call traffic on production yet (shadow-drain mode, Pilot 1 not yet live). Re-run both once real calls exist; that's when their output becomes meaningful.
 - **Migration 030** (referenced by the base T-19 spec) remains untouched — it's separate, pending, gated work; T-19 did not force it forward.
 
-## 6. Where things live
+---
+
+## 6. Qualifier wiring (2026-08-25) — evaluatePolicy() + classifyLoadSource(), shadow-only
+
+The concurrent `e2-01-m1-session1` session shipped its own foundation the same day as T-19 — migration `040_shipper_direct_gate.sql`, `lib/pipeline/load-source-classifier.ts` (`classifyLoadSource()`), `lib/verification/authority-lookup.ts`, and a `poster_registry` seed — under its own base spec, `Engine 2/E2-01_Engine2_Expansion_PRD.md`. That spec's own scope doc marked this as **"Session 1: foundation only"** and explicitly listed "Qualifier F0/F1 wiring" as a separate, not-yet-built "Session 2." This section covers wiring that gap — done the same day, once the foundation landed.
+
+### What was found before writing any code
+
+Wiring `evaluatePolicy()` in turned out to be more than "call an existing tested function": three real constraints surfaced from reading the base PRD (`Engine 2/E2-01_Engine2_Expansion_PRD.md §4.2, §4.6-§4.9`, itself an untracked file — see the note in §3 of this doc about untracked spec files, the same pattern recurs here) before implementing:
+
+1. **Poster identity isn't captured anywhere yet.** `classifyLoadSource()` needs a poster's company name/MC#/DOT#, but no ingest path populates it — the DAT scraper's detail-panel expansion for MC#/company name is a separate, not-yet-built prerequisite (`E2-01 §4.2`). Wiring the gate in *enforcing* mode today would see empty poster identity on every real scraped load, classify it `unresolved`/`poster_identity_missing`, and reject essentially the entire live pipeline.
+2. **`classifyLoadSource()` and `evaluatePolicy()` are complementary, not interchangeable.** `classifyLoadSource()` returns a three-way verdict (accept/reject/**review**, with a whole human-escalation workflow attached — `E2-01 §4.7`); `evaluatePolicy()` is binary (accept/reject only). They answer different questions: *who is this poster* (identity/fraud) vs. *does this tenant's policy allow working a load from that poster* (business rule, including geographic scope). Both needed to run, not one replacing the other.
+3. **The base PRD's own §4.11 already anticipated this exact reconciliation**, calling it "T-19b": swap `classifyLoadSource()`'s env-built policy object for T-19's `tenant_policies`/`evaluatePolicy()`. In practice the shipped `classifyLoadSource()` never took a policy argument at all (simpler than the spec's original sketch), so there was no intermediate env-based version to build and later replace — `evaluatePolicy()` could be wired in directly as the tenant-policy layer from day one.
+
+Given (1), enforcing now was ruled out. The chosen design — confirmed with the user before writing code — was **shadow-only**: classify and evaluate every load, write the results, but never let them affect qualify/disqualify. Full enforce-mode (the reject/review/escalation routing from `E2-01 §4.6-§4.7`) was deliberately *not* built in this pass — that's a separate, larger piece of work (a new `exceptions`-bridge review flow, a `POST /api/pipeline/loads/:id/resolve-source` route) that wasn't what was asked for.
+
+### What was built
+
+- **`lib/workers/qualifier-worker.ts`** — `runShadowSourceClassification()`, called at the top of `process()` for every load, gated by `SHIPPER_DIRECT_GATE_ENABLED` (default `false`/unset — current behavior is byte-for-byte unchanged unless someone deliberately flips this). When enabled: resolves `poster_registry`/co-broker-agreement/authority-lookup inputs, calls `classifyLoadSource()`, derives `isDirect` from the resulting class (`shipper_direct` → true, everything else → false), and calls `evaluatePolicy()` with Myra's tenant id. The whole thing is wrapped in try/catch at two levels — a classification or policy-evaluation failure is logged and skipped, **never** thrown, so it can never look like a qualification failure.
+- **`persistShadowClassification()`** — writes `load_source_class`/`_method`/`_confidence`/`_evaluated_at`/`_evidence` and a human-readable `qualification_detail` summary into the columns migration `040` already added to `pipeline_loads`, in a separate `UPDATE` from the real qualify/disqualify write so a persistence failure there can't roll back the real decision either.
+- **`lib/tenants/get-myra-tenant-id.ts`** — small shared resolver (`SELECT id FROM tenants WHERE slug='myra'`), added because this is the second TS call site (after `margin-floor.ts`) that needs Myra's tenant id; same "never hardcode it" discipline as §2 above.
+- **`QualifyJobPayload`** gained optional `posterCompanyRaw`/`posterMcNumber`/`posterDotNumber`/`isManualImport` fields — all unpopulated today, but present so that whenever the scraper-capture prerequisite lands, this code needs zero changes, only a payload producer that fills them in.
+- **`.env.example`** — documents `SHIPPER_DIRECT_GATE_ENABLED` and `FMCSA_QC_WEBKEY`.
+
+### Tests
+
+Two new cases in `__tests__/pipeline/qualifier.test.ts`, both against a disposable Neon branch: gate disabled proves the pre-existing qualify/disqualify tests are completely unaffected (`sourceClassification` is `null`, no columns written); gate enabled proves the whole chain runs for real — `classifyLoadSource()` correctly returns `unresolved`/`poster_identity_missing` for a load with no poster identity, `evaluatePolicy()` genuinely executes and rejects (verified by querying a real `authority_evaluations` row under the `policy_engine` agent, not just trusting the in-memory return value), and — the point of the whole exercise — the load **still qualifies normally**, because the existing filter chain is untouched.
+
+### A pre-existing bug found along the way, unrelated to this change
+
+Running the full regression suite surfaced `agent_calls.call_type` now carries a check constraint (`CHECK (call_type IN ('outbound_shipper', 'outbound_carrier'))`) that several T-17 test fixtures violate by inserting `'negotiation'` — `events-triggers.test.ts` and two cases in `events-views.test.ts`. Confirmed via `git status` that neither file was touched by this change; this predates it and is a latent schema/fixture mismatch worth fixing separately. Final suite state: **483/493 passing**, all 10 failures pre-existing (this one, plus the already-documented `ranker.test.ts` timeout and `cost-calculator.test.ts` arithmetic mismatches from §3).
+
+### What real enforcement still needs
+
+1. **Poster-identity capture at ingestion** (`E2-01 §4.2`) — DAT scraper detail-panel expansion for MC#/company name; official-API adapter field mapping; CSV import attestation. None of this exists yet.
+2. **Review/escalation routing** (`E2-01 §4.6-§4.7`) — the `exceptions` bridge, SLA expiry, and the `resolve-source` API route for the human-review loop that `classifyLoadSource()`'s `review` verdict needs somewhere to go.
+3. Flipping `SHIPPER_DIRECT_GATE_ENABLED=true` with real enforcement (not just shadow logging) is then a follow-up change to `qualifier-worker.ts` — the classification and policy-evaluation plumbing built here is already correct end-to-end and doesn't need a re-wire, only a decision about what to *do* with a reject/review verdict instead of just logging it.
+
+## 7. Where things live
 
 | What | Path |
 |---|---|
@@ -143,7 +181,10 @@ Both migrations (`034`, `035`) were applied directly to the real Neon production
 | T-18 core logic | `MyraTMS/lib/governance/{types,evaluate,evaluate-authority,api-helpers}.ts` |
 | T-19 core logic | `MyraTMS/lib/governance/{policy-types,evaluate-policy,evaluate-policy-db}.ts` |
 | Margin floor (T-19) | `MyraTMS/lib/tenants/margin-floor.ts` |
+| Myra tenant id resolver | `MyraTMS/lib/tenants/get-myra-tenant-id.ts` |
 | T-18 seed / ops scripts | `MyraTMS/scripts/t18_seed_governance.ts`, `t18_replay_shadow_evaluation.ts`, `t18_disagreement_report.ts` |
 | T-17 backfill (fixed by T-19) | `MyraTMS/scripts/t17_backfill_events.ts` |
-| Tests | `MyraTMS/lib/governance/__tests__/`, `MyraTMS/__tests__/governance/`, `MyraTMS/lib/tenants/__tests__/` |
+| E2-01 M1 foundation (shipper-direct gate) | `MyraTMS/scripts/040_shipper_direct_gate.sql`, `MyraTMS/lib/pipeline/load-source-classifier.ts`, `MyraTMS/lib/verification/authority-lookup.ts` |
+| Qualifier shadow-gate wiring (§6) | `MyraTMS/lib/workers/qualifier-worker.ts` (`runShadowSourceClassification`, `persistShadowClassification`) |
+| Tests | `MyraTMS/lib/governance/__tests__/`, `MyraTMS/__tests__/governance/`, `MyraTMS/lib/tenants/__tests__/`, `MyraTMS/__tests__/pipeline/qualifier.test.ts` |
 | Module checklist (living doc) | `Engine 3/docs/superpowers/plans/completion.md` |
