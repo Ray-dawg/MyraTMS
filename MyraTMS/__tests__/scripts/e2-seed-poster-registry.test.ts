@@ -62,4 +62,34 @@ describe('seedFromCsv', () => {
     expect(result.inserted).toBe(0);
     expect(result.warning).toContain('not found');
   });
+
+  it('parses a fully-quoted row (Excel CSV export shape) without corrupting mc_number with embedded quote characters', async () => {
+    // Regression test for final-review finding #5: the old hand-rolled
+    // regex parser had no pattern for a row where every field is quoted
+    // (`"Name","MC123","","CA","ON"`) — it fell through to the unquoted
+    // fallback regex and captured literal `"` characters into mc_number,
+    // corrupting poster_registry's unique MC index.
+    const quotedMc = `MC${RUN_ID}Q`;
+    const quotedName = `Fully Quoted Co ${RUN_ID}`;
+    const quotedCsvPath = path.join(tmpDir, 'fully-quoted.csv');
+    fs.writeFileSync(
+      quotedCsvPath,
+      `legal_name,mc_number,dot_number,country,province_state\n` +
+      `"${quotedName}","${quotedMc}","","CA","ON"\n`,
+    );
+
+    const result = await seedFromCsv(quotedCsvPath, 'shipper', 'seed_shipper_list', 0.9);
+    expect(result.inserted).toBe(1);
+    expect(result.skipped).toBe(0);
+
+    const row = await db.query<{ mc_number: string; legal_name: string }>(
+      `SELECT mc_number, legal_name FROM poster_registry WHERE mc_number = $1`, [quotedMc],
+    );
+    expect(row.rows.length).toBe(1);
+    expect(row.rows[0].mc_number).toBe(quotedMc);
+    expect(row.rows[0].mc_number).not.toMatch(/"/);
+    expect(row.rows[0].legal_name).toBe(quotedName);
+
+    await db.query(`DELETE FROM poster_registry WHERE mc_number = $1`, [quotedMc]);
+  });
 });

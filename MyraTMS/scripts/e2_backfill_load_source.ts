@@ -17,6 +17,7 @@ import {
   classifyLoadSource,
   findRegistryHit,
   findActiveAgreement,
+  normalizeCompanyName,
   type ClassifyLoadSourceInput,
 } from '@/lib/pipeline/load-source-classifier';
 
@@ -35,6 +36,7 @@ interface PipelineLoadRow {
   origin_country: string | null;
   created_by: string | null;
   shipper_direct_attestation: 'yes' | 'no' | 'unknown' | null;
+  shipper_company: string | null;
 }
 
 export async function backfillBatch(
@@ -45,7 +47,7 @@ export async function backfillBatch(
 
   const rows = await db.query<PipelineLoadRow>(
     `SELECT id, poster_company_raw, poster_company_normalized, poster_mc_number, poster_dot_number,
-            origin_country, created_by, shipper_direct_attestation
+            origin_country, created_by, shipper_direct_attestation, shipper_company
      FROM pipeline_loads
      WHERE id = ANY($1) AND ($2::boolean OR load_source_evaluated_at IS NULL)`,
     [loadIds, Boolean(opts.force)],
@@ -57,31 +59,39 @@ export async function backfillBatch(
   for (const row of rows.rows) {
     const isManualImport = row.created_by === 'scanner-csv-v1' || row.created_by === 'scanner-csv-v2';
 
+    // No ingest path populates poster_company_raw/poster_company_normalized
+    // yet (added by this session's migration 040) — fall back to the
+    // historical shipper_company column (populated by scanner-worker.ts) so
+    // the backfill can actually classify real historical data instead of
+    // routing every row to poster_identity_missing.
+    const companyRaw = row.poster_company_raw ?? row.shipper_company;
+    const companyNormalized = row.poster_company_normalized ?? (companyRaw ? normalizeCompanyName(companyRaw) : null);
+
     const registryHit = await findRegistryHit(
-      row.poster_mc_number, row.poster_dot_number, row.poster_company_normalized, row.origin_country,
+      row.poster_mc_number, row.poster_dot_number, companyNormalized, row.origin_country,
     );
 
     let lookupResult = null;
     let agreementMatch = null;
-    if (!registryHit && !isManualImport && (row.poster_mc_number || row.poster_dot_number || row.poster_company_normalized)) {
+    if (!registryHit && !isManualImport && (row.poster_mc_number || row.poster_dot_number || companyNormalized)) {
       lookupResult = await lookupAuthority({
         mcNumber: row.poster_mc_number ?? undefined,
         dotNumber: row.poster_dot_number ?? undefined,
-        companyName: row.poster_company_raw ?? undefined,
+        companyName: companyRaw ?? undefined,
         country: (row.origin_country as 'CA' | 'US') ?? 'CA',
       });
       if (lookupResult.status === 'resolved' && lookupResult.authority.broker === 'active') {
-        agreementMatch = await findActiveAgreement(row.poster_mc_number, row.poster_company_normalized);
+        agreementMatch = await findActiveAgreement(row.poster_mc_number, companyNormalized);
       }
     }
     if (registryHit?.entityClass === 'broker') {
-      agreementMatch = await findActiveAgreement(row.poster_mc_number, row.poster_company_normalized);
+      agreementMatch = await findActiveAgreement(row.poster_mc_number, companyNormalized);
     }
 
     const input: ClassifyLoadSourceInput = {
       poster: {
-        companyRaw: row.poster_company_raw,
-        companyNormalized: row.poster_company_normalized,
+        companyRaw,
+        companyNormalized,
         mcNumber: row.poster_mc_number,
         dotNumber: row.poster_dot_number,
       },
@@ -94,15 +104,21 @@ export async function backfillBatch(
 
     const result = classifyLoadSource(input);
 
+    // qualification_reason/qualification_detail is Session 2's live-path
+    // contract (short code / prose sentence pair per PRD §4.9). The backfill
+    // is shadow-mode and must not write either column — instead the short
+    // reason code rides along inside load_source_evidence for audit.
+    const evidence = { ...result.evidence, reasonCode: result.reasonCode };
+
     await db.query(
       `UPDATE pipeline_loads
        SET load_source_class = $1, load_source_method = $2, load_source_confidence = $3,
            load_source_evaluated_at = NOW(), load_source_evidence = $4,
-           poster_registry_id = $5, qualification_detail = $6
-       WHERE id = $7`,
+           poster_registry_id = $5
+       WHERE id = $6`,
       [
-        result.class, result.method, result.confidence, JSON.stringify(result.evidence),
-        registryHit?.id ?? null, result.reasonCode, row.id,
+        result.class, result.method, result.confidence, JSON.stringify(evidence),
+        registryHit?.id ?? null, row.id,
       ],
     );
 
@@ -120,13 +136,20 @@ async function main() {
   const batchSize = batchSizeArg ? Number(batchSizeArg.split('=')[1]) : 100;
 
   let offset = 0;
-  let totalProcessed = 0;
   const totals: BackfillSummary = { processed: 0, skippedAlreadyClassified: 0, byVerdict: { accept: 0, reject: 0, review: 0 } };
 
   while (true) {
+    // Non-force mode's WHERE clause (load_source_evaluated_at IS NULL) is
+    // self-shrinking: every batch classifies rows and removes them from the
+    // set future queries match. So "the next unprocessed batch" is always at
+    // OFFSET 0 — advancing offset there would skip rows that fell out of the
+    // matching set. --force mode's WHERE clause matches every row every
+    // time regardless of prior classification, so OFFSET must advance there
+    // or the loop reprocesses the same first batch forever.
+    const queryOffset = force ? offset : 0;
     const idRows = await db.query<{ id: number }>(
       `SELECT id FROM pipeline_loads WHERE ($1::boolean OR load_source_evaluated_at IS NULL) ORDER BY id LIMIT $2 OFFSET $3`,
-      [force, batchSize, offset],
+      [force, batchSize, queryOffset],
     );
     if (idRows.rows.length === 0) break;
 
@@ -137,8 +160,7 @@ async function main() {
     totals.byVerdict.reject += summary.byVerdict.reject;
     totals.byVerdict.review += summary.byVerdict.review;
 
-    totalProcessed += idRows.rows.length;
-    console.log(`Processed ${totalProcessed} rows so far (batch offset ${offset})...`);
+    console.log(`Processed ${totals.processed} rows so far (batch offset ${queryOffset})...`);
     offset += batchSize;
   }
 

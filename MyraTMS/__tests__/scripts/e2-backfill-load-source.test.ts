@@ -6,11 +6,13 @@ import { backfillBatch } from '@/scripts/e2_backfill_load_source';
 const RUN_ID = Date.now();
 const TEST_LOAD_ID_1 = `TESTBF1-${RUN_ID}`;
 const TEST_LOAD_ID_2 = `TESTBF2-${RUN_ID}`;
+const TEST_LOAD_ID_3 = `TESTBF3-${RUN_ID}`;
 const TEST_MC = `TESTMC${RUN_ID}`;
 
 describe('backfillBatch (shadow mode)', () => {
   let pipelineLoadId1: number;
   let pipelineLoadId2: number;
+  let pipelineLoadId3: number;
   let registryId: number;
   let mockServer: http.Server;
   const envBackup = { ...process.env };
@@ -39,7 +41,13 @@ describe('backfillBatch (shadow mode)', () => {
     );
     registryId = reg.rows[0].id;
 
-    const insertLoad = async (loadId: string, mcNumber: string | null, companyRaw: string) => {
+    const insertLoad = async (
+      loadId: string,
+      mcNumber: string | null,
+      companyRaw: string,
+      opts: { populatePosterColumns?: boolean } = {},
+    ) => {
+      const populatePosterColumns = opts.populatePosterColumns ?? true;
       const r = await db.query<{ id: number }>(
         `INSERT INTO pipeline_loads (
            load_id, load_board_source, origin_city, origin_state, origin_country,
@@ -52,21 +60,32 @@ describe('backfillBatch (shadow mode)', () => {
            $1, 'DAT', 'Toronto', 'ON', 'CA', 'Montreal', 'QC', 'CA',
            NOW() + INTERVAL '3 days', NOW() + INTERVAL '4 days', 'Dry Van', 42000,
            330, 540, $2, 'test@example.test', '+15555550100',
-           2400, 'CAD', 'qualified', $2, $3, $4
+           2400, 'CAD', 'qualified', $3, $4, $5
          ) RETURNING id`,
-        [loadId, companyRaw, companyRaw.toLowerCase(), mcNumber],
+        [
+          loadId,
+          companyRaw,
+          populatePosterColumns ? companyRaw : null,
+          populatePosterColumns ? companyRaw.toLowerCase() : null,
+          mcNumber,
+        ],
       );
       return r.rows[0].id;
     };
 
     pipelineLoadId1 = await insertLoad(TEST_LOAD_ID_1, TEST_MC, 'Test Backfill Shipper');
     pipelineLoadId2 = await insertLoad(TEST_LOAD_ID_2, null, 'Some Unregistered Freight Co');
+    // poster_company_raw/normalized/mc_number are all NULL here — this row
+    // simulates real historical data, where no ingest path populates the
+    // poster_* columns yet and only shipper_company (from scanner-worker.ts)
+    // has real data. Registry lookup must fall back to shipper_company.
+    pipelineLoadId3 = await insertLoad(TEST_LOAD_ID_3, null, 'Test Backfill Shipper', { populatePosterColumns: false });
   });
 
   afterAll(async () => {
     await new Promise<void>((resolve) => mockServer.close(() => resolve()));
     process.env = envBackup;
-    await db.query(`DELETE FROM pipeline_loads WHERE id = ANY($1)`, [[pipelineLoadId1, pipelineLoadId2]]);
+    await db.query(`DELETE FROM pipeline_loads WHERE id = ANY($1)`, [[pipelineLoadId1, pipelineLoadId2, pipelineLoadId3]]);
     await db.query(`DELETE FROM poster_registry WHERE id = $1`, [registryId]);
     await db.query(`DELETE FROM authority_lookups WHERE lookup_key LIKE $1`, [`%unregistered%`]);
   });
@@ -100,15 +119,42 @@ describe('backfillBatch (shadow mode)', () => {
     expect(summary.processed).toBe(1);
   });
 
-  it('a load with no registry hit and (stubbed) failed lookup routes to review, never a silent accept', async () => {
+  it('a load with no registry hit and (stubbed) failed lookup routes to review, never a silent accept, and folds the reason code into load_source_evidence (not qualification_detail)', async () => {
     const summary = await backfillBatch([pipelineLoadId2]);
     expect(summary.processed).toBe(1);
 
     const row = await db.query(
-      `SELECT load_source_class, qualification_detail FROM pipeline_loads WHERE id = $1`,
+      `SELECT load_source_class, load_source_evidence, qualification_reason FROM pipeline_loads WHERE id = $1`,
       [pipelineLoadId2],
     );
     expect(row.rows[0].load_source_class).not.toBe('shipper_direct');
     expect(row.rows[0].load_source_class).not.toBe('co_brokered');
+    // qualification_reason belongs to Session 2's live path — shadow mode never writes it.
+    expect(row.rows[0].qualification_reason).toBeNull();
+    // The short reason code lives in load_source_evidence.reasonCode, not
+    // in a qualification_detail column (backfill no longer writes that
+    // column at all — codes belong in qualification_reason's future slot,
+    // prose in qualification_detail's; neither is the backfill's to write).
+    const evidence = typeof row.rows[0].load_source_evidence === 'string'
+      ? JSON.parse(row.rows[0].load_source_evidence)
+      : row.rows[0].load_source_evidence;
+    expect(typeof evidence.reasonCode).toBe('string');
+    expect(evidence.reasonCode.length).toBeGreaterThan(0);
+  });
+
+  it('falls back to shipper_company when poster_company_raw/normalized are NULL (real historical data has no poster_* columns populated yet)', async () => {
+    const summary = await backfillBatch([pipelineLoadId3]);
+    expect(summary.processed).toBe(1);
+
+    const row = await db.query(
+      `SELECT load_source_class, load_source_method, poster_registry_id FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId3],
+    );
+    // Registry entry for 'Test Backfill Shipper' should be found via the
+    // shipper_company fallback (normalized to 'test backfill shipper'),
+    // NOT routed to poster_identity_missing.
+    expect(row.rows[0].load_source_class).toBe('shipper_direct');
+    expect(row.rows[0].load_source_method).toBe('registry');
+    expect(row.rows[0].poster_registry_id).toBe(registryId);
   });
 }, 30_000);

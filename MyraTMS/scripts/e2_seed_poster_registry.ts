@@ -10,6 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import Papa from 'papaparse';
 import { db } from '@/lib/pipeline/db-adapter';
 import { normalizeCompanyName } from '@/lib/pipeline/load-source-classifier';
 
@@ -28,15 +29,23 @@ interface CsvRow {
 }
 
 function parseCsv(text: string): CsvRow[] {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const [, ...rows] = lines; // discard header row — this format's columns are fixed and documented in the README
-  return rows.map((line) => {
-    // Minimal CSV parse sufficient for this seed format (quoted legal_name, no embedded commas elsewhere).
-    const match = line.match(/^"([^"]*)",([^,]*),([^,]*),([^,]*),(.*)$/) ?? line.match(/^([^,]*),([^,]*),([^,]*),([^,]*),(.*)$/);
-    if (!match) throw new Error(`Malformed CSV row: ${line}`);
-    const [, legal_name, mc_number, dot_number, country, province_state] = match;
-    return { legal_name, mc_number, dot_number, country, province_state };
+  // papaparse handles fully-quoted rows (a common Excel CSV export shape,
+  // e.g. `"Acme","MC123","","CA","ON"`) correctly, unlike the previous
+  // hand-rolled regex parser, which fell through to an unquoted-fields
+  // pattern for that shape and captured literal quote characters into
+  // fields like mc_number, silently corrupting poster_registry's unique
+  // MC index. papaparse is already a dependency (see lib/import/csv-parser.ts).
+  const result = Papa.parse<Record<string, string>>(text, {
+    header: true,
+    skipEmptyLines: true,
   });
+  return result.data.map((row) => ({
+    legal_name: row.legal_name ?? '',
+    mc_number: row.mc_number ?? '',
+    dot_number: row.dot_number ?? '',
+    country: row.country ?? '',
+    province_state: row.province_state ?? '',
+  }));
 }
 
 export async function seedFromCsv(

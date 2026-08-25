@@ -252,3 +252,83 @@ describe('findRegistryHit / findActiveAgreement (DB-facing helpers)', () => {
     expect(match).toBeNull();
   });
 });
+
+describe('findActiveAgreement — tenant scoping (final-review finding #3)', () => {
+  const testMc = `TESTMCX${RUN_ID}`;
+  const testName = `Test Cross Tenant Co ${RUN_ID}`;
+  const testNormName = normalizeCompanyName(testName);
+  let myraTenantId: number;
+  let otherTenantId: number;
+  let createdOtherTenant = false;
+  let myraAgreementId: number;
+  let otherAgreementId: number;
+
+  beforeAll(async () => {
+    const myra = await db.query<{ id: number }>(`SELECT id FROM tenants WHERE slug = 'myra'`, []);
+    myraTenantId = myra.rows[0]?.id;
+    if (!myraTenantId) throw new Error('myra tenant not found — is 027_multi_tenant_foundation.sql applied?');
+
+    // Reuse an existing non-Myra tenant if one exists (e.g. the '_system'
+    // tenant seeded by 027_multi_tenant_foundation.sql); otherwise insert a
+    // minimal one and clean it up in afterAll.
+    const other = await db.query<{ id: number }>(
+      `SELECT id FROM tenants WHERE slug != 'myra' ORDER BY id LIMIT 1`, [],
+    );
+    if (other.rows[0]?.id) {
+      otherTenantId = other.rows[0].id;
+    } else {
+      const inserted = await db.query<{ id: number }>(
+        `INSERT INTO tenants (slug, name, type, status) VALUES ($1, 'Finding-3 Test Tenant', 'saas_customer', 'active') RETURNING id`,
+        [`finding3-test-${RUN_ID}`],
+      );
+      otherTenantId = inserted.rows[0].id;
+      createdOtherTenant = true;
+    }
+
+    // Same mc_number/normalized name, two different tenants — this is
+    // exactly the cross-tenant collision shape the missing tenant filter
+    // used to allow through.
+    const myraAgr = await db.query<{ id: number }>(
+      `INSERT INTO co_broker_agreements (tenant_id, counterparty_name, counterparty_name_normalized, counterparty_mc_number, agreement_executed_at, status)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE, 'active') RETURNING id`,
+      [myraTenantId, testName, testNormName, testMc],
+    );
+    myraAgreementId = myraAgr.rows[0].id;
+
+    const otherAgr = await db.query<{ id: number }>(
+      `INSERT INTO co_broker_agreements (tenant_id, counterparty_name, counterparty_name_normalized, counterparty_mc_number, agreement_executed_at, status)
+       VALUES ($1, $2, $3, $4, CURRENT_DATE, 'active') RETURNING id`,
+      [otherTenantId, testName, testNormName, testMc],
+    );
+    otherAgreementId = otherAgr.rows[0].id;
+  });
+
+  afterAll(async () => {
+    await db.query(`DELETE FROM co_broker_agreements WHERE id = ANY($1)`, [[myraAgreementId, otherAgreementId]]);
+    if (createdOtherTenant) {
+      await db.query(`DELETE FROM tenants WHERE id = $1`, [otherTenantId]);
+    }
+  });
+
+  it('without a tenantId, still finds a match (backward compat — no regression for existing single-tenant call sites)', async () => {
+    const match = await findActiveAgreement(testMc, testNormName);
+    expect(match).not.toBeNull();
+    expect([myraAgreementId, otherAgreementId]).toContain(match?.id);
+  });
+
+  it('with the correct tenantId, finds that tenant\'s own agreement', async () => {
+    const match = await findActiveAgreement(testMc, testNormName, myraTenantId);
+    expect(match).toMatchObject({ id: myraAgreementId, status: 'active' });
+  });
+
+  it('with the OTHER tenant\'s id, finds only that tenant\'s own agreement — never myra\'s, even though both agreements share the same mc/name', async () => {
+    const match = await findActiveAgreement(testMc, testNormName, otherTenantId);
+    expect(match).toMatchObject({ id: otherAgreementId, status: 'active' });
+  });
+
+  it('with a mismatched tenantId that owns no agreement at all, returns null — closes the cross-tenant fail-open', async () => {
+    const bogusTenantId = -1;
+    const match = await findActiveAgreement(testMc, testNormName, bogusTenantId);
+    expect(match).toBeNull();
+  });
+});

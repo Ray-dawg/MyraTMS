@@ -195,24 +195,31 @@ export async function findRegistryHit(
   return null;
 }
 
+// tenantId is optional today (Session 1 is single-tenant); Session 2's
+// Qualifier / T-19b MUST pass it once tenant context is available — see
+// final-review finding #3.
 export async function findActiveAgreement(
   mcNumber: string | null,
   normalizedName: string | null,
+  tenantId?: number,
 ): Promise<CoBrokerAgreementMatch | null> {
   if (mcNumber) {
     const r = await db.query<{ id: number; status: 'active' | 'expired' | 'terminated' }>(
-      `SELECT id, status FROM co_broker_agreements WHERE counterparty_mc_number = $1 AND status = 'active' ORDER BY agreement_executed_at DESC LIMIT 1`,
-      [mcNumber],
+      tenantId === undefined
+        ? `SELECT id, status FROM co_broker_agreements WHERE counterparty_mc_number = $1 AND status = 'active' ORDER BY agreement_executed_at DESC LIMIT 1`
+        : `SELECT id, status FROM co_broker_agreements WHERE counterparty_mc_number = $1 AND status = 'active' AND tenant_id = $2 ORDER BY agreement_executed_at DESC LIMIT 1`,
+      tenantId === undefined ? [mcNumber] : [mcNumber, tenantId],
     );
     if (r.rows.length) return r.rows[0];
   }
   if (normalizedName) {
     const r = await db.query<{ id: number; status: 'active' | 'expired' | 'terminated' }>(
-      `SELECT id, status FROM co_broker_agreements WHERE counterparty_name_normalized = $1 AND status = 'active' ORDER BY agreement_executed_at DESC LIMIT 1`,
-      [normalizedName],
+      tenantId === undefined
+        ? `SELECT id, status FROM co_broker_agreements WHERE counterparty_name_normalized = $1 AND status = 'active' ORDER BY agreement_executed_at DESC LIMIT 1`
+        : `SELECT id, status FROM co_broker_agreements WHERE counterparty_name_normalized = $1 AND status = 'active' AND tenant_id = $2 ORDER BY agreement_executed_at DESC LIMIT 1`,
+      tenantId === undefined ? [normalizedName] : [normalizedName, tenantId],
     );
     if (r.rows.length) return r.rows[0];
   }
   return null;
 }
-
