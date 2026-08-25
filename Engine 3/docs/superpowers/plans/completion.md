@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-24 (T-18 fully verified on branch)
-**Status:** Phase 1 (Instrument) in progress — T-17 shipped to production. T-18 built and fully verified on a disposable Neon branch (all 7 acceptance criteria pass, 68/68 regression tests green); not yet applied to production. T-19 not started.
+**Last updated:** 2026-08-24 (T-18 shipped to production)
+**Status:** Phase 1 (Instrument) in progress — T-17 and T-18 both shipped to production. T-19 not started.
 
 ## How to use this file
 
@@ -50,7 +50,7 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 **Spec:** [T18_Agent_Runtime_Governance.md](../../../T18_Agent_Runtime_Governance.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t18-agent-runtime-governance-design.md`
 **Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-24-t18-agent-runtime-governance.md`
-**Status:** ✅ **DONE, verified on branch `t18-verify` — not yet applied to production (Patrice's call)**
+**Status:** ✅ **DONE — shipped to production 2026-08-24**
 
 - [x] Design doc — traced `AUTO_BOOK_PROFIT_THRESHOLD` and found it's not wired into any real decision path today (aspirational parity only, unlike the other 3 kill-switch env vars); split `evaluateAuthority()` into a pure `applyEnvelope()` core + thin DB wrapper for fast unit testing; `lib/governance/` chosen as the new directory (done 2026-08-24)
 - [x] Implementation plan — 12 tasks. Self-review caught and fixed a dead variable in a test and a tenant-scoping gap in the envelope POST route (done 2026-08-24)
@@ -73,7 +73,7 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 3. Found via the **full regression suite**, not T-18's own tests in isolation: `authority_evaluations.source_event_id` (FK to `events`) also had no cascade. A T-18 test's idempotency fixture happened to reference an `events` row that a T-17 test's own cleanup later tried to delete, blocking it. Same reasoning as bug #1 — `events` is only ever deleted by test/ops code. Fixed: `ON DELETE CASCADE`.
 4. Execution mistake (not a code bug): the seed script's first run used `pnpm tsx` with only `DATABASE_URL` set, and unlike `vitest` (which auto-loads `.env.local`), a raw `tsx` invocation does not — so all four kill-switch env vars silently fell back to their hardcoded defaults instead of the real values. Caught by checking the printed kill-switch table against known `.env.local` values; re-ran with all four vars explicitly exported.
 
-**Not done, by design (session-scope decision, same as T-17):** nothing applied to production. Apply commands are in the implementation plan's Task 12.
+**Applied to production 2026-08-24:** migration + seed script (real env values confirmed: `MAX_CONCURRENT_CALLS=25` in production, not a fallback) + replay harness + disagreement report all run, all objects verified, API confirmed live (7/7 tests pass against production, including fixture cleanup exercising the cascade fixes). Both the replay harness and disagreement report show 0 activity in production too — same honest limitation as on the branch, not a bug: no real Retell calls have been placed yet.
 
 ---
 
