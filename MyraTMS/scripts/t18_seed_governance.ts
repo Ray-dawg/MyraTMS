@@ -12,6 +12,7 @@
  */
 
 import { db } from '../lib/pipeline/db-adapter';
+import { getMarginFloor } from '../lib/tenants/margin-floor';
 
 interface AgentSeed {
   agent_key: string;
@@ -53,7 +54,7 @@ async function seedAgents(): Promise<Map<string, number>> {
 
 async function seedDefaultEnvelope(agentId: number, agentKey: string): Promise<void> {
   const existing = await db.query(
-    `SELECT id FROM authority_envelopes WHERE agent_id = $1 AND tenant_id = 1 AND is_active = true`,
+    `SELECT id FROM authority_envelopes WHERE agent_id = $1 AND tenant_id = fn_myra_tenant_id() AND is_active = true`,
     [agentId],
   );
   if (existing.rows.length > 0) {
@@ -63,14 +64,17 @@ async function seedDefaultEnvelope(agentId: number, agentKey: string): Promise<v
 
   const isVoice = agentKey === VOICE_ENVELOPE_AGENT_KEY;
   const maxConcurrentCalls = Number(process.env.MAX_CONCURRENT_CALLS ?? '1');
-  const autoBookThreshold = Number(process.env.AUTO_BOOK_PROFIT_THRESHOLD ?? '999999');
+  // T-19: reads the live tenant_config value instead of carrying a frozen
+  // copy of the (now removed) AUTO_BOOK_PROFIT_THRESHOLD env var, which was
+  // never actually read by any real decision path (see T-19 design doc).
+  const marginFloorCad = isVoice ? await getMarginFloor('CAD') : null;
 
   const permissions = isVoice
     ? { can: ['contact_carrier', 'negotiate_rate', 'book_load'], cannot: ['override_fraud_flag', 'modify_carrier_banking', 'approve_high_risk_payer'] }
     : { can: [], cannot: [] };
   const tools = isVoice ? ['retell_api', 'pipeline_loads_read', 'negotiation_brief_read'] : [];
   const budget = isVoice ? { max_concurrent: maxConcurrentCalls, max_actions_per_day: 200 } : {};
-  const policies = isVoice ? { margin_floor_pct: 8, auto_book_profit_threshold_cad: autoBookThreshold } : {};
+  const policies = isVoice ? { margin_floor_pct: 8, auto_book_profit_threshold_cad: marginFloorCad } : {};
   const escalationRules = isVoice
     ? [
         { trigger: 'fraud_signal_detected', level: 'L3' },
@@ -84,7 +88,7 @@ async function seedDefaultEnvelope(agentId: number, agentKey: string): Promise<v
     `INSERT INTO authority_envelopes (
        agent_id, tenant_id, version, envelope_name, permissions, tools, budget, policies,
        confidence_threshold, autonomy_default, escalation_rules, created_by
-     ) VALUES ($1, 1, 1, $2, $3, $4, $5, $6, 0.700, 'L2', $7, 'system')`,
+     ) VALUES ($1, fn_myra_tenant_id(), 1, $2, $3, $4, $5, $6, 0.700, 'L2', $7, 'system')`,
     [
       agentId,
       `${agentKey}-myra-default`,
@@ -98,21 +102,22 @@ async function seedDefaultEnvelope(agentId: number, agentKey: string): Promise<v
   console.log(`[t18-seed] default envelope created for '${agentKey}'`);
 }
 
-function printKillSwitchMapping(): void {
+async function printKillSwitchMapping(): Promise<void> {
   const values = {
     PIPELINE_ENABLED: process.env.PIPELINE_ENABLED ?? '(unset)',
     SCANNER_ENABLED: process.env.SCANNER_ENABLED ?? '(unset)',
     MAX_CONCURRENT_CALLS: process.env.MAX_CONCURRENT_CALLS ?? '(unset)',
-    AUTO_BOOK_PROFIT_THRESHOLD: process.env.AUTO_BOOK_PROFIT_THRESHOLD ?? '(unset)',
   };
+  const marginFloorCad = await getMarginFloor('CAD');
+  const marginFloorUsd = await getMarginFloor('USD');
   console.log('\n[t18-seed] kill-switch -> envelope mapping (T-18 §5.1), current values:');
   console.log(`  PIPELINE_ENABLED=${values.PIPELINE_ENABLED} -> platform-level all-agents is_active (documented parity only, not enforced by T-18)`);
   console.log(`  SCANNER_ENABLED=${values.SCANNER_ENABLED} -> agents.status for agent_key='scanner' (all agents seeded 'shadow' regardless, per spec §4.1)`);
   console.log(`  MAX_CONCURRENT_CALLS=${values.MAX_CONCURRENT_CALLS} -> voice envelope budget.max_concurrent (live value, seeded above)`);
-  console.log(`  AUTO_BOOK_PROFIT_THRESHOLD=${values.AUTO_BOOK_PROFIT_THRESHOLD} -> voice envelope policies.auto_book_profit_threshold_cad`);
-  console.log(`    *** NOTE: traced through lib/pipeline/retell-webhook.ts — this env var is only logged at`);
-  console.log(`    *** worker-host startup, never actually read in the auto_book_eligible decision path`);
-  console.log(`    *** (that uses brief.rates.minMargin instead). This mapping row is ASPIRATIONAL PARITY, not a live gate.`);
+  console.log(`  margin floor (tenant_config, T-19): CAD $${marginFloorCad} / USD $${marginFloorUsd} -> voice envelope policies.auto_book_profit_threshold_cad`);
+  console.log(`    *** Replaces AUTO_BOOK_PROFIT_THRESHOLD (removed, T-19) and tenant_config's now-corrected`);
+  console.log(`    *** margin_floor_cad/usd keys. Same number that drives compiler/qualifier/researcher-worker.ts's`);
+  console.log(`    *** auto_book_eligible decision now -- no longer a frozen, disconnected copy.`);
 }
 
 async function main(): Promise<void> {
@@ -121,7 +126,7 @@ async function main(): Promise<void> {
     if (agent.agent_key === 'negotiation' || agent.agent_key === 'dispatch_one') continue; // no envelope yet — future modules define their own
     await seedDefaultEnvelope(agentIds.get(agent.agent_key)!, agent.agent_key);
   }
-  printKillSwitchMapping();
+  await printKillSwitchMapping();
 }
 
 main()
