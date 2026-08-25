@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-24 (T-18 design doc approved)
-**Status:** Phase 1 (Instrument) in progress — T-17 shipped to production, T-18 design approved, writing implementation plan.
+**Last updated:** 2026-08-24 (T-18 fully verified on branch)
+**Status:** Phase 1 (Instrument) in progress — T-17 shipped to production. T-18 built and fully verified on a disposable Neon branch (all 7 acceptance criteria pass, 68/68 regression tests green); not yet applied to production. T-19 not started.
 
 ## How to use this file
 
@@ -50,29 +50,30 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 **Spec:** [T18_Agent_Runtime_Governance.md](../../../T18_Agent_Runtime_Governance.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t18-agent-runtime-governance-design.md`
 **Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-24-t18-agent-runtime-governance.md`
-**Status:** 🔄 In progress — plan approved 2026-08-24, executing next
+**Status:** ✅ **DONE, verified on branch `t18-verify` — not yet applied to production (Patrice's call)**
 
 - [x] Design doc — traced `AUTO_BOOK_PROFIT_THRESHOLD` and found it's not wired into any real decision path today (aspirational parity only, unlike the other 3 kill-switch env vars); split `evaluateAuthority()` into a pure `applyEnvelope()` core + thin DB wrapper for fast unit testing; `lib/governance/` chosen as the new directory (done 2026-08-24)
 - [x] Implementation plan — 12 tasks. Self-review caught and fixed a dead variable in a test and a tenant-scoping gap in the envelope POST route (done 2026-08-24)
-- [ ] Task 1: Neon verification branch
-- [ ] Task 2: Migration `034-agent-runtime-governance.sql`
-- [ ] Task 3: Apply + verify on branch
-- [ ] Task 4: Shared governance types
-- [ ] Task 5: Pure `applyEnvelope()` core + 24 unit test scenarios (acceptance criterion 3)
-- [ ] Task 6: `evaluateAuthority()` DB wrapper + integration tests
-- [ ] Task 7: Seed script (acceptance criteria 1, 2)
-- [ ] Task 8: Replay harness (acceptance criterion 4)
-- [ ] Task 9: Disagreement report (acceptance criterion 5)
-- [ ] Task 10: 5 API endpoints + tests (acceptance criterion 7)
-- [ ] Task 11: Full regression suite (acceptance criterion 6)
-- [ ] Task 12: Final acceptance checklist + handoff report
-- [ ] Migration: `agents`, `authority_envelopes`, `authority_evaluations`, `escalations`
-- [ ] Seed script: 8 agents + `negotiation` + `dispatch_one`, default envelopes mapped from real env var values (not hardcoded)
-- [ ] `evaluateAuthority()` runtime library + ≥20 unit test scenarios
-- [ ] Replay harness against T-17's backfilled `events`
-- [ ] 5 API endpoints (`/api/agents`, envelope CRUD, evaluations, escalations)
-- [ ] Disagreement report (shadow judgment vs. actual `load.escalated`/`load.booked`)
-- [ ] T-16 worker suite regression check
+- [x] Task 1: Neon verification branch `t18-verify` (`br-young-haze-aii2n2en`) (done 2026-08-24)
+- [x] Task 2: Migration `034-agent-runtime-governance.sql` — `agents`, `authority_envelopes`, `authority_evaluations`, `escalations` (done 2026-08-24)
+- [x] Task 3: Applied + verified on branch, idempotent re-apply confirmed (done 2026-08-24)
+- [x] Task 4: Shared governance types (done 2026-08-24)
+- [x] Task 5: Pure `applyEnvelope()` core + 24 unit test scenarios, all passing on first run (acceptance criterion 3) (done 2026-08-24)
+- [x] Task 6: `evaluateAuthority()` DB wrapper + 4 integration tests, all passing on first run (done 2026-08-24)
+- [x] Task 7: Seed script — 10 agents, 8 default envelopes from **real** env values (`PIPELINE_ENABLED=true`, `SCANNER_ENABLED=false`, `MAX_CONCURRENT_CALLS=25`, `AUTO_BOOK_PROFIT_THRESHOLD=999999`) (acceptance criteria 1, 2) (done 2026-08-24)
+- [x] Task 8: Replay harness (acceptance criterion 4) — 0 `call.initiated` events exist on this branch (shadow-drain mode never placed real calls), so 0 processed / 0 errors is the correct, honest result (done 2026-08-24)
+- [x] Task 9: Disagreement report (acceptance criterion 5) — 0 `load.escalated` events exist on this branch (same root cause as Task 8); script correctly reports "no escalated loads found" rather than a fabricated rate. **Re-run this once real Pilot 1 calls exist** — that's when the measurement becomes meaningful (done 2026-08-24)
+- [x] Task 10: 5 API endpoints + 7 tests, all passing (acceptance criterion 7) (done 2026-08-24)
+- [x] Task 11: Full regression suite — 16 test files, 68 tests, all green (T-16 pipeline + T-17 events + T-18 governance), excluding the pre-existing `ranker.test.ts` matching-engine slowness already documented under T-17 (acceptance criterion 6) (done 2026-08-24)
+- [x] Task 12: Final acceptance checklist — all 7 criteria pass (done 2026-08-24)
+
+**Bugs found and fixed during verification:**
+1. `authority_envelopes.agent_id` and `authority_evaluations.agent_id` had no `ON DELETE` behavior, breaking test cleanup once envelope/evaluation rows existed. `agents` is never deleted by live code (only deactivated via `status`). Fixed: `ON DELETE CASCADE` on both.
+2. The `escalations` PATCH route's SQL reused the `$1` placeholder across a plain assignment (`status = $1`) and an `IN` list (`CASE WHEN $1 IN (...)`) in the same statement — Neon's serverless driver can't type-infer that consistently (`inconsistent types deduced for parameter $1`). Fixed: moved the `resolved_at` logic into JS instead of a SQL `CASE WHEN`.
+3. Found via the **full regression suite**, not T-18's own tests in isolation: `authority_evaluations.source_event_id` (FK to `events`) also had no cascade. A T-18 test's idempotency fixture happened to reference an `events` row that a T-17 test's own cleanup later tried to delete, blocking it. Same reasoning as bug #1 — `events` is only ever deleted by test/ops code. Fixed: `ON DELETE CASCADE`.
+4. Execution mistake (not a code bug): the seed script's first run used `pnpm tsx` with only `DATABASE_URL` set, and unlike `vitest` (which auto-loads `.env.local`), a raw `tsx` invocation does not — so all four kill-switch env vars silently fell back to their hardcoded defaults instead of the real values. Caught by checking the printed kill-switch table against known `.env.local` values; re-ran with all four vars explicitly exported.
+
+**Not done, by design (session-scope decision, same as T-17):** nothing applied to production. Apply commands are in the implementation plan's Task 12.
 
 ---
 
