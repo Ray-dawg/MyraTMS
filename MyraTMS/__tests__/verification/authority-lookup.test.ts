@@ -33,7 +33,7 @@ describe('authority-lookup', () => {
   afterAll(async () => {
     await new Promise<void>((resolve) => mockServer.close(() => resolve()));
     process.env = envBackup;
-    await db.query(`DELETE FROM authority_lookups WHERE lookup_key LIKE $1`, [`%${RUN_ID}%`]);
+    await db.query(`DELETE FROM authority_lookups WHERE lookup_key LIKE $1 OR lookup_key = 'name:|CA'`, [`%${RUN_ID}%`]);
   });
 
   beforeEach(() => { responseQueue = []; });
