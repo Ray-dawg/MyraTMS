@@ -19,6 +19,7 @@ import Redis from 'ioredis';
 import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
+import { getMarginFloor } from '@/lib/tenants/margin-floor';
 import {
   calculateTotalCost,
   calculateNegotiationParams,
@@ -148,8 +149,9 @@ export class ResearcherWorker extends BaseWorker<ResearchJobPayload> {
     const negotiation = calculateNegotiationParams(cost.total, rates.currency, rates.bestRate);
 
     const shipperProfile = await this.profileShipper(payload, qualifiedLoad);
+    const minMargin = await getMarginFloor(rates.currency);
 
-    const strategy = this.determineStrategy(rates, cost, negotiation, shipperProfile);
+    const strategy = this.determineStrategy(rates, cost, negotiation, shipperProfile, minMargin);
 
     const intelligence: ResearchIntelligence = {
       rates,
@@ -432,8 +434,8 @@ export class ResearcherWorker extends BaseWorker<ResearchJobPayload> {
     cost: CostBreakdown,
     negotiation: ReturnType<typeof calculateNegotiationParams>,
     shipperProfile: ShipperProfile,
+    minMargin: number,
   ): { approach: 'aggressive' | 'standard' | 'walk'; reasoning: string } {
-    const minMargin = rates.currency === 'CAD' ? 270 : 200;
     const targetMargin = rates.currency === 'CAD' ? 470 : 350;
     const stretchMargin = rates.currency === 'CAD' ? 675 : 500;
 

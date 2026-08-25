@@ -18,6 +18,7 @@
 import Redis from 'ioredis';
 import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
+import { getMarginFloor } from '@/lib/tenants/margin-floor';
 import { logger } from '@/lib/logger';
 import { isWithinCallingHours as withinCallingHoursTz } from '@/lib/pipeline/time';
 import {
@@ -205,7 +206,7 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
     const currency = ((load.posted_rate_currency || 'CAD') as 'CAD' | 'USD');
     const negotiation = calculateNegotiationParams(cost.total, currency, marketBest || Infinity);
 
-    const minMargin = currency === 'CAD' ? 270 : 200;
+    const minMargin = await getMarginFloor(currency);
     const targetMargin = currency === 'CAD' ? 470 : 350;
     const stretchMargin = currency === 'CAD' ? 675 : 500;
 

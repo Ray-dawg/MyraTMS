@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-24 (T-18 shipped to production)
-**Status:** Phase 1 (Instrument) in progress — T-17 and T-18 both shipped to production. T-19 not started.
+**Last updated:** 2026-08-25 (T-19 verified on branch, full regression suite green, not yet applied to production)
+**Status:** Phase 1 (Instrument) in progress — T-17 and T-18 shipped to production. T-19 redesigned against the real schema, migration 035 verified on a disposable Neon branch (`t19-verify`), pending production apply.
 
 ## How to use this file
 
@@ -80,7 +80,27 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 ### T-19 — Tenant & Policy Model
 
 **Spec:** [T19_Tenant_Policy_Model.md](../../../T19_Tenant_Policy_Model.md)
-**Status:** Not started (depends on T-17, T-18)
+**Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t19-tenant-policy-model-design.md`
+**Status:** ⏳ **Verified on branch (`t19-verify`, `br-floral-glade-ai96qqkc`), zero regressions — not yet applied to production**
+
+Redesigned against the real production schema rather than the base spec's assumptions (see design doc): reuses `tenants`/`tenant_users` as-is instead of creating new tables, fixes a real production tenant_id mislabeling bug (T-17/T-18 hardcoded `1`, the `_system` tenant, instead of resolving Myra's real id by slug), adds `freight_business_type` as a new column distinct from `tenants.type`, and consolidates three disconnected margin-floor values down to the one actually driving `auto_book_eligible` in production ($270 CAD / $200 USD).
+
+- [x] Migration `035-t19-tenant-policy-model.sql` — `fn_myra_tenant_id()` slug resolver; corrects T-17/T-18's `fn_insert_event`/trigger functions/`v_cost_per_call`/table defaults from hardcoded `1` to the resolver; one-time backfill of existing `events`/`authority_envelopes`/`authority_evaluations`/`escalations` rows from `tenant_id=1` to Myra's real id (2), logged to `tenant_audit_log`; `tenants.freight_business_type` (additive column); `tenant_type_policy_templates` (4 seeded rows); `tenant_policies` (Myra v1 seed); `co_broker_agreements` (empty at launch); `policy_engine` agent + minimal shell envelope; `tenant_config` threshold consolidation (done 2026-08-25)
+- [x] `lib/tenants/margin-floor.ts` — `getMarginFloor()`, single source of truth replacing the three independent hardcoded `currency === 'CAD' ? 270 : 200` literals in `compiler-worker.ts`, `qualifier-worker.ts`, `researcher-worker.ts` (done 2026-08-25)
+- [x] `lib/governance/{policy-types,evaluate-policy,evaluate-policy-db}.ts` — pure `applyPolicy()` core (17 test scenarios) + `evaluatePolicy()` DB wrapper (4 integration tests), mirroring T-18's `applyEnvelope()`/`evaluateAuthority()` split (done 2026-08-25)
+- [x] Applied to `t19-verify`, idempotent re-apply confirmed (done 2026-08-25)
+- [x] Full regression suite (36 test files, 439 tests): 433 passing, 6 failing — all 6 pre-existing and unrelated to T-19 (`ranker.test.ts`'s already-documented 207-real-carrier timeout from T-17, and 5 `cost-calculator.test.ts` pure-arithmetic failures with zero DB/tenant involvement, confirmed untouched in this working tree) (done 2026-08-25)
+- [ ] API endpoints (`GET/POST /api/tenants`, `/api/tenants/:id/policy`, `/api/tenants/:id/co-broker-agreements`, `/api/policy-evaluations`) — not yet built
+- [ ] Apply to production (pending explicit go-ahead, per the T-17/T-18 branch-verify-then-ask pattern)
+
+**Bugs found and fixed during verification:**
+1. `v_cost_per_call`'s `CREATE OR REPLACE VIEW` failed outright: `fn_myra_tenant_id()` returns `BIGINT` (matching `tenants.id`), but the view's `tenant_id` output column was `INTEGER` (from the old `COALESCE(e.tenant_id, 1)`), and Postgres refuses to change a view column's type via `CREATE OR REPLACE`. Fixed: cast to `::integer` at both call sites within the view only — narrow, no behavior change (tenant ids fit well within int4).
+2. **Serious, initially silent:** every one of T-17's 5 trigger functions (plus the standalone `t17_backfill_events.ts` backfill script) calls `fn_insert_event(fn_myra_tenant_id(), ...)` directly — but `fn_insert_event`'s `p_tenant_id` parameter is `INTEGER`, and bigint→integer is only an *assignment* cast in Postgres, not an *implicit* one, so it's not permitted in function-call argument matching. Every such call raised `function fn_insert_event(bigint, ...) does not exist` at runtime, and every trigger's own `EXCEPTION WHEN OTHERS THEN RETURN NEW` silently swallowed it — meaning event derivation for every new load/call/job/consent/scraper-run transition silently stopped working the moment migration 035 first ran, with no error surfaced anywhere. Caught only by the full regression suite (events-triggers/events-views tests expecting new rows found none). Fixed: `::integer` cast at all 10 call sites in the migration + 11 in the backfill script (one call site — the `fn_stage_event_type(NEW.stage)` branch — was missed on the first pass since it doesn't match a simple string-literal search pattern; caught by a targeted grep afterward).
+3. `lib/tenants/margin-floor.ts`'s `getMarginFloor()` ternary (`currency === 'CAD' ? ... : ...`) silently mapped any non-`'CAD'` input to the USD key instead of validating — an invalid currency value would silently resolve to $200 instead of throwing. Fixed: derive the key as `margin_floor_${currency.toLowerCase()}`, so an unmapped currency naturally misses in `tenant_config` and throws the existing "no such key" error instead of a wrong answer.
+4. Three pre-existing T-17/T-18 test files hardcoded `tenant_id = 1` / `tenantId: 1`, the exact stale assumption T-19 corrects — once real events/envelopes correctly moved to Myra's real id (2), these assertions found nothing. Fixed: `events-views.test.ts`'s three view queries now resolve via `fn_myra_tenant_id()`; `__tests__/governance/api.test.ts`'s mock session and seed fixtures now use tenant id 2 consistently (this is what made the previously-passing "seeded voice envelope" test start returning 404 — the real `voice` envelope correctly lives at tenant 2).
+5. Two T-18 integration tests (`evaluate-authority.test.ts`, and this session's own new `evaluate-policy-db.test.ts`) picked their `sourceEventId` fixture via `SELECT id FROM events ORDER BY id DESC LIMIT 1` — a shared, mutable "latest row" that races against every other test file's own concurrent event inserts/deletes under a full-suite run, occasionally getting deleted between a test's two idempotency calls (`authority_evaluations_source_event_id_fkey` violation). Fixed both to insert and clean up their own dedicated event row instead.
+
+**Explicitly deferred, not forgotten:** the shipper-direct/double-brokering gate this design originally investigated as potentially missing is being built by a separate concurrent session (`e2-01-m1-session1`, migration `040_shipper_direct_gate.sql`); T-19's `evaluatePolicy()` assumes that work lands and aligns, per explicit instruction. `evaluatePolicy()`'s formal acceptance-criterion validation target (which of Qualifier/Compiler/Dispatcher should call it) remains unresolved pending that gate landing.
 
 ---
 
