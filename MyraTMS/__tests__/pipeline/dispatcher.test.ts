@@ -131,6 +131,7 @@ describe('DispatcherWorker', () => {
   it('chains the 4 TMS routes, links tms_load_id, advances pipeline stage', async () => {
     const worker = new DispatcherWorker(redisConnection, {
       tmsApiUrl: mockUrl,
+      carrierAutoAssignEnabled: true,
     });
 
     const payload: DispatchJobPayload = {

@@ -64,8 +64,12 @@ interface CreatedLoad {
 export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
   private tmsApiUrl: string;
   private serviceTokenTtl: string;
+  private carrierAutoAssignEnabled: boolean;
 
-  constructor(redis: Redis, opts: { tmsApiUrl?: string; serviceTokenTtl?: string } = {}) {
+  constructor(
+    redis: Redis,
+    opts: { tmsApiUrl?: string; serviceTokenTtl?: string; carrierAutoAssignEnabled?: boolean } = {},
+  ) {
     const config: WorkerConfig = {
       queueName: 'dispatch-queue',
       expectedStage: 'booked',
@@ -84,6 +88,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     this.tmsApiUrl =
       opts.tmsApiUrl ?? process.env.TMS_API_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
     this.serviceTokenTtl = opts.serviceTokenTtl ?? '5m';
+    // E2-03 M0: default OFF — the always-on auto-assign is the dangerous
+    // state (fabricates a carrier commitment that was never obtained), not
+    // the guarded one. Flip only after M2's real carrier-calling cascade is
+    // live and validated end to end.
+    this.carrierAutoAssignEnabled = opts.carrierAutoAssignEnabled ?? process.env.CARRIER_AUTO_ASSIGN_ENABLED === 'true';
   }
 
   public async process(payload: DispatchJobPayload): Promise<ProcessResult> {
@@ -113,6 +122,25 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
           reason: 'top_carrier_not_active',
           carrierId: load.top_carrier_id,
           carrierStatus,
+        },
+      };
+    }
+
+    // E2-03 M0: no real carrier has agreed to run this load yet — Dispatch
+    // One (E2-03 M2) is the module that will actually call carriers. Until
+    // it's live, assigning here would tell the shipper a carrier is moving
+    // their freight when no carrier has agreed to anything.
+    if (!this.carrierAutoAssignEnabled) {
+      await this.escalateCarrierConfirmation(pipelineLoadId, load, callId);
+      return {
+        success: true,
+        pipelineLoadId,
+        stage: 'escalated',
+        duration: 0,
+        details: {
+          escalated: true,
+          reason: 'carrier_auto_assign_disabled',
+          carrierId: load.top_carrier_id,
         },
       };
     }
@@ -197,6 +225,44 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     );
     logger.warn(
       `[Dispatcher] Load ${pipelineLoadId} escalated: top carrier ${carrierId} has carrier_status='${carrierStatus ?? 'unknown'}' (must be 'active' to dispatch); call=${callId}`,
+    );
+  }
+
+  private async escalateCarrierConfirmation(
+    pipelineLoadId: number,
+    load: PipelineLoadRow,
+    callId: string,
+  ): Promise<void> {
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'escalated', stage_updated_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [pipelineLoadId],
+    );
+
+    const title = `Carrier confirmation needed: ${load.origin_city}, ${load.origin_state} → ${load.destination_city}, ${load.destination_state}`;
+    const pickup = load.pickup_date ? this.toIsoDate(load.pickup_date) : 'unknown';
+    const detail =
+      `AI carrier calling is not yet live. Secure carrier ${load.top_carrier_id} for this load by phone. ` +
+      `Pickup ${pickup}, equipment ${load.equipment_type}` +
+      (load.weight_lbs ? `, ${load.weight_lbs} lbs` : '') +
+      (load.shipper_company ? `. Shipper: ${load.shipper_company}` : '') +
+      `.`;
+    const suggestedAction = 'Secure a carrier for this load by phone. AI carrier calling is not yet live.';
+
+    await db.query(
+      `INSERT INTO exceptions (
+         load_id, carrier_id, type, severity, title, detail,
+         pipeline_load_id, source_module, suggested_action, sla_due_at
+       ) VALUES (
+         NULL, $1, 'carrier_confirmation_required', 'high', $2, $3,
+         $4, 'carrier_confirmation_required', $5, NOW() + INTERVAL '4 hours'
+       )`,
+      [load.top_carrier_id, title, detail, pipelineLoadId, suggestedAction],
+    );
+
+    logger.warn(
+      `[Dispatcher] Load ${pipelineLoadId} escalated: CARRIER_AUTO_ASSIGN_ENABLED=false, carrier ${load.top_carrier_id} not yet confirmed; call=${callId}`,
     );
   }
 
