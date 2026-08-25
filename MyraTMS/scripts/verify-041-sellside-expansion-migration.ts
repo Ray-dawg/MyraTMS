@@ -52,11 +52,24 @@ async function main() {
      WHERE table_name='carriers' AND column_name = ANY($1::text[])`,
     [carriersCols],
   );
-  console.log(`\n[4/4] carriers verification columns (expected ${carriersCols.length}): ${foundCarriersCols.length}`);
+  console.log(`\n[4/5] carriers verification columns (expected ${carriersCols.length}): ${foundCarriersCols.length}`);
   const missingCarriersCols = carriersCols.filter(
     (c) => !foundCarriersCols.some((r: any) => r.column_name === c),
   );
   if (missingCarriersCols.length) console.log(`      MISSING: ${missingCarriersCols.join(', ')}`);
+
+  // 5. exceptions columns (added here independently of E2-01's 040 — order-independent, see migration header)
+  const exceptionsCols = ['pipeline_load_id', 'source_module', 'suggested_action', 'sla_due_at'];
+  const foundExceptionsCols = await sql(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name='exceptions' AND column_name = ANY($1::text[])`,
+    [exceptionsCols],
+  );
+  console.log(`\n[5/5] exceptions columns (expected ${exceptionsCols.length}): ${foundExceptionsCols.length}`);
+  const missingExceptionsCols = exceptionsCols.filter(
+    (c) => !foundExceptionsCols.some((r: any) => r.column_name === c),
+  );
+  if (missingExceptionsCols.length) console.log(`      MISSING: ${missingExceptionsCols.join(', ')}`);
 
   console.log(`\nEXPLAIN idx_pipeline_loads_carrier_call_outcome:`);
   const e1 = await sql(
@@ -69,7 +82,8 @@ async function main() {
     callTypeConstraint.length === 1 &&
     missingPipelineCols.length === 0 &&
     loadsCol.length === 1 &&
-    missingCarriersCols.length === 0;
+    missingCarriersCols.length === 0 &&
+    missingExceptionsCols.length === 0;
   console.log(allGood ? '\n✅ Migration 041 verified.' : '\n❌ Migration 041 incomplete — see MISSING lines above.');
   process.exit(allGood ? 0 : 1);
 }

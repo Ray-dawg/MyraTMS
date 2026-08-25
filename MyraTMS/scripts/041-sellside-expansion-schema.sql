@@ -33,12 +33,16 @@
 -- match instead (grepped scripts/*.sql for promoted_by/assigned_by/attested_by
 -- and found only the VARCHAR(100) pattern).
 --
--- exceptions table already carries pipeline_load_id / source_module /
--- suggested_action / sla_due_at via 040_shipper_direct_gate.sql (already in
--- the repo) — M0's escalation branch (dispatcher-worker.ts) reuses those
--- columns directly and needs no schema change here. Not repeated in this
--- file; 040's ADD COLUMN IF NOT EXISTS already makes re-adding them a no-op
--- if for some reason 040 has not run yet.
+-- exceptions.pipeline_load_id/source_module/suggested_action/sla_due_at are
+-- ALSO added by E2-01's 040_shipper_direct_gate.sql — but that migration is
+-- still on E2-01's own unmerged branch as of this writing, not yet on master
+-- (confirmed: master's HEAD has no 040 file). M0's escalation branch
+-- (dispatcher-worker.ts) needs these columns to exist regardless of merge
+-- order between the two independent PRDs, so this migration adds them here
+-- too, via the identical ADD COLUMN IF NOT EXISTS DDL. Whichever of 040 or
+-- 041 lands first on a given database creates them; the other is a clean
+-- no-op. Same reconciliation pattern E2-01 itself used for co_broker_
+-- agreements against T-19's migration 035 — see E2-01's session-1 design doc.
 --
 -- Idempotent: IF NOT EXISTS / ADD COLUMN IF NOT EXISTS throughout, CHECK
 -- constraint guarded via information_schema/pg_constraint probe (matching
@@ -95,5 +99,16 @@ ALTER TABLE carriers
 CREATE INDEX IF NOT EXISTS idx_pipeline_loads_carrier_call_outcome
   ON pipeline_loads (carrier_call_outcome)
   WHERE carrier_call_outcome IS NOT NULL;
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- exceptions: T-24 §4.2 columns M0's escalation branch needs, added
+-- independently of E2-01's 040 migration (see header note above — order-
+-- independent, identical DDL to 040_shipper_direct_gate.sql).
+-- ────────────────────────────────────────────────────────────────────────────
+ALTER TABLE exceptions
+  ADD COLUMN IF NOT EXISTS pipeline_load_id  INTEGER REFERENCES pipeline_loads(id),
+  ADD COLUMN IF NOT EXISTS source_module     VARCHAR(30),
+  ADD COLUMN IF NOT EXISTS suggested_action  TEXT,
+  ADD COLUMN IF NOT EXISTS sla_due_at        TIMESTAMP;
 
 COMMIT;
