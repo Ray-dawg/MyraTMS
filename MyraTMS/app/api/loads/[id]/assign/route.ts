@@ -3,6 +3,7 @@ import { withTenant } from "@/lib/db/tenant-context"
 import { requireTenantContext } from "@/lib/auth"
 import { generateRateCon } from "@/lib/rate-confirmation"
 import { attachDocument } from "@/lib/documents"
+import { runAiCascadeDispatchGate } from "@/lib/dispatch-gate"
 import { put } from "@vercel/blob"
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -18,7 +19,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const result = await withTenant(ctx.tenantId, async (client) => {
       const { rows: loads } = await client.query(
-        `SELECT id, status, revenue, reference_number FROM loads WHERE id = $1`,
+        `SELECT id, status, revenue, reference_number, pipeline_load_id FROM loads WHERE id = $1`,
         [loadId],
       )
       if (loads.length === 0) return { notFound: "load" as const }
@@ -35,13 +36,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const margin = revenue - carrierCost
       const marginPercent = revenue > 0 ? Math.round((margin / revenue) * 100) : 0
 
+      // E2-03 M3: for an AI-cascade load (loads.pipeline_load_id set), the
+      // status flip to 'Dispatched' is deferred to runAiCascadeDispatchGate()
+      // below — it only happens after the rate-con send has been attempted
+      // and logged (PRD §7). Manual assignments (pipeline_load_id NULL) keep
+      // today's exact behavior: immediate flip, in the same UPDATE.
+      const isAiCascadeLoad = loads[0].pipeline_load_id != null
+
       await client.query(
-        `UPDATE loads SET
-           carrier_id = $1, carrier_name = $2, carrier_cost = $3,
-           margin = $4, margin_percent = $5, driver_id = $6,
-           status = CASE WHEN status = 'Booked' THEN 'Dispatched' ELSE status END,
-           updated_at = NOW()
-         WHERE id = $7`,
+        isAiCascadeLoad
+          ? `UPDATE loads SET
+               carrier_id = $1, carrier_name = $2, carrier_cost = $3,
+               margin = $4, margin_percent = $5, driver_id = $6,
+               updated_at = NOW()
+             WHERE id = $7`
+          : `UPDATE loads SET
+               carrier_id = $1, carrier_name = $2, carrier_cost = $3,
+               margin = $4, margin_percent = $5, driver_id = $6,
+               status = CASE WHEN status = 'Booked' THEN 'Dispatched' ELSE status END,
+               updated_at = NOW()
+             WHERE id = $7`,
         [
           carrier_id,
           carrierName,
@@ -76,7 +90,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         }
       }
 
-      return { ok: true as const, carrierName, referenceNumber: loads[0].reference_number }
+      return {
+        ok: true as const,
+        carrierName,
+        referenceNumber: loads[0].reference_number,
+        isAiCascadeLoad,
+        pipelineLoadId: loads[0].pipeline_load_id as number | null,
+      }
     })
 
     if ("notFound" in result) {
@@ -87,7 +107,40 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       )
     }
 
-    // Generate rate confirmation PDF (non-blocking)
+    // E2-03 M3/M4: AI-cascade loads go through the confirmation gate —
+    // carrier verification (M4) then rate-con generate+send+log (M3) —
+    // before dispatch is allowed to flip. See lib/dispatch-gate.ts.
+    if (result.isAiCascadeLoad && result.pipelineLoadId != null) {
+      const gateResult = await runAiCascadeDispatchGate({
+        tenantId: ctx.tenantId,
+        loadId,
+        carrierId: carrier_id,
+        pipelineLoadId: result.pipelineLoadId,
+        referenceNumber: result.referenceNumber,
+      })
+
+      if (gateResult.outcome === "escalated") {
+        return NextResponse.json({
+          load_id: loadId,
+          carrier_id,
+          status: "escalated",
+          escalation_reason: gateResult.reason,
+          ...(gateResult.verificationReason ? { verification_reason: gateResult.verificationReason } : {}),
+        })
+      }
+
+      return NextResponse.json({
+        load_id: loadId,
+        carrier_id,
+        carrier_name: result.carrierName,
+        assignment_method,
+        status: "assigned",
+        rateCon: gateResult.rateCon,
+        rateConSendStatus: gateResult.rateConSendStatus,
+      })
+    }
+
+    // Manual assignment path — unchanged from before this session.
     let rateCon: { url: string; docId: string } | undefined
     try {
       const pdfBuffer = await generateRateCon(ctx.tenantId, loadId)
