@@ -270,8 +270,11 @@ export class FeedbackWorker extends BaseWorker<FeedbackJobPayload> {
     personaName: string,
     outcome: FeedbackContext['callOutcome'],
   ): Promise<void> {
+    // E2-04 M1: personas now split by call_type — this worker only ever
+    // processes shipper-side pipeline_loads today, so pin the read to the
+    // shipper pool even though persona_name doesn't collide across pools yet.
     const cur = await db.query<{ id: number; alpha: string; beta: string }>(
-      `SELECT id, alpha, beta FROM personas WHERE persona_name = $1 LIMIT 1`,
+      `SELECT id, alpha, beta FROM personas WHERE persona_name = $1 AND call_type = 'outbound_shipper' LIMIT 1`,
       [personaName],
     );
     if (cur.rows.length === 0) {

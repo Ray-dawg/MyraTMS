@@ -463,10 +463,13 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
     const result = await db.query<
       PersonaStats & { retell_agent_id_en: string | null; retell_agent_id_fr: string | null }
     >(
+      // E2-04 M1: personas now split by call_type (outbound_shipper vs
+      // outbound_carrier — see migration 046). This worker is shipper-side
+      // only; without this filter it would draw from the carrier pool too.
       `SELECT id, persona_name, alpha::numeric AS alpha, beta::numeric AS beta,
               total_calls, retell_agent_id_en, retell_agent_id_fr
        FROM personas
-       WHERE is_active = true`,
+       WHERE is_active = true AND call_type = 'outbound_shipper'`,
     );
 
     if (result.rows.length === 0) {
