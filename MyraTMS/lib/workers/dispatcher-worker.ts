@@ -56,6 +56,14 @@ interface PipelineLoadRow {
   shipper_phone: string | null;
   top_carrier_id: string | null;
   tms_load_id: string | null;
+  // E2-03 M2 cascade outcome columns (migration 041) — read here so the
+  // Dispatcher can consume a *secured* carrier instead of the Ranker's
+  // pre-cascade top_carrier_id pick. See the "cascade-secured" branch below.
+  carrier_call_outcome: string | null;
+  carrier_id_secured: string | null;
+  carrier_agreed_rate: string | null;
+  carrier_agreed_currency: string | null;
+  carrier_profit: string | null;
 }
 
 interface CreatedLoad {
@@ -129,7 +137,23 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
 
     const load = await this.fetchPipelineLoad(pipelineLoadId);
     if (!load) throw new Error(`pipeline_load ${pipelineLoadId} not found`);
-    if (!load.top_carrier_id) {
+
+    // E2-03 M3 / PRD §11 (spec reconciliation, T-10 §4): once M2's cascade
+    // has actually secured a real carrier (accept, within the negotiation
+    // envelope), the Dispatcher consumes THAT carrier and rate instead of
+    // the Ranker's pre-cascade top_carrier_id pick — the connective tissue
+    // the PRD names but doesn't spell out as its own numbered task. This
+    // branch is effectively inert today: nothing yet enqueues
+    // carrier-call-queue automatically and CARRIER_CALLS_ENABLED stays
+    // false, so carrier_call_outcome is never 'accept' in production yet —
+    // it's wired now so it's ready the moment that changes, rather than
+    // needing a follow-up session to notice the gate has nothing real to
+    // gate against.
+    const cascadeSecuredCarrierId =
+      load.carrier_call_outcome === 'accept' ? load.carrier_id_secured : null;
+
+    const carrierId = cascadeSecuredCarrierId ?? load.top_carrier_id;
+    if (!carrierId) {
       throw new Error(`pipeline_load ${pipelineLoadId} has no top_carrier_id — cannot dispatch`);
     }
 
@@ -137,11 +161,13 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     // so shadow drains exercise the full pipeline, but real dispatch requires
     // 'active'. Carriers backfilled from FMCSA registries default to 'prospect'
     // and are promoted via PATCH /api/carriers/[id]/promote after human review.
-    // Also fetches the carrier's phone number up front — needed later if the
-    // carrier-confirmation escalation branch fires below.
-    const carrierInfo = await this.fetchCarrierStatus(load.top_carrier_id);
+    // Applies to a cascade-secured carrier exactly the same as top_carrier_id
+    // — the cascade can secure an 'accept' from a prospect carrier just as
+    // easily as an active one; the gate is a dispatch-time safety check, not
+    // something the cascade itself enforces.
+    const carrierInfo = await this.fetchCarrierStatus(carrierId);
     if (carrierInfo.carrierStatus !== 'active') {
-      await this.escalateProspect(pipelineLoadId, load.top_carrier_id, carrierInfo.carrierStatus, callId);
+      await this.escalateProspect(pipelineLoadId, carrierId, carrierInfo.carrierStatus, callId);
       return {
         success: true,
         pipelineLoadId,
@@ -150,7 +176,7 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
         details: {
           escalated: true,
           reason: 'top_carrier_not_active',
-          carrierId: load.top_carrier_id,
+          carrierId,
           carrierStatus: carrierInfo.carrierStatus,
         },
       };
@@ -159,8 +185,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     // E2-03 M0: no real carrier has agreed to run this load yet — Dispatch
     // One (E2-03 M2) is the module that will actually call carriers. Until
     // it's live, assigning here would tell the shipper a carrier is moving
-    // their freight when no carrier has agreed to anything.
-    if (!this.carrierAutoAssignEnabled) {
+    // their freight when no carrier has agreed to anything. A cascade-secured
+    // carrier IS that real agreement, so it bypasses this gate entirely —
+    // CARRIER_AUTO_ASSIGN_ENABLED only ever guarded the *blind* assign path
+    // below, never a confirmed one.
+    if (!cascadeSecuredCarrierId && !this.carrierAutoAssignEnabled) {
       await this.escalateCarrierConfirmation(
         pipelineLoadId,
         load,
@@ -177,12 +206,18 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
         details: {
           escalated: true,
           reason: 'carrier_auto_assign_disabled',
-          carrierId: load.top_carrier_id,
+          carrierId,
         },
       };
     }
 
-    const carrierRateResult = await this.fetchCarrierRate(load.load_id, load.top_carrier_id);
+    // A cascade-secured rate is a real negotiated number, not an estimate —
+    // fetchCarrierRate()'s match_results fallback (and its `estimated: true`
+    // honesty flag) only applies to the blind-assign path below, which has
+    // no real carrier rate to draw on at all.
+    const carrierRateResult: CarrierRateResult = cascadeSecuredCarrierId
+      ? { rate: Number(load.carrier_agreed_rate ?? 0), estimated: false }
+      : await this.fetchCarrierRate(load.load_id, carrierId);
 
     const cookie = `auth-token=${signServiceToken(this.serviceTokenTtl)}`;
 
@@ -207,8 +242,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       [tmsLoad.id, pipelineLoadId, carrierRateResult.estimated],
     );
 
-    // Step 3: assign the carrier (also flips loads.status to 'Dispatched').
-    await this.assignCarrier(tmsLoad.id, load.top_carrier_id, carrierRateResult.rate, cookie);
+    // Step 3: assign the carrier. For a cascade-secured load, /assign's own
+    // M3/M4 gate (lib/dispatch-gate.ts) is what actually flips status to
+    // 'Dispatched' — it defers that flip until the carrier is verified and
+    // a rate-con send has been attempted and logged.
+    await this.assignCarrier(tmsLoad.id, carrierId, carrierRateResult.rate, cookie);
 
     // Step 4 + 5: tracking token + email link. Best-effort, non-fatal.
     if (load.shipper_email) {
@@ -217,8 +255,17 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       logger.debug(`[Dispatcher] No shipper email for load ${pipelineLoadId}; skipping tracking link`);
     }
 
+    // The cascade's own envelope check already computed the real profit
+    // (shipper rate minus the actual negotiated carrier rate) — use that
+    // for a cascade-secured load rather than the shipper-acceptance-time
+    // estimate the dispatch-queue payload carries, which predates any real
+    // carrier contact.
+    const effectiveProfit = cascadeSecuredCarrierId ? Number(load.carrier_profit ?? profit) : profit;
+
     logger.info(
-      `[Dispatcher] Load ${pipelineLoadId} dispatched. tms_load_id=${tmsLoad.id}, carrier=${load.top_carrier_id}, agreed=$${agreedRate}, profit=$${profit}, call=${callId}`,
+      `[Dispatcher] Load ${pipelineLoadId} dispatched. tms_load_id=${tmsLoad.id}, carrier=${carrierId}` +
+      (cascadeSecuredCarrierId ? ' (cascade-secured)' : '') +
+      `, agreed=$${agreedRate}, profit=$${effectiveProfit}, call=${callId}`,
     );
 
     return {
@@ -228,10 +275,11 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
       duration: 0,
       details: {
         tmsLoadId: tmsLoad.id,
-        carrierId: load.top_carrier_id,
+        carrierId,
         carrierRate: carrierRateResult.rate,
         agreedRate,
-        profit,
+        profit: effectiveProfit,
+        cascadeSecured: cascadeSecuredCarrierId != null,
       },
     };
   }
@@ -240,7 +288,9 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
     const r = await db.query<PipelineLoadRow>(
       `SELECT id, load_id, origin_city, origin_state, destination_city, destination_state,
               pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
-              shipper_company, shipper_email, shipper_phone, top_carrier_id, tms_load_id
+              shipper_company, shipper_email, shipper_phone, top_carrier_id, tms_load_id,
+              carrier_call_outcome, carrier_id_secured, carrier_agreed_rate,
+              carrier_agreed_currency, carrier_profit
        FROM pipeline_loads WHERE id = $1`,
       [id],
     );
