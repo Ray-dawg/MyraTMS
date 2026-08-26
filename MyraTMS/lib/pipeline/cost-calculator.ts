@@ -120,6 +120,25 @@ export interface MarginEstimate {
   stretchMargin: number;
 }
 
+/**
+ * E2-03 M2 — Carrier-side negotiation parameters (rate ceiling)
+ * Counterpart to calculateNegotiationParams() (shipper-side rate floor).
+ * Used by Dispatcher to constrain the maximum Myra will pay a carrier.
+ */
+export interface CarrierNegotiationParams {
+  /** Maximum price Myra will pay a carrier (derived from agreed shipper rate) */
+  ceiling: number;
+
+  /** Target price Myra wants to pay (below the ceiling) */
+  target: number;
+
+  /** Opening offer to start negotiation (below the target) */
+  openingOffer: number;
+
+  /** Currency: "CAD" or "USD" */
+  currency: 'CAD' | 'USD';
+}
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
@@ -616,6 +635,43 @@ export function calculateNegotiationParams(
 }
 
 /**
+ * E2-03 M2 (§6.5) — the carrier-side counterpart to calculateNegotiationParams()
+ * above. That function computes a floor Myra won't sell below; this one
+ * computes a ceiling Myra won't pay above when negotiating with a carrier,
+ * derived from the shipper's already-agreed rate. Uses the same flat-dollar
+ * getMarginThresholds() table as every other margin calculation in this
+ * codebase — not a percentage. (PRD §6.5's own text names the parameter
+ * minMarginPct but its formula uses minMarginFloor, a flat amount; resolved
+ * toward this codebase's existing pattern — see the M2 foundation design doc.)
+ *
+ * Direction is inverted from the shipper function: target and openingOffer
+ * sit BELOW the ceiling (Myra wants to pay less, not more), with a small
+ * concession band between opening offer and ceiling to negotiate within.
+ *
+ * @param agreedShipperRate - The rate already agreed with the shipper
+ * @param currency - "CAD" or "USD"
+ * @returns CarrierNegotiationParams with ceiling, target, and openingOffer
+ *
+ * @example
+ * calculateCarrierNegotiationParams(2400, 'CAD')
+ * // Returns: { ceiling: 2130, target: 1930, openingOffer: 1834, currency: 'CAD' }
+ */
+export function calculateCarrierNegotiationParams(
+  agreedShipperRate: number,
+  currency: 'CAD' | 'USD',
+): CarrierNegotiationParams {
+  const { floor, target: targetMargin } = getMarginThresholds(currency);
+
+  const ceiling = Math.max(0, agreedShipperRate - floor);
+  const target = Math.max(0, agreedShipperRate - targetMargin);
+  // Opening offer starts 5% below target (concession room), never negative,
+  // never above the ceiling.
+  const openingOffer = Math.max(0, Math.min(target * 0.95, ceiling));
+
+  return { ceiling, target: Math.min(target, ceiling), openingOffer, currency };
+}
+
+/**
  * Quick cost estimation for simple cases (per-mile calculation)
  * Uses simplified formula without full CTS fuel calculation
  *
@@ -657,5 +713,6 @@ export default {
   calculateTotalCost,
   estimateMargin,
   calculateNegotiationParams,
+  calculateCarrierNegotiationParams,
   estimateSimpleCost,
 };
