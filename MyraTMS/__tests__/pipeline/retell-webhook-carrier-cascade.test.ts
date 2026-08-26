@@ -4,7 +4,7 @@
  * asserts the resulting DB writes + carrier-call-queue enqueue. Complements
  * carrier-cascade.test.ts's pure unit tests with the actual wiring.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
 import { redisConnection } from '@/lib/pipeline/redis-bullmq';
 import { Queue } from 'bullmq';
@@ -31,6 +31,23 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
   const carriers = ['wc1', 'wc2', 'wc3'].map((s) => `${s}_${RUN_ID}`);
   const carrierCallQueue = new Queue('carrier-call-queue', { connection: redisConnection });
   const prevSecret = process.env.RETELL_WEBHOOK_SECRET;
+
+  beforeAll(async () => {
+    // Pausing the queue (a real BullMQ/Redis operation, not just this Queue
+    // instance) stops EVERY worker anywhere -- including a dangling
+    // CarrierVoiceWorker from a concurrently-running test file that hasn't
+    // reached its own afterAll shutdown yet -- from consuming the jobs this
+    // file enqueues while its assertions are still reading job counts.
+    // Without this, a stray worker can race-consume a job mid-test and
+    // corrupt both files' state (E2-03 M2 Session 2 cross-file pollution,
+    // found once carrierCallQueue.add() started producing real jobs).
+    await carrierCallQueue.pause();
+  });
+
+  afterAll(async () => {
+    await carrierCallQueue.resume();
+    await carrierCallQueue.close();
+  });
 
   beforeEach(async () => {
     process.env.RETELL_WEBHOOK_SECRET = WEBHOOK_SECRET;
@@ -70,6 +87,9 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
 
   afterEach(async () => {
     process.env.RETELL_WEBHOOK_SECRET = prevSecret;
+    // Defensive: even with the queue paused, clear any agent_jobs row that
+    // could otherwise FK-block the pipeline_loads delete below.
+    await db.query(`DELETE FROM agent_jobs WHERE pipeline_load_id = $1`, [pipelineLoadId]);
     await db.query(`DELETE FROM exceptions WHERE pipeline_load_id = $1`, [pipelineLoadId]);
     await db.query(`DELETE FROM agent_calls WHERE pipeline_load_id = $1`, [pipelineLoadId]);
     await db.query(`DELETE FROM match_results WHERE load_id = $1`, [loadId]);
@@ -117,8 +137,8 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     expect(load.rows[0].carrier_call_outcome).toBe('decline');
 
     const after = await carrierCallQueue.getJobCounts();
-    expect((after.waiting ?? 0) + (after.delayed ?? 0)).toBeGreaterThan(
-      (before.waiting ?? 0) + (before.delayed ?? 0),
+    expect((after.waiting ?? 0) + (after.delayed ?? 0) + (after.paused ?? 0)).toBeGreaterThan(
+      (before.waiting ?? 0) + (before.delayed ?? 0) + (before.paused ?? 0),
     );
   }, 30_000);
 
@@ -145,7 +165,7 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     expect((exc.rows[0] as any).type).toBe('carrier_cascade_exhausted');
 
     const after = await carrierCallQueue.getJobCounts();
-    expect((after.waiting ?? 0) + (after.delayed ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0));
+    expect((after.waiting ?? 0) + (after.delayed ?? 0) + (after.paused ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0) + (before.paused ?? 0));
   }, 30_000);
 
   it('voicemail on carrier 1 schedules a delayed retry at the same position, not an advance', async () => {
@@ -199,7 +219,7 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     expect(Number(load.rows[0].carrier_agreed_rate)).toBe(1800);
 
     const after = await carrierCallQueue.getJobCounts();
-    expect((after.waiting ?? 0) + (after.delayed ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0));
+    expect((after.waiting ?? 0) + (after.delayed ?? 0) + (after.paused ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0) + (before.paused ?? 0));
   }, 30_000);
 
   it('accept above the envelope ceiling is rewritten to escalated and does not enqueue a cascade step', async () => {
@@ -215,6 +235,6 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     expect(load.rows[0].carrier_call_outcome).toBe('escalated');
 
     const after = await carrierCallQueue.getJobCounts();
-    expect((after.waiting ?? 0) + (after.delayed ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0));
+    expect((after.waiting ?? 0) + (after.delayed ?? 0) + (after.paused ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0) + (before.paused ?? 0));
   }, 30_000);
 });

@@ -185,12 +185,17 @@ describe('handleRetellWebhook', () => {
   }, 30_000);
 
   it('a carrier call (metadata.callType=outbound_carrier) with a non-completed status (no_answer) does NOT fall through to the shipper handlers, and never touches agreed_rate/profit/stage', async () => {
-    // Whole-branch review finding 1: before the dispatch-ladder fix, a
-    // carrier call with any status other than 'completed' fell into
-    // processCallFailed()/processNonConversation() — the shipper-only
-    // handlers that write agreed_rate/profit/stage. Unreachable today
-    // (shadow mode never dials a carrier) but must fail closed instead of
-    // silently mis-routing once carrier calling goes live.
+    // Whole-branch review finding 1 (M2 Foundation session): before the
+    // dispatch-ladder fix, a carrier call with any status other than
+    // 'completed' fell into processCallFailed()/processNonConversation(),
+    // the shipper-only handlers that write agreed_rate/profit/stage. As of
+    // E2-03 M2 Session 2 (the cascade state machine), a non-completed
+    // carrier call is no longer unhandled: it routes to
+    // processCarrierCallOutcome(), which writes only carrier_* columns and
+    // drives decideCascadeAction(). This test now asserts THAT routing
+    // happened (not the earlier "fails closed as unhandled" placeholder),
+    // while still protecting the same invariant its name describes: the
+    // shared shipper columns must stay untouched.
     const f = await seed('carrier-no-answer');
     try {
       const payload = {
@@ -211,39 +216,50 @@ describe('handleRetellWebhook', () => {
           language: 'en',
           currency: 'CAD',
           callType: 'outbound_carrier',
+          cascadePosition: 0,
+          voicemailRetryCount: 0,
+          carrierId: 'car_001',
+          stackLength: 3,
         },
       } as unknown as RetellWebhookPayload;
 
       const result = await handleRetellWebhook(signedRequest(payload, TEST_SECRET) as any);
 
-      // Fails closed with an explicit "not yet handled" result — not routed
-      // to a shipper handler, and not a 200/processed success either.
-      expect(result.status).toBe(400);
-      expect(result.body.processed).toBe(false);
-      expect(result.body.outcome).toBe('carrier_status_unhandled');
+      // Routed to the carrier cascade handler: first no_answer retries the
+      // same position at +2h, not an immediate advance or escalation.
+      expect(result.status).toBe(200);
+      expect(result.body.processed).toBe(true);
+      expect(result.body.outcome).toBe('no_answer');
 
-      // Neither processCallFailed() nor processNonConversation() nor
-      // processCarrierCallCompleted() ran — no agent_calls row at all.
-      const calls = await db.query(
-        `SELECT 1 FROM agent_calls WHERE pipeline_load_id = $1`,
+      // processCarrierCallOutcome() writes a carrier-side agent_calls row
+      // (carrier_outcome only, never the shipper outcome/agreed_rate
+      // columns processCallCompleted()/processCallFailed() own).
+      const calls = await db.query<{ carrier_outcome: string; outcome: string | null }>(
+        `SELECT carrier_outcome, outcome FROM agent_calls WHERE pipeline_load_id = $1`,
         [f.pipelineLoadId],
       );
-      expect(calls.rows.length).toBe(0);
+      expect(calls.rows).toHaveLength(1);
+      expect(calls.rows[0].carrier_outcome).toBe('no_answer');
+      expect(calls.rows[0].outcome).toBeNull();
 
       // The shared shipper columns on pipeline_loads must be completely
-      // untouched — stage stays at the seeded 'calling', never flipped to
+      // untouched: stage stays at the seeded 'calling', never flipped to
       // 'declined'/'escalated' by the shipper-only non-conversation/failed
-      // handlers, and agreed_rate/profit/call_outcome stay NULL.
+      // handlers, and agreed_rate/profit/call_outcome (the SHIPPER outcome
+      // column) stay NULL. carrier_call_outcome, the carrier-only column,
+      // is the one that's expected to be set.
       const after = await db.query<{
-        stage: string; agreed_rate: string | null; profit: string | null; call_outcome: string | null;
+        stage: string; agreed_rate: string | null; profit: string | null;
+        call_outcome: string | null; carrier_call_outcome: string | null;
       }>(
-        `SELECT stage, agreed_rate, profit, call_outcome FROM pipeline_loads WHERE id = $1`,
+        `SELECT stage, agreed_rate, profit, call_outcome, carrier_call_outcome FROM pipeline_loads WHERE id = $1`,
         [f.pipelineLoadId],
       );
       expect(after.rows[0].stage).toBe('calling');
       expect(after.rows[0].agreed_rate).toBeNull();
       expect(after.rows[0].profit).toBeNull();
       expect(after.rows[0].call_outcome).toBeNull();
+      expect(after.rows[0].carrier_call_outcome).toBe('no_answer');
     } finally {
       await cleanup(f);
     }
