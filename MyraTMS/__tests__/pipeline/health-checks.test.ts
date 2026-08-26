@@ -6,7 +6,13 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
-import { detectStuckPipelineLoads, detectMissedPickupWindows } from '@/lib/pipeline/health-checks';
+import { withTenant } from '@/lib/db/tenant-context';
+import { LEGACY_DEFAULT_TENANT_ID } from '@/lib/auth';
+import {
+  detectStuckPipelineLoads,
+  detectMissedPickupWindows,
+  detectOverdueCarrierSignatures,
+} from '@/lib/pipeline/health-checks';
 
 const RUN_ID = Date.now();
 const seededPipelineLoadIds: number[] = [];
@@ -103,6 +109,38 @@ describe('detectStuckPipelineLoads (E2-03 M5)', () => {
     const exc = await db.query(`SELECT 1 FROM exceptions WHERE pipeline_load_id = $1`, [id]);
     expect(exc.rows).toHaveLength(1);
   }, 30_000);
+
+  it('a load at awaiting_shipper_confirmation for 90 minutes is NOT flagged (within ShipperConfirmationWorker\'s own 2h escalate window)', async () => {
+    const id = await seedLoad({ stage: 'awaiting_shipper_confirmation', stageUpdatedAgo: '90 minutes' });
+    await detectStuckPipelineLoads();
+    const exc = await db.query(`SELECT 1 FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(0);
+  }, 30_000);
+
+  it('a load stuck at awaiting_shipper_confirmation for 3+ hours IS flagged — past ShipperConfirmationWorker\'s own escalate window', async () => {
+    const id = await seedLoad({ stage: 'awaiting_shipper_confirmation', stageUpdatedAgo: '3 hours' });
+    const result = await detectStuckPipelineLoads();
+    expect(result.found).toBeGreaterThanOrEqual(1);
+    const exc = await db.query<{ type: string }>(`SELECT type FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(1);
+    expect(exc.rows[0].type).toBe('pipeline_stage_stuck');
+  }, 30_000);
+
+  it('a load at shipper_confirmed for 90 minutes is NOT flagged — carrier-side activity never advances this stage, a normal cascade can take hours', async () => {
+    const id = await seedLoad({ stage: 'shipper_confirmed', stageUpdatedAgo: '90 minutes' });
+    await detectStuckPipelineLoads();
+    const exc = await db.query(`SELECT 1 FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(0);
+  }, 30_000);
+
+  it('a load stuck at shipper_confirmed for 13+ hours IS flagged — a genuinely stuck carrier-brief-queue/cascade, not a normal-length cascade', async () => {
+    const id = await seedLoad({ stage: 'shipper_confirmed', stageUpdatedAgo: '13 hours' });
+    const result = await detectStuckPipelineLoads();
+    expect(result.found).toBeGreaterThanOrEqual(1);
+    const exc = await db.query<{ severity: string }>(`SELECT severity FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(1);
+    expect(exc.rows[0].severity).toBe('medium');
+  }, 30_000);
 });
 
 describe('detectMissedPickupWindows (E2-03 M5)', () => {
@@ -136,5 +174,75 @@ describe('detectMissedPickupWindows (E2-03 M5)', () => {
     await detectMissedPickupWindows();
     const exc = await db.query(`SELECT 1 FROM exceptions WHERE pipeline_load_id = $1`, [id]);
     expect(exc.rows).toHaveLength(0);
+  }, 30_000);
+});
+
+describe('detectOverdueCarrierSignatures (E2-04 M6)', () => {
+  const seededLoadIds: string[] = [];
+
+  afterEach(async () => {
+    const ids = seededLoadIds.splice(0);
+    if (ids.length) {
+      await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+        await client.query(`DELETE FROM exceptions WHERE load_id = ANY($1)`, [ids]);
+        await client.query(`DELETE FROM loads WHERE id = ANY($1)`, [ids]);
+      });
+    }
+  });
+
+  async function seedAwaitingSignatureLoad(opts: { dueAgo: string }): Promise<string> {
+    const loadId = `TEST-SIG-${RUN_ID}-${Math.random().toString(36).slice(2, 8)}`;
+    seededLoadIds.push(loadId);
+    await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+      await client.query(
+        `INSERT INTO loads (id, origin, destination, source, status, revenue, carrier_signature_due_at, created_at)
+         VALUES ($1, 'Toronto, ON', 'Sudbury, ON', 'Load Board', 'Awaiting Signature', 2200, NOW() - INTERVAL '${opts.dueAgo}', NOW())`,
+        [loadId],
+      );
+    });
+    return loadId;
+  }
+
+  it('flags an Awaiting Signature load whose 90-min SLA has passed with no signature received', async () => {
+    const loadId = await seedAwaitingSignatureLoad({ dueAgo: '10 minutes' });
+    const result = await detectOverdueCarrierSignatures(LEGACY_DEFAULT_TENANT_ID);
+    expect(result.found).toBeGreaterThanOrEqual(1);
+
+    const exc = await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+      const { rows } = await client.query<{ type: string; severity: string }>(
+        `SELECT type, severity FROM exceptions WHERE load_id = $1`, [loadId],
+      );
+      return rows;
+    });
+    expect(exc).toHaveLength(1);
+    expect(exc[0].type).toBe('carrier_signature_overdue');
+    expect(exc[0].severity).toBe('high');
+  }, 30_000);
+
+  it('does NOT flag an Awaiting Signature load still within its SLA window', async () => {
+    const loadId = `TEST-SIG-${RUN_ID}-${Math.random().toString(36).slice(2, 8)}`;
+    seededLoadIds.push(loadId);
+    await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+      await client.query(
+        `INSERT INTO loads (id, origin, destination, source, status, revenue, carrier_signature_due_at, created_at)
+         VALUES ($1, 'Toronto, ON', 'Sudbury, ON', 'Load Board', 'Awaiting Signature', 2200, NOW() + INTERVAL '30 minutes', NOW())`,
+        [loadId],
+      );
+    });
+
+    await detectOverdueCarrierSignatures(LEGACY_DEFAULT_TENANT_ID);
+    const exc = await withTenant(LEGACY_DEFAULT_TENANT_ID, async (client) => {
+      const { rows } = await client.query(`SELECT 1 FROM exceptions WHERE load_id = $1`, [loadId]);
+      return rows;
+    });
+    expect(exc).toHaveLength(0);
+  }, 30_000);
+
+  it('does not duplicate the exceptions row on a second run', async () => {
+    const loadId = await seedAwaitingSignatureLoad({ dueAgo: '10 minutes' });
+    const first = await detectOverdueCarrierSignatures(LEGACY_DEFAULT_TENANT_ID);
+    const second = await detectOverdueCarrierSignatures(LEGACY_DEFAULT_TENANT_ID);
+    expect(first.written).toBeGreaterThanOrEqual(1);
+    expect(second.written).toBe(0);
   }, 30_000);
 });
