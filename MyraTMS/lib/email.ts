@@ -136,6 +136,101 @@ export async function sendTrackingEmail(
 }
 
 /**
+ * Send a rate confirmation PDF to a carrier's contact email.
+ * Returns true if sent, false if SMTP is not configured or send fails.
+ */
+export async function sendRateConfirmationEmail(
+  to: string,
+  carrierName: string,
+  loadReference: string,
+  pdfBuffer: Buffer
+): Promise<boolean> {
+  const transporter = getTransporter()
+  if (!transporter) {
+    console.log("[email] SMTP not configured — skipping rate confirmation email send")
+    return false
+  }
+
+  const fromEmail = process.env.FROM_EMAIL || "noreply@myralogistics.com"
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:40px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <tr>
+      <td style="background:#0f172a;padding:24px 32px;">
+        <table cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="padding-right:12px;">
+              <div style="width:32px;height:32px;background:#e8601f;border-radius:8px;display:inline-block;"></div>
+            </td>
+            <td>
+              <span style="color:#ffffff;font-size:18px;font-weight:600;">Myra</span>
+              <span style="color:#e8601f;font-size:18px;font-weight:600;"> AI</span>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:32px;">
+        <p style="margin:0 0 16px;color:#18181b;font-size:15px;line-height:1.6;">
+          Hi ${carrierName},
+        </p>
+        <p style="margin:0 0 16px;color:#3f3f46;font-size:14px;line-height:1.6;">
+          Please find the attached rate confirmation for load <strong style="color:#18181b;">${loadReference}</strong>.
+          Review the terms, sign, and return at your earliest convenience.
+        </p>
+
+        <hr style="border:none;border-top:1px solid #e4e4e7;margin:24px 0;" />
+
+        <p style="margin:0;color:#a1a1aa;font-size:11px;line-height:1.5;">
+          This rate confirmation was sent by Myra AI on behalf of your freight broker.
+          For questions, contact your broker directly.
+        </p>
+      </td>
+    </tr>
+
+    <tr>
+      <td style="background:#fafafa;padding:16px 32px;border-top:1px solid #e4e4e7;">
+        <p style="margin:0;color:#a1a1aa;font-size:10px;">
+          &copy; ${new Date().getFullYear()} Myra AI, Inc. &mdash; Freight Brokerage
+        </p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim()
+
+  try {
+    await transporter.sendMail({
+      from: `"Myra AI" <${fromEmail}>`,
+      to,
+      subject: `Rate Confirmation — ${loadReference}`,
+      html,
+      attachments: [
+        {
+          filename: `RC-${loadReference}.pdf`,
+          content: pdfBuffer,
+          contentType: "application/pdf",
+        },
+      ],
+    })
+    return true
+  } catch (err) {
+    console.error("[email] Failed to send rate confirmation email:", err)
+    return false
+  }
+}
+
+/**
  * Send a generic HTML email.
  * Returns true if sent, false if SMTP is not configured or send fails.
  */
