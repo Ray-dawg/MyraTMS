@@ -224,8 +224,34 @@ export const CALL_QUEUE_CONFIG: QueueConfig = {
     },
   },
 };
-
 /**
+ * Queue 10: Carrier Call Queue (E2-03 M2)
+ * Source: Dispatch One cascade orchestration → Target: carrier-voice-worker.ts
+ * Concurrency: 5 (cascade is sequential-per-load, not a parallel fan-out like
+ * the shipper call-queue — a load's cascade holds one carrier dial at a time
+ * via lib/pipeline/carrier-locks.ts's per-load lock, so high concurrency here
+ * only helps across DIFFERENT loads' cascades, not within one)
+ * Retries: NONE (a cascade step is not safely re-playable, same reasoning as call-queue)
+ */
+export const CARRIER_CALL_QUEUE_CONFIG: QueueConfig = {
+  queueName: 'carrier-call-queue',
+  description: 'Dispatch One (E2-03 M2) via Retell AI — Makes outbound carrier calls, shadow-gated',
+  concurrency: 5,
+  retryConfig: RETRY_NO_RETRY,
+  priority: true,
+  delayable: false,
+  defaultJobOptions: {
+    attempts: RETRY_NO_RETRY.attempts,
+    removeOnComplete: {
+      age: 86400,
+    },
+    removeOnFail: {
+      age: 604800,
+    },
+  },
+};
+
+  /**
  * Queue 6: Dispatch Queue
  * Source: Voice Agent (Agent 6) → Target: Dispatcher (Agent 7)
  * Concurrency: 10 (TMS writes, lower to prevent conflicts)
@@ -348,6 +374,7 @@ export const ALL_QUEUE_CONFIGS: Record<string, QueueConfig> = {
   [FEEDBACK_QUEUE_CONFIG.queueName]: FEEDBACK_QUEUE_CONFIG,
   [CALLBACK_QUEUE_CONFIG.queueName]: CALLBACK_QUEUE_CONFIG,
   [ESCALATION_QUEUE_CONFIG.queueName]: ESCALATION_QUEUE_CONFIG,
+  [CARRIER_CALL_QUEUE_CONFIG.queueName]: CARRIER_CALL_QUEUE_CONFIG,
 };
 
 /**
@@ -376,6 +403,7 @@ export function getQueuesByOrder(): string[] {
     FEEDBACK_QUEUE_CONFIG.queueName,
     CALLBACK_QUEUE_CONFIG.queueName,
     ESCALATION_QUEUE_CONFIG.queueName,
+    CARRIER_CALL_QUEUE_CONFIG.queueName,
   ];
 }
 
@@ -414,3 +442,8 @@ export function getTotalConcurrency(): number {
 export function getConcurrency(queueName: string): number | undefined {
   return ALL_QUEUE_CONFIGS[queueName]?.concurrency;
 }
+
+
+
+
+
