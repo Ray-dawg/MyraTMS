@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils"
 const statusStyles: Record<string, string> = {
   // Load statuses
   "Booked": "bg-chart-1/10 text-chart-1",
+  "Awaiting Signature": "bg-warning/10 text-warning",
   "Dispatched": "bg-chart-4/10 text-chart-4",
   "In Transit": "bg-accent/10 text-accent",
   "Delivered": "bg-success/10 text-success",

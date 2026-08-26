@@ -16,7 +16,7 @@ import http from 'http';
 import { db } from '@/lib/pipeline/db-adapter';
 import { LEGACY_DEFAULT_TENANT_ID } from '@/lib/auth';
 import { deleteDocument } from '@/lib/documents';
-import { runAiCascadeDispatchGate } from '@/lib/dispatch-gate';
+import { runAiCascadeDispatchGate, completeDispatchOnSignedRateCon } from '@/lib/dispatch-gate';
 
 // The live BLOB_READ_WRITE_TOKEN in this dev env points at a store
 // configured for private-only access, but dispatch-gate.ts (matching the
@@ -130,18 +130,20 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
       tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
     });
 
-    expect(result.outcome).toBe('dispatched');
-    if (result.outcome === 'dispatched') {
+    expect(result.outcome).toBe('awaiting_signature');
+    if (result.outcome === 'awaiting_signature') {
       expect(['sent', 'failed']).toContain(result.rateConSendStatus);
+      expect(result.signatureDueAt).toBeTruthy();
       seededDocIds.push(result.rateCon.docId);
     }
 
-    const row = await db.query<{ status: string; rate_con_send_status: string | null; rate_con_sent_at: Date | null }>(
-      `SELECT status, rate_con_send_status, rate_con_sent_at FROM loads WHERE id = $1`, [loadId],
+    const row = await db.query<{ status: string; rate_con_send_status: string | null; rate_con_sent_at: Date | null; carrier_signature_due_at: Date | null }>(
+      `SELECT status, rate_con_send_status, rate_con_sent_at, carrier_signature_due_at FROM loads WHERE id = $1`, [loadId],
     );
-    expect(row.rows[0].status).toBe('Dispatched');
+    expect(row.rows[0].status).toBe('Awaiting Signature');
     expect(['sent', 'failed']).toContain(row.rows[0].rate_con_send_status);
     expect(row.rows[0].rate_con_sent_at).not.toBeNull();
+    expect(row.rows[0].carrier_signature_due_at).not.toBeNull();
   }, 30_000);
 
   it('pre-verified carrier with no contact_email: dispatches with rate_con_send_status=skipped_no_email, not blocked', async () => {
@@ -155,8 +157,8 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
       tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
     });
 
-    expect(result.outcome).toBe('dispatched');
-    if (result.outcome === 'dispatched') {
+    expect(result.outcome).toBe('awaiting_signature');
+    if (result.outcome === 'awaiting_signature') {
       expect(result.rateConSendStatus).toBe('skipped_no_email');
       seededDocIds.push(result.rateCon.docId);
     }
@@ -164,7 +166,7 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     const row = await db.query<{ status: string; rate_con_send_status: string | null }>(
       `SELECT status, rate_con_send_status FROM loads WHERE id = $1`, [loadId],
     );
-    expect(row.rows[0].status).toBe('Dispatched');
+    expect(row.rows[0].status).toBe('Awaiting Signature');
     expect(row.rows[0].rate_con_send_status).toBe('skipped_no_email');
   }, 30_000);
 
@@ -208,8 +210,8 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
       tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
     });
 
-    expect(result.outcome).toBe('dispatched');
-    if (result.outcome === 'dispatched') seededDocIds.push(result.rateCon.docId);
+    expect(result.outcome).toBe('awaiting_signature');
+    if (result.outcome === 'awaiting_signature') seededDocIds.push(result.rateCon.docId);
 
     const carrierRow = await db.query<{ verified_at: Date | null }>(`SELECT verified_at FROM carriers WHERE id = $1`, [carrierId]);
     expect(carrierRow.rows[0].verified_at).not.toBeNull();
@@ -259,4 +261,53 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     expect(exc.rows).toHaveLength(1);
     expect(exc.rows[0].type).toBe('carrier_verification_failed');
   }, 30_000);
+
+  it('completeDispatchOnSignedRateCon: flips Awaiting Signature to Dispatched, records receipt, issues a tracking token', async () => {
+    const carrierId = `GATE-E-${RUN_ID}`;
+    const loadId = `LD-GATE-E-${RUN_ID}`;
+    await seedCarrier({ id: carrierId, company: 'Gate Test Carrier E', contactEmail: null, preVerified: true });
+    await seedTmsLoad({ id: loadId, carrierId });
+    const pipelineLoadId = await seedPipelineLoad();
+
+    const gateResult = await runAiCascadeDispatchGate({
+      tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
+    });
+    expect(gateResult.outcome).toBe('awaiting_signature');
+    if (gateResult.outcome === 'awaiting_signature') seededDocIds.push(gateResult.rateCon.docId);
+
+    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
+    expect(result.outcome).toBe('dispatched');
+    if (result.outcome === 'dispatched') expect(result.trackingToken).toHaveLength(64);
+
+    const row = await db.query<{ status: string; carrier_signature_received_at: Date | null; tracking_token: string | null }>(
+      `SELECT status, carrier_signature_received_at, tracking_token FROM loads WHERE id = $1`, [loadId],
+    );
+    expect(row.rows[0].status).toBe('Dispatched');
+    expect(row.rows[0].carrier_signature_received_at).not.toBeNull();
+    expect(row.rows[0].tracking_token).not.toBeNull();
+  }, 30_000);
+
+  it('completeDispatchOnSignedRateCon: a second call after already dispatched is idempotent, not an error', async () => {
+    const carrierId = `GATE-F-${RUN_ID}`;
+    const loadId = `LD-GATE-F-${RUN_ID}`;
+    await seedCarrier({ id: carrierId, company: 'Gate Test Carrier F', contactEmail: null, preVerified: true });
+    await seedTmsLoad({ id: loadId, carrierId });
+    const pipelineLoadId = await seedPipelineLoad();
+
+    const gateResult = await runAiCascadeDispatchGate({
+      tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
+    });
+    if (gateResult.outcome === 'awaiting_signature') seededDocIds.push(gateResult.rateCon.docId);
+
+    await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
+    const second = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
+
+    expect(second.outcome).toBe('not_awaiting_signature');
+    if (second.outcome === 'not_awaiting_signature') expect(second.status).toBe('Dispatched');
+  }, 30_000);
+
+  it('completeDispatchOnSignedRateCon: unknown load returns not_found', async () => {
+    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId: `LD-NONEXISTENT-${RUN_ID}` });
+    expect(result.outcome).toBe('not_found');
+  });
 });

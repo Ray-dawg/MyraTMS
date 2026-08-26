@@ -134,9 +134,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         carrier_id,
         carrier_name: result.carrierName,
         assignment_method,
+        // E2-04 M6: "assigned" here means the rate-con was sent and the
+        // load moved to loads.status='Awaiting Signature', not
+        // 'Dispatched' -- see gateResult.outcome / signatureDueAt.
         status: "assigned",
         rateCon: gateResult.rateCon,
         rateConSendStatus: gateResult.rateConSendStatus,
+        signatureDueAt: gateResult.outcome === "awaiting_signature" ? gateResult.signatureDueAt : undefined,
       })
     }
 

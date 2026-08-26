@@ -2,7 +2,11 @@
 // Myra TMS - Canonical Type Definitions
 // ============================================================
 
-export type LoadStatus = "Booked" | "Dispatched" | "In Transit" | "Delivered" | "Invoiced" | "Closed"
+// "Awaiting Signature" (E2-04 M6) is set only by the AI-cascade dispatch
+// gate (lib/dispatch-gate.ts) while a carrier's rate-con is out for
+// signature -- manual human assignments never produce it, going straight
+// from "Booked" to "Dispatched" exactly as before.
+export type LoadStatus = "Booked" | "Awaiting Signature" | "Dispatched" | "In Transit" | "Delivered" | "Invoiced" | "Closed"
 export type LoadSource = "Load Board" | "Contract Shipper" | "One-off Shipper"
 
 export interface Load {
