@@ -543,6 +543,10 @@ export async function processCarrierCallCompleted(
     // webhook payload's currency), which can diverge from the load's real
     // agreed_rate_currency (whole-branch review finding 3).
     let carrierCurrency: 'CAD' | 'USD' = 'CAD';
+    // Hoisted out of the if-block below (E2-04 M6) so the dispatch-queue
+    // enqueue after it can read the shipper-side rate too -- 0 if the
+    // outcome isn't 'accept' (dispatchPayload is never built in that case).
+    let agreedShipperRate = 0;
 
     if (parsed.outcome === 'accept' && parsed.agreedRate !== null) {
       // E2-04 M5: confirmed_rate is the source of truth for carrier-side
@@ -561,7 +565,7 @@ export async function processCarrierCallCompleted(
         `SELECT confirmed_rate, confirmed_rate_currency, agreed_rate, agreed_rate_currency FROM pipeline_loads WHERE id = $1`,
         [pipelineLoadId],
       );
-      const agreedShipperRate = Number(loadRow.rows[0]?.confirmed_rate ?? loadRow.rows[0]?.agreed_rate ?? 0);
+      agreedShipperRate = Number(loadRow.rows[0]?.confirmed_rate ?? loadRow.rows[0]?.agreed_rate ?? 0);
       carrierCurrency = ((loadRow.rows[0]?.confirmed_rate_currency ?? loadRow.rows[0]?.agreed_rate_currency) as 'CAD' | 'USD') ?? 'CAD';
 
       const { calculateCarrierNegotiationParams } = await import('./cost-calculator');
@@ -598,16 +602,25 @@ export async function processCarrierCallCompleted(
       ],
     );
 
+    // E2-04 M6: real bug found while wiring the dispatch trigger --
+    // dispatcher-worker.ts's cascadeSecuredCarrierId branch has read
+    // carrier_id_secured since E2-03 M3, but nothing anywhere in this file
+    // ever WROTE it -- an accept never persisted which carrier actually
+    // secured the load, so that branch could never fire even once
+    // CARRIER_CALLS_ENABLED goes live. Fixed here, alongside the missing
+    // dispatch-queue enqueue below (the other half of the same gap).
     await db.query(
       `UPDATE pipeline_loads
        SET carrier_call_outcome = $2,
-           carrier_agreed_rate = $3,
-           carrier_agreed_currency = $4,
-           carrier_profit = $5,
+           carrier_id_secured = $3,
+           carrier_agreed_rate = $4,
+           carrier_agreed_currency = $5,
+           carrier_profit = $6,
            updated_at = NOW()
        WHERE id = $1`,
       [
         pipelineLoadId, finalOutcome,
+        finalOutcome === 'accept' ? metadata.carrierId ?? null : null,
         finalOutcome === 'accept' ? parsed.agreedRate : null,
         finalOutcome === 'accept' ? carrierCurrency : null,
         finalOutcome === 'accept' ? carrierProfit : null,
@@ -616,6 +629,30 @@ export async function processCarrierCallCompleted(
 
     if (finalOutcome === 'decline') {
       return enqueueCascadeStep(payload, metadata, 'decline');
+    }
+
+    if (finalOutcome === 'accept') {
+      // THE OTHER HALF OF THE SAME GAP: nothing enqueued dispatch-queue
+      // after a carrier accepted -- dispatcher-worker.ts's cascade-secured
+      // branch (E2-03 M3) had a real carrier to consume but nothing ever
+      // triggered it. agreedShipperRate/carrierCurrency here are the
+      // SHIPPER-side numbers (confirmed_rate, with an agreed_rate fallback
+      // -- same source-of-truth resolution as the envelope computation
+      // above), used to create the TMS loads row's revenue figure;
+      // dispatcher-worker.ts separately reads carrier_agreed_rate/
+      // carrier_profit (just persisted above) for the carrier-pay side.
+      const dispatchPayload: DispatchQueuePayload = {
+        pipelineLoadId,
+        loadId: '',
+        agreedRate: agreedShipperRate,
+        agreedRateCurrency: carrierCurrency,
+        profit: carrierProfit ?? 0,
+        callId: payload.call_id,
+        timestamp: new Date().toISOString(),
+      };
+      await dispatchQueue.add('dispatch', dispatchPayload, {
+        priority: Math.floor((carrierProfit ?? 0) / 100),
+      });
     }
 
     return {

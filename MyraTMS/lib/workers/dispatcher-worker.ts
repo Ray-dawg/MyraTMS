@@ -91,7 +91,16 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
   ) {
     const config: WorkerConfig = {
       queueName: 'dispatch-queue',
-      expectedStage: 'booked',
+      // E2-04 M6: was 'booked'. Under the new architecture a load never
+      // sits at 'booked' by the time a carrier could plausibly be secured
+      // -- it moves booked -> awaiting_shipper_confirmation -> shipper_confirmed
+      // (E2-04 M1-M3) before any carrier is ever contacted (M5). Left at
+      // 'booked', BaseWorker.validateLoad() would reject every real
+      // dispatch-queue job outright, on top of the two other gaps in this
+      // same chain fixed alongside this one (retell-webhook.ts never wrote
+      // carrier_id_secured on accept, and nothing enqueued dispatch-queue
+      // after an accept at all).
+      expectedStage: 'shipper_confirmed',
       // nextStage MUST be set: BaseWorker.handleJob only calls
       // updatePipelineLoad when config.nextStage is truthy (base-worker.ts).
       // Our updatePipelineLoad() override writes the 'dispatched' stage

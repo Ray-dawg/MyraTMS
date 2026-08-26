@@ -30,6 +30,9 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
   const loadId = `TEST-WEBHOOK-CASCADE-${RUN_ID}`;
   const carriers = ['wc1', 'wc2', 'wc3'].map((s) => `${s}_${RUN_ID}`);
   const carrierCallQueue = new Queue('carrier-call-queue', { connection: redisConnection });
+  // E2-04 M6: an accept now also enqueues dispatch-queue -- pause/inspect
+  // it the same way as carrierCallQueue, same cross-file-pollution reasoning.
+  const dispatchQueue = new Queue('dispatch-queue', { connection: redisConnection });
   const prevSecret = process.env.RETELL_WEBHOOK_SECRET;
 
   beforeAll(async () => {
@@ -42,11 +45,16 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     // corrupt both files' state (E2-03 M2 Session 2 cross-file pollution,
     // found once carrierCallQueue.add() started producing real jobs).
     await carrierCallQueue.pause();
+    await dispatchQueue.pause();
   });
 
   afterAll(async () => {
     await carrierCallQueue.resume();
     await carrierCallQueue.close();
+    const dispatchJobs = await dispatchQueue.getJobs(['waiting', 'paused']);
+    if (dispatchJobs.length) await dispatchQueue.drain(true);
+    await dispatchQueue.resume();
+    await dispatchQueue.close();
   });
 
   beforeEach(async () => {
@@ -93,8 +101,15 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     await db.query(`DELETE FROM exceptions WHERE pipeline_load_id = $1`, [pipelineLoadId]);
     await db.query(`DELETE FROM agent_calls WHERE pipeline_load_id = $1`, [pipelineLoadId]);
     await db.query(`DELETE FROM match_results WHERE load_id = $1`, [loadId]);
-    await db.query(`DELETE FROM carriers WHERE id = ANY($1)`, [carriers]);
+    // pipeline_loads before carriers (E2-04 M6): carrier_id_secured now
+    // gets a real value on an accept -- a genuine FK from pipeline_loads to
+    // carriers this test never exercised before that write existed.
+    // Deleting carriers first would violate it and abort this whole
+    // afterEach mid-way, leaving pipeline_loads' row (and its fixed loadId
+    // constant, reused every test) behind to collide with the next test's
+    // beforeEach insert -- exactly the failure this ordering fix closes.
     await db.query(`DELETE FROM pipeline_loads WHERE id = $1`, [pipelineLoadId]);
+    await db.query(`DELETE FROM carriers WHERE id = ANY($1)`, [carriers]);
   });
 
   function carrierPayload(overrides: Partial<any>) {
@@ -207,19 +222,33 @@ describe('carrier cascade — webhook integration (E2-03 M2 §6.8)', () => {
     expect(mine!.data.voicemailRetryCount).toBe(1);
   }, 30_000);
 
-  it('accept within the envelope ceiling does not enqueue a cascade step (cascade ends)', async () => {
+  it('accept within the envelope ceiling does not enqueue a cascade step (cascade ends), secures the carrier, and enqueues dispatch-queue', async () => {
     const before = await carrierCallQueue.getJobCounts();
     const payload = carrierPayload({ transcript: 'Great, we agreed to $1800 for this load.' });
     await handleRetellWebhook(signedRequest(payload));
 
-    const load = await db.query<{ carrier_call_outcome: string; carrier_agreed_rate: string }>(
-      `SELECT carrier_call_outcome, carrier_agreed_rate FROM pipeline_loads WHERE id = $1`, [pipelineLoadId],
+    const load = await db.query<{ carrier_call_outcome: string; carrier_agreed_rate: string; carrier_id_secured: string | null }>(
+      `SELECT carrier_call_outcome, carrier_agreed_rate, carrier_id_secured FROM pipeline_loads WHERE id = $1`, [pipelineLoadId],
     );
     expect(load.rows[0].carrier_call_outcome).toBe('accept');
     expect(Number(load.rows[0].carrier_agreed_rate)).toBe(1800);
+    // E2-04 M6: the real gap this session closed -- carrier_id_secured was
+    // never written by any code path before this fix, so
+    // dispatcher-worker.ts's cascade-secured branch could never fire.
+    expect(load.rows[0].carrier_id_secured).toBe(carriers[0]);
 
     const after = await carrierCallQueue.getJobCounts();
     expect((after.waiting ?? 0) + (after.delayed ?? 0) + (after.paused ?? 0)).toBe((before.waiting ?? 0) + (before.delayed ?? 0) + (before.paused ?? 0));
+
+    // The other half of the same gap: nothing used to enqueue dispatch-queue
+    // after an accept at all.
+    // BullMQ 5.x: a job added with priority > 0 lands in the 'prioritized'
+    // state, not 'waiting' -- the same gotcha Sprint 2's own completion.md
+    // entry already documents catching once before.
+    const dispatchJobs = await dispatchQueue.getJobs(['waiting', 'paused', 'prioritized']);
+    const job = dispatchJobs.find((j) => j.data.pipelineLoadId === pipelineLoadId);
+    expect(job).toBeDefined();
+    expect(job?.data.agreedRate).toBe(2200); // pipeline_loads.agreed_rate seeded above (no confirmed_rate on this fixture -> fallback)
   }, 30_000);
 
   it('accept above the envelope ceiling is rewritten to escalated and does not enqueue a cascade step', async () => {
