@@ -184,6 +184,19 @@ export class CarrierVoiceWorker extends BaseWorker<CarrierCallCascadePayload> {
         return this.skipResult(pipelineLoadId, 'carrier_no_phone');
       }
 
+      // E2-04 M5: CarrierBriefCompilerWorker persists the Thompson-Sampled
+      // persona's Retell agent id here, read fresh on every dial attempt
+      // (not just the first) since it survives cascade retries independent
+      // of the BullMQ job payload — see carrier_brief's own column comment
+      // in migration 048. Absent brief (e.g. a load dialed before M5 ever
+      // ran, or a test seeding no brief) falls back to the pre-M5 behavior:
+      // no override, Retell uses the calling number's default agent.
+      const briefRow = await db.query<{ carrier_brief: { retellAgentId: string | null } | null }>(
+        `SELECT carrier_brief FROM pipeline_loads WHERE id = $1`,
+        [pipelineLoadId],
+      );
+      const retellAgentId = briefRow.rows[0]?.carrier_brief?.retellAgentId ?? null;
+
       const phoneLockToken = await acquireCarrierPhoneLock(carrierPhone);
       if (!phoneLockToken) {
         logger.warn(
@@ -195,6 +208,7 @@ export class CarrierVoiceWorker extends BaseWorker<CarrierCallCascadePayload> {
       try {
         const callId = await this.dialRetell({
           to_number: carrierPhone,
+          override_agent_id: retellAgentId ?? undefined,
           metadata: {
             pipelineLoadId,
             callType: 'outbound_carrier',
@@ -272,23 +286,37 @@ export class CarrierVoiceWorker extends BaseWorker<CarrierCallCascadePayload> {
   }
 
   /**
-   * POST to Retell. Mirrors voice-worker.ts's dialRetell, trimmed to the
-   * fields the carrier cascade needs — the carrier side doesn't build a
-   * full NegotiationBrief-derived RetellCreatePhoneCallPayload (M2 doesn't
-   * add a carrier-side brief compiler), just enough metadata for the
-   * webhook to route the outcome back to the right cascade state.
+   * POST to Retell. Mirrors voice-worker.ts's dialRetell, still trimmed
+   * relative to the shipper side's full NegotiationBrief-derived
+   * RetellCreatePhoneCallPayload — no retell_llm_dynamic_variables contract
+   * exists for the carrier side yet (E2-04 M5 built the envelope/persona
+   * compiler and the override_agent_id wiring, not a full 60+-variable
+   * dynamic-variables contract; the server-side ceiling enforcement in
+   * retell-webhook.ts's processCarrierCallCompleted() doesn't depend on it
+   * either way, since it recomputes the envelope fresh from confirmed_rate
+   * at call-completion time). override_agent_id is what M5 actually adds:
+   * the Thompson-Sampled outbound_carrier persona now determines which
+   * Retell agent picks up the call, instead of always falling through to
+   * the calling number's default agent.
    */
   private async dialRetell(payload: {
     to_number: string;
+    override_agent_id?: string;
     metadata: Record<string, unknown>;
   }): Promise<string> {
+    // Strip an undefined override_agent_id rather than send the literal key
+    // — Retell's API contract for this field is documented as "omit for
+    // default agent," not "null/undefined for default agent."
+    const body: Record<string, unknown> = { to_number: payload.to_number, metadata: payload.metadata };
+    if (payload.override_agent_id) body.override_agent_id = payload.override_agent_id;
+
     const res = await fetch(`${this.retellBaseUrl}/v2/create-phone-call`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.retellApiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {

@@ -545,12 +545,24 @@ export async function processCarrierCallCompleted(
     let carrierCurrency: 'CAD' | 'USD' = 'CAD';
 
     if (parsed.outcome === 'accept' && parsed.agreedRate !== null) {
-      const loadRow = await db.query<{ agreed_rate: string | null; agreed_rate_currency: string | null }>(
-        `SELECT agreed_rate, agreed_rate_currency FROM pipeline_loads WHERE id = $1`,
+      // E2-04 M5: confirmed_rate is the source of truth for carrier-side
+      // envelope math from M3 onward, not agreed_rate -- a shipper's
+      // written confirmation is what's actually being resold to a carrier.
+      // Falls back to agreed_rate only for a load that somehow reaches
+      // carrier calling without one (pre-E2-04 data, or CARRIER_CALLS_ENABLED
+      // flipped on before M2/M3 land in a given env) -- in the normal path
+      // the two are always equal at this point, since submitConfirmation()/
+      // recordVerbalConfirmation() set confirmed_rate from the same snapshot
+      // agreed_rate produced.
+      const loadRow = await db.query<{
+        confirmed_rate: string | null; confirmed_rate_currency: string | null;
+        agreed_rate: string | null; agreed_rate_currency: string | null;
+      }>(
+        `SELECT confirmed_rate, confirmed_rate_currency, agreed_rate, agreed_rate_currency FROM pipeline_loads WHERE id = $1`,
         [pipelineLoadId],
       );
-      const agreedShipperRate = Number(loadRow.rows[0]?.agreed_rate ?? 0);
-      carrierCurrency = (loadRow.rows[0]?.agreed_rate_currency as 'CAD' | 'USD') ?? 'CAD';
+      const agreedShipperRate = Number(loadRow.rows[0]?.confirmed_rate ?? loadRow.rows[0]?.agreed_rate ?? 0);
+      carrierCurrency = ((loadRow.rows[0]?.confirmed_rate_currency ?? loadRow.rows[0]?.agreed_rate_currency) as 'CAD' | 'USD') ?? 'CAD';
 
       const { calculateCarrierNegotiationParams } = await import('./cost-calculator');
       const envelope = calculateCarrierNegotiationParams(agreedShipperRate, carrierCurrency);
