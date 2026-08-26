@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation"
 import { TrackingClient } from "./tracking-client"
+import { ConfirmClient } from "./confirm-client"
 
 interface TrackingDocument {
   id: string
@@ -264,6 +265,34 @@ export default async function TrackingTokenPage({
 }) {
   const { token } = await params
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000"
+
+  // E2-04 M3: this same standalone page serves both the rate-confirmation
+  // request link (sent right after a load books, before a carrier is ever
+  // contacted) and the post-dispatch tracking link -- one URL shape,
+  // state-based rendering. Try confirm-mode first since confirmation_token
+  // and tracking_tokens are disjoint token spaces; a 404 here just means
+  // "not a confirmation token," so fall through to the existing tracking
+  // fetch unchanged. A 410 (expired confirmation link) reuses the same
+  // not-found copy -- "invalid or has expired" already covers this case.
+  const confirmRes = await fetch(`${apiUrl}/api/confirmations/${token}`, { cache: "no-store" }).catch(
+    () => null,
+  )
+  if (confirmRes?.ok) {
+    const confirmData = await confirmRes.json()
+    return (
+      <ConfirmClient
+        token={token}
+        apiUrl={apiUrl}
+        loadId={confirmData.loadId}
+        stage={confirmData.stage}
+        alreadyResolved={confirmData.alreadyResolved}
+        snapshot={confirmData.snapshot}
+      />
+    )
+  }
+  if (confirmRes?.status === 410) {
+    notFound()
+  }
 
   // Fetch load data and documents in parallel
   const [loadResult, docsResult] = await Promise.allSettled([
