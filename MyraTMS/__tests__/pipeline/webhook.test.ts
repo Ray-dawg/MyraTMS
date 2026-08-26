@@ -5,6 +5,8 @@
  *   1. Bad signature → 401, no DB writes
  *   2. Voicemail / no_answer (non-conversation) → 200, retry enqueued, no
  *      transcript parsing required
+ *   3. Carrier call with a non-completed status → routed to the carrier
+ *      branch (fails closed), never falls through to a shipper handler
  *
  * The 'completed' call path (which calls Claude.parseCall) is NOT tested
  * here because it requires ANTHROPIC_API_KEY. That path is exercised in
@@ -177,6 +179,71 @@ describe('handleRetellWebhook', () => {
         [f.pipelineLoadId],
       );
       expect(after.rows[0].stage).toBe('calling');
+    } finally {
+      await cleanup(f);
+    }
+  }, 30_000);
+
+  it('a carrier call (metadata.callType=outbound_carrier) with a non-completed status (no_answer) does NOT fall through to the shipper handlers, and never touches agreed_rate/profit/stage', async () => {
+    // Whole-branch review finding 1: before the dispatch-ladder fix, a
+    // carrier call with any status other than 'completed' fell into
+    // processCallFailed()/processNonConversation() — the shipper-only
+    // handlers that write agreed_rate/profit/stage. Unreachable today
+    // (shadow mode never dials a carrier) but must fail closed instead of
+    // silently mis-routing once carrier calling goes live.
+    const f = await seed('carrier-no-answer');
+    try {
+      const payload = {
+        call_id: `carrier_na_${Date.now()}`,
+        agent_id: 'agent_carrier_test',
+        call_status: 'no_answer',
+        from_number: '+17055551001',
+        to_number: f.phone,
+        duration_ms: 0,
+        start_time: new Date().toISOString(),
+        end_time: new Date().toISOString(),
+        transcript: '',
+        recording_url: null,
+        metadata: {
+          pipelineLoadId: f.pipelineLoadId,
+          briefId: f.briefId,
+          persona: 'analytical',
+          language: 'en',
+          currency: 'CAD',
+          callType: 'outbound_carrier',
+        },
+      } as unknown as RetellWebhookPayload;
+
+      const result = await handleRetellWebhook(signedRequest(payload, TEST_SECRET) as any);
+
+      // Fails closed with an explicit "not yet handled" result — not routed
+      // to a shipper handler, and not a 200/processed success either.
+      expect(result.status).toBe(400);
+      expect(result.body.processed).toBe(false);
+      expect(result.body.outcome).toBe('carrier_status_unhandled');
+
+      // Neither processCallFailed() nor processNonConversation() nor
+      // processCarrierCallCompleted() ran — no agent_calls row at all.
+      const calls = await db.query(
+        `SELECT 1 FROM agent_calls WHERE pipeline_load_id = $1`,
+        [f.pipelineLoadId],
+      );
+      expect(calls.rows.length).toBe(0);
+
+      // The shared shipper columns on pipeline_loads must be completely
+      // untouched — stage stays at the seeded 'calling', never flipped to
+      // 'declined'/'escalated' by the shipper-only non-conversation/failed
+      // handlers, and agreed_rate/profit/call_outcome stay NULL.
+      const after = await db.query<{
+        stage: string; agreed_rate: string | null; profit: string | null; call_outcome: string | null;
+      }>(
+        `SELECT stage, agreed_rate, profit, call_outcome FROM pipeline_loads WHERE id = $1`,
+        [f.pipelineLoadId],
+      );
+      expect(after.rows[0].stage).toBe('calling');
+      expect(after.rows[0].agreed_rate).toBeNull();
+      expect(after.rows[0].profit).toBeNull();
+      expect(after.rows[0].call_outcome).toBeNull();
     } finally {
       await cleanup(f);
     }

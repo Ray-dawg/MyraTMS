@@ -169,6 +169,62 @@ describe('processCarrierCallCompleted (E2-03 M2 §6.7)', () => {
     expect(result.outcome).toBe('escalated');
   });
 
+  it('persists carrier_agreed_currency from the load row (agreed_rate_currency), not metadata.currency, even when they diverge', async () => {
+    // Whole-branch review finding 3: the envelope/ceiling math and the
+    // persisted pipeline_loads.carrier_agreed_currency must come from the
+    // SAME source. Simulate a webhook payload whose metadata.currency (USD)
+    // diverges from the load's actual agreed_rate_currency (CAD, seeded in
+    // beforeAll) — the persisted currency must follow the load row, matching
+    // whatever carrier_profit was actually computed in, never metadata.
+    const payload = mkPayload({
+      call_id: `carrier_call_5_${RUN_ID}`,
+      transcript: 'Carrier agreed to run the load at 1800 CAD.',
+    });
+    const metadata = mkMetadata({
+      retellCallId: `carrier_call_5_${RUN_ID}`,
+      currency: 'USD', // diverges from the load's real agreed_rate_currency (CAD)
+    });
+
+    const result = await processCarrierCallCompleted(payload, metadata);
+    expect(result.outcome).toBe('accept');
+
+    const row = await db.query<{ carrier_agreed_currency: string | null; carrier_profit: string | null }>(
+      `SELECT carrier_agreed_currency, carrier_profit FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId],
+    );
+    // Must match the load row's currency (CAD) — the same currency the
+    // envelope/ceiling and carrier_profit were computed in — not the
+    // webhook payload's metadata.currency (USD).
+    expect(row.rows[0].carrier_agreed_currency).toBe('CAD');
+    expect(Number(row.rows[0].carrier_profit)).toBe(400); // 2200 (shipper agreed_rate) - 1800
+  });
+
+  it('writes transcript and recording_url to the carrier agent_calls row', async () => {
+    // Whole-branch review finding 4: the carrier INSERT previously omitted
+    // both columns, discarding the recording/transcript of a recorded
+    // financial negotiation.
+    const testTranscript = 'Carrier agreed to run the load at 1800 CAD.';
+    const testRecordingUrl = 'https://recordings.retellai.com/carrier_call_6_test.wav';
+    const payload = mkPayload({
+      call_id: `carrier_call_6_${RUN_ID}`,
+      transcript: testTranscript,
+      recording_url: testRecordingUrl,
+    });
+    const metadata = mkMetadata({
+      retellCallId: `carrier_call_6_${RUN_ID}`,
+      recordingUrl: testRecordingUrl,
+    });
+
+    await processCarrierCallCompleted(payload, metadata);
+
+    const row = await db.query<{ transcript: string | null; recording_url: string | null }>(
+      `SELECT transcript, recording_url FROM agent_calls WHERE call_id = $1`,
+      [payload.call_id],
+    );
+    expect(row.rows[0].transcript).toBe(testTranscript);
+    expect(row.rows[0].recording_url).toBe(testRecordingUrl);
+  });
+
   it('does not misclassify an aside containing an unrelated number as an accepted rate (regex false-positive guard)', async () => {
     // Reviewer-flagged false positive: an unbounded lazy gap between "agreed
     // to" and the first digit run would let this transcript's aside ("think

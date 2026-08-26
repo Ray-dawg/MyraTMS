@@ -118,8 +118,28 @@ export async function handleRetellWebhook(
     // Step 4: Route by call status
     let result: ProcessResult;
 
-    if (payload.call_status === 'completed' && metadata.callType === 'outbound_carrier') {
-      result = await processCarrierCallCompleted(payload, metadata);
+    if (metadata.callType === 'outbound_carrier') {
+      // Carrier calls are dispatched to the carrier-specific handler for ANY
+      // status, not just 'completed'. This must be checked before the status
+      // ladder below — otherwise a carrier call with status 'failed',
+      // 'no_answer', 'voicemail', or 'busy' would fall through to the
+      // shipper-only processCallFailed()/processNonConversation(), which
+      // write to the shared agreed_rate/profit/stage columns those
+      // functions own (whole-branch review finding 1). Unreachable today
+      // (shadow mode never dials a carrier), but fails closed instead of
+      // silently mis-routing once carrier calling goes live.
+      result =
+        payload.call_status === 'completed'
+          ? await processCarrierCallCompleted(payload, metadata)
+          : {
+              success: false,
+              pipelineLoadId: metadata.pipelineLoadId,
+              callId: payload.call_id,
+              outcome: 'carrier_status_unhandled',
+              nextAction: 'escalate_human',
+              error: `Carrier call status '${payload.call_status}' has no carrier handler yet`,
+              timestamp: new Date(),
+            };
     } else if (payload.call_status === 'completed') {
       result = await processCallCompleted(payload, metadata);
     } else if (payload.call_status === 'failed') {
@@ -512,6 +532,13 @@ export async function processCarrierCallCompleted(
     // the carrier's own ask.
     let finalOutcome: CarrierCallOutcome['outcome'] = parsed.outcome;
     let carrierProfit: number | null = null;
+    // Currency used for the envelope/ceiling computation. Reused verbatim
+    // below when persisting pipeline_loads.carrier_agreed_currency so the
+    // persisted currency always matches whatever carrier_profit was actually
+    // computed in — never derived independently from metadata.currency (the
+    // webhook payload's currency), which can diverge from the load's real
+    // agreed_rate_currency (whole-branch review finding 3).
+    let carrierCurrency: 'CAD' | 'USD' = 'CAD';
 
     if (parsed.outcome === 'accept' && parsed.agreedRate !== null) {
       const loadRow = await db.query<{ agreed_rate: string | null; agreed_rate_currency: string | null }>(
@@ -519,10 +546,10 @@ export async function processCarrierCallCompleted(
         [pipelineLoadId],
       );
       const agreedShipperRate = Number(loadRow.rows[0]?.agreed_rate ?? 0);
-      const currency = (loadRow.rows[0]?.agreed_rate_currency as 'CAD' | 'USD') ?? 'CAD';
+      carrierCurrency = (loadRow.rows[0]?.agreed_rate_currency as 'CAD' | 'USD') ?? 'CAD';
 
       const { calculateCarrierNegotiationParams } = await import('./cost-calculator');
-      const envelope = calculateCarrierNegotiationParams(agreedShipperRate, currency);
+      const envelope = calculateCarrierNegotiationParams(agreedShipperRate, carrierCurrency);
 
       if (parsed.agreedRate > envelope.ceiling) {
         finalOutcome = 'escalated';
@@ -536,12 +563,14 @@ export async function processCarrierCallCompleted(
          pipeline_load_id, call_id, call_type, persona, language, currency,
          retell_call_id, retell_agent_id, phone_number_called,
          call_initiated_at, call_ended_at, duration_seconds,
-         carrier_outcome, carrier_agreed_rate, carrier_profit, created_at
+         carrier_outcome, carrier_agreed_rate, carrier_profit,
+         transcript, recording_url, created_at
        ) VALUES (
          $1, $2, 'outbound_carrier', $3, $4, $5,
          $6, $7, $8,
          $9, NOW(), $10,
-         $11, $12, $13, NOW()
+         $11, $12, $13,
+         $14, $15, NOW()
        )`,
       [
         pipelineLoadId, payload.call_id, metadata.persona, metadata.language, metadata.currency,
@@ -549,6 +578,7 @@ export async function processCarrierCallCompleted(
         metadata.startTime, metadata.durationSeconds,
         finalOutcome, finalOutcome === 'accept' ? parsed.agreedRate : null,
         finalOutcome === 'accept' ? carrierProfit : null,
+        (payload as any).transcript ?? null, metadata.recordingUrl ?? null,
       ],
     );
 
@@ -563,7 +593,7 @@ export async function processCarrierCallCompleted(
       [
         pipelineLoadId, finalOutcome,
         finalOutcome === 'accept' ? parsed.agreedRate : null,
-        finalOutcome === 'accept' ? metadata.currency : null,
+        finalOutcome === 'accept' ? carrierCurrency : null,
         finalOutcome === 'accept' ? carrierProfit : null,
       ],
     );
