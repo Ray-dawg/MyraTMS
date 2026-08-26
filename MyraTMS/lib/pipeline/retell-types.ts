@@ -80,6 +80,14 @@ export interface RetellWebhookMetadata {
   targetMargin?: number;
   briefGeneratedAt?: string;
   callInitiatedAt?: string;
+
+  // E2-03 M2 — outbound_carrier calls only. A shipper call never sets these
+  // (voice-worker.ts's payload construction is untouched by this plan).
+  callType?: 'outbound_shipper' | 'outbound_carrier';
+  cascadePosition?: number;
+  voicemailRetryCount?: number;
+  carrierId?: string;
+  stackLength?: number;
 }
 
 /**
@@ -256,6 +264,12 @@ export interface CallMetadata {
   retellCallId: string;
   retellAgentId: string;
   callType: 'outbound_shipper' | 'outbound_carrier';
+
+  // E2-03 M2 cascade state — populated only for outbound_carrier calls.
+  cascadePosition?: number;
+  voicemailRetryCount?: number;
+  carrierId?: string;
+  stackLength?: number;
 }
 
 // ============================================================================

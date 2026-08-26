@@ -46,6 +46,7 @@ const dispatchQueue = new Queue('dispatch-queue', { connection: redis });
 const callbackQueue = new Queue('callback-queue', { connection: redis });
 const escalationQueue = new Queue('escalation-queue', { connection: redis });
 const retryQueue = new Queue('call-queue', { connection: redis });
+const carrierCallQueue = new Queue('carrier-call-queue', { connection: redis });
 
 // ============================================================================
 // MAIN WEBHOOK HANDLER
@@ -128,18 +129,17 @@ export async function handleRetellWebhook(
       // functions own (whole-branch review finding 1). Unreachable today
       // (shadow mode never dials a carrier), but fails closed instead of
       // silently mis-routing once carrier calling goes live.
+      // Every call_status a carrier call can come back with is cascade-aware
+      // now (E2-03 M2 Session 2) — 'completed' still goes through the
+      // envelope+transcript path, everything else (no_answer/voicemail/busy/
+      // failed) goes through processCarrierCallOutcome(), which maps them to
+      // decideCascadeAction() and either re-enqueues carrier-call-queue or
+      // escalates on exhaustion. Nothing carrier-side falls through to the
+      // shipper-only handlers below this branch.
       result =
         payload.call_status === 'completed'
           ? await processCarrierCallCompleted(payload, metadata)
-          : {
-              success: false,
-              pipelineLoadId: metadata.pipelineLoadId,
-              callId: payload.call_id,
-              outcome: 'carrier_status_unhandled',
-              nextAction: 'escalate_human',
-              error: `Carrier call status '${payload.call_status}' has no carrier handler yet`,
-              timestamp: new Date(),
-            };
+          : await processCarrierCallOutcome(payload, metadata);
     } else if (payload.call_status === 'completed') {
       result = await processCallCompleted(payload, metadata);
     } else if (payload.call_status === 'failed') {
@@ -598,6 +598,10 @@ export async function processCarrierCallCompleted(
       ],
     );
 
+    if (finalOutcome === 'decline') {
+      return enqueueCascadeStep(payload, metadata, 'decline');
+    }
+
     return {
       success: true,
       pipelineLoadId,
@@ -622,6 +626,159 @@ export async function processCarrierCallCompleted(
       timestamp: new Date(),
     };
   }
+}
+
+/**
+ * Non-'completed' carrier call statuses (no_answer / voicemail / busy /
+ * failed). Maps them onto decideCascadeAction()'s outcome vocabulary and
+ * drives the cascade forward - this is the branch that didn't exist before
+ * E2-03 M2 Session 2 (every such call previously fell through to
+ * 'carrier_status_unhandled' and escalated immediately, per the whole-branch
+ * review finding that shipped alongside M2 Foundation).
+ */
+export async function processCarrierCallOutcome(
+  payload: RetellWebhookPayload,
+  metadata: CallMetadata,
+): Promise<ProcessResult> {
+  const { pipelineLoadId } = metadata;
+
+  const outcomeMap: Record<string, import('./carrier-cascade').CarrierCascadeOutcome> = {
+    voicemail: 'voicemail',
+    no_answer: 'no_answer',
+    busy: 'busy',
+    // No literal 'disconnected' call_status in this codebase's Retell
+    // payload type - PRD section 6.3's "disconnected" maps onto 'failed' (a
+    // call that didn't complete), documented in the M2 cascade plan's
+    // Global Constraints.
+    failed: 'disconnected',
+  };
+  const outcome = outcomeMap[payload.call_status];
+
+  await db.query(
+    `INSERT INTO agent_calls (
+       pipeline_load_id, call_id, call_type, persona, language, currency,
+       retell_call_id, retell_agent_id, phone_number_called,
+       call_initiated_at, call_ended_at, duration_seconds,
+       carrier_outcome, created_at
+     ) VALUES (
+       $1, $2, 'outbound_carrier', $3, $4, $5,
+       $6, $7, $8,
+       $9, NOW(), $10,
+       $11, NOW()
+     )`,
+    [
+      pipelineLoadId, payload.call_id, metadata.persona, metadata.language, metadata.currency,
+      metadata.retellCallId, metadata.retellAgentId, metadata.toNumber,
+      metadata.startTime, metadata.durationSeconds, outcome,
+    ],
+  );
+
+  await db.query(
+    `UPDATE pipeline_loads SET carrier_call_outcome = $2, updated_at = NOW() WHERE id = $1`,
+    [pipelineLoadId, outcome],
+  );
+
+  return enqueueCascadeStep(payload, metadata, outcome);
+}
+
+/**
+ * Shared by processCarrierCallCompleted()'s decline branch and
+ * processCarrierCallOutcome() above. Reads cascade position/retry
+ * count/stack length back out of the metadata the worker set when it
+ * dialed, calls the pure decideCascadeAction(), and either re-enqueues
+ * carrier-call-queue (advance/retry) or escalates (exhausted).
+ */
+async function enqueueCascadeStep(
+  payload: RetellWebhookPayload,
+  metadata: CallMetadata,
+  outcome: import('./carrier-cascade').CarrierCascadeOutcome,
+): Promise<ProcessResult> {
+  const { decideCascadeAction, escalateCascadeExhausted } = await import('./carrier-cascade');
+  const { pipelineLoadId, cascadePosition, voicemailRetryCount, stackLength } = metadata;
+
+  if (cascadePosition === undefined || stackLength === undefined) {
+    // Defensive - should never happen for a real carrier call, which the
+    // worker always stamps with cascade metadata before dialing.
+    return {
+      success: false,
+      pipelineLoadId,
+      callId: payload.call_id,
+      outcome,
+      nextAction: 'escalate_human',
+      error: 'Carrier call webhook missing cascade metadata (cascadePosition/stackLength)',
+      timestamp: new Date(),
+    };
+  }
+
+  const action = decideCascadeAction({
+    outcome,
+    position: cascadePosition,
+    stackLength,
+    voicemailRetryCount: voicemailRetryCount ?? 0,
+  });
+
+  if (action.type === 'accept') {
+    // processCarrierCallCompleted() already handled the terminal write for
+    // an accept before calling this helper - nothing left to enqueue.
+    return {
+      success: true, pipelineLoadId, callId: payload.call_id, outcome,
+      nextAction: 'no_action', timestamp: new Date(),
+    };
+  }
+
+  const loadRow = await db.query<{
+    load_id: string; load_board_source: string;
+    origin_city: string; origin_state: string; destination_city: string; destination_state: string;
+  }>(
+    `SELECT load_id, load_board_source, origin_city, origin_state, destination_city, destination_state
+     FROM pipeline_loads WHERE id = $1`,
+    [pipelineLoadId],
+  );
+  const load = loadRow.rows[0];
+
+  if (action.type === 'exhausted') {
+    const stackRow = await db.query<{ carrier_id: string }>(
+      `SELECT carrier_id FROM match_results WHERE load_id = $1 ORDER BY match_score DESC LIMIT $2`,
+      [load.load_id, stackLength],
+    );
+    await escalateCascadeExhausted({
+      pipelineLoadId, loadId: load.load_id,
+      stack: stackRow.rows.map((r) => r.carrier_id),
+      originCity: load.origin_city, originState: load.origin_state,
+      destinationCity: load.destination_city, destinationState: load.destination_state,
+    });
+    return {
+      success: true, pipelineLoadId, callId: payload.call_id, outcome,
+      nextAction: 'escalate_human',
+      details: { cascadeExhausted: true },
+      timestamp: new Date(),
+    };
+  }
+
+  const nextPosition = action.type === 'advance' ? action.nextPosition : action.position;
+  const nextRetryCount = action.type === 'retry_same' ? (voicemailRetryCount ?? 0) + 1 : 0;
+  const jobOptions = action.type === 'retry_same' ? { delay: action.delayMs } : {};
+
+  await carrierCallQueue.add(
+    'cascade-step',
+    {
+      pipelineLoadId,
+      loadId: load.load_id,
+      loadBoardSource: load.load_board_source,
+      enqueuedAt: new Date().toISOString(),
+      priority: 5,
+      cascadePosition: nextPosition,
+      voicemailRetryCount: nextRetryCount,
+    },
+    jobOptions,
+  );
+
+  return {
+    success: true, pipelineLoadId, callId: payload.call_id, outcome,
+    nextAction: action.type === 'retry_same' ? 'retry_later' : 'no_action',
+    details: { cascadeAction: action.type, nextPosition, nextRetryCount },
+    timestamp: new Date(),
+  };
 }
 
 /**
@@ -805,8 +962,12 @@ export function extractCallMetadata(
     retellAgentId: payload.agent_id,
     // E2-03 M2: absent on every existing shipper call (voice-worker.ts never
     // sets it), so this default preserves that path exactly. carrier-voice-
-    // worker.ts (Task 5) sets it explicitly when it dials.
-    callType: (payload.metadata as any).callType ?? 'outbound_shipper',
+    // worker.ts sets it explicitly when it dials.
+    callType: payload.metadata.callType ?? 'outbound_shipper',
+    cascadePosition: payload.metadata.cascadePosition,
+    voicemailRetryCount: payload.metadata.voicemailRetryCount,
+    carrierId: payload.metadata.carrierId,
+    stackLength: payload.metadata.stackLength,
   };
 }
 
