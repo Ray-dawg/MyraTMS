@@ -43,4 +43,21 @@ describe('calculateCarrierNegotiationParams', () => {
     expect(result.target).toBeGreaterThanOrEqual(0);
     expect(result.openingOffer).toBeGreaterThanOrEqual(0);
   });
+
+  it('rounds all three returned figures to 2 decimal places, given a non-round agreedShipperRate (whole-branch review finding 2)', () => {
+    // 2400.33 - 270 (floor) = 2130.33; 2400.33 - 470 (target margin) =
+    // 1930.33; openingOffer = min(1930.33 * 0.95, 2130.33) = 1833.8135,
+    // which must come back rounded to 1833.81, not the raw fractional-cent
+    // value — this is what the sibling calculateNegotiationParams() already
+    // guarantees via roundCurrency() and this function previously did not.
+    const result = calculateCarrierNegotiationParams(2400.33, 'CAD');
+    expect(result.ceiling).toBeCloseTo(2130.33, 2);
+    expect(result.target).toBeCloseTo(1930.33, 2);
+    expect(result.openingOffer).toBeCloseTo(1833.81, 2);
+
+    // No field should carry more than 2 decimal digits of precision.
+    for (const value of [result.ceiling, result.target, result.openingOffer]) {
+      expect(Math.round(value * 100) / 100).toBe(value);
+    }
+  });
 });

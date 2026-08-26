@@ -648,13 +648,19 @@ export function calculateNegotiationParams(
  * sit BELOW the ceiling (Myra wants to pay less, not more), with a small
  * concession band between opening offer and ceiling to negotiate within.
  *
+ * All three returned figures are rounded to 2 decimal places via
+ * roundCurrency() — the same treatment calculateNegotiationParams() gives its
+ * own returned figures — so a fractional-cent agreedShipperRate (or the
+ * inherent 0.95 multiplier on openingOffer) never leaks unrounded currency
+ * out of this module.
+ *
  * @param agreedShipperRate - The rate already agreed with the shipper
  * @param currency - "CAD" or "USD"
  * @returns CarrierNegotiationParams with ceiling, target, and openingOffer
  *
  * @example
  * calculateCarrierNegotiationParams(2400, 'CAD')
- * // Returns: { ceiling: 2130, target: 1930, openingOffer: 1834, currency: 'CAD' }
+ * // Returns: { ceiling: 2130, target: 1930, openingOffer: 1834.5, currency: 'CAD' }
  */
 export function calculateCarrierNegotiationParams(
   agreedShipperRate: number,
@@ -668,7 +674,12 @@ export function calculateCarrierNegotiationParams(
   // never above the ceiling.
   const openingOffer = Math.max(0, Math.min(target * 0.95, ceiling));
 
-  return { ceiling, target: Math.min(target, ceiling), openingOffer, currency };
+  return {
+    ceiling: roundCurrency(ceiling),
+    target: roundCurrency(Math.min(target, ceiling)),
+    openingOffer: roundCurrency(openingOffer),
+    currency,
+  };
 }
 
 /**
