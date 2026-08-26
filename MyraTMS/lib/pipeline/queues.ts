@@ -251,7 +251,7 @@ export const CARRIER_CALL_QUEUE_CONFIG: QueueConfig = {
   },
 };
 
-  /**
+/**
  * Queue 6: Dispatch Queue
  * Source: Voice Agent (Agent 6) → Target: Dispatcher (Agent 7)
  * Concurrency: 10 (TMS writes, lower to prevent conflicts)
@@ -442,7 +442,6 @@ export function getTotalConcurrency(): number {
 export function getConcurrency(queueName: string): number | undefined {
   return ALL_QUEUE_CONFIGS[queueName]?.concurrency;
 }
-
 
 
 
