@@ -31,6 +31,7 @@ import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { hourInZone } from '@/lib/pipeline/time';
+import { acquireCallSlot, releaseCallSlot } from '@/lib/pipeline/carrier-locks';
 import type {
   RetellCreatePhoneCallPayload,
   NegotiationBrief,
@@ -113,15 +114,30 @@ export class VoiceWorker extends BaseWorker<CallJobPayload> {
       return this.skipResult(pipelineLoadId, `compliance_block:${compliance.reason}`);
     }
 
-    const activeCalls = await this.countActiveCalls();
-    if (activeCalls >= maxConcurrent) {
+    // E2-03 M6: acquireCallSlot() replaces the old countActiveCalls()
+    // check-then-act race (COUNT(*) read, then a separate dial) with one
+    // atomic Redis operation -- two workers racing this at the same instant
+    // can no longer both observe "under cap" and both proceed.
+    const slotToken = await acquireCallSlot(maxConcurrent);
+    if (!slotToken) {
       logger.warn(
-        `[Voice] Concurrency cap reached (${activeCalls}/${maxConcurrent}); deferring load ${pipelineLoadId}`,
+        `[Voice] Concurrency cap reached (max=${maxConcurrent}); deferring load ${pipelineLoadId}`,
       );
       return this.skipResult(pipelineLoadId, 'concurrency_cap');
     }
 
-    const callId = await this.dialRetell(retellPayload);
+    let callId: string;
+    try {
+      callId = await this.dialRetell(retellPayload);
+    } catch (err) {
+      // Dial never went through -- release the slot now instead of holding
+      // it uselessly for the full TTL. A successful dial's slot is released
+      // by TTL expiry, not explicitly (see carrier-locks.ts's header note:
+      // the webhook that eventually learns the outcome runs in a separate
+      // request/process and never sees this token).
+      await releaseCallSlot(slotToken);
+      throw err;
+    }
 
     logger.info(
       `[Voice] Call initiated for load ${pipelineLoadId}. retell_call_id=${callId}, persona=${retellPayload.metadata.persona}, to=${masked}`,
@@ -184,18 +200,6 @@ export class VoiceWorker extends BaseWorker<CallJobPayload> {
     // Delegates to the shared lib/pipeline/time helper (single source of truth
     // shared with the Compiler's calling-hours gate).
     return hourInZone(timeZone, now);
-  }
-
-  /**
-   * How many calls are currently in 'calling' stage. We count pipeline_loads
-   * rather than agent_calls because the same load can have several agent_calls
-   * rows (retries) but only one at a time should be holding 'calling'.
-   */
-  private async countActiveCalls(): Promise<number> {
-    const r = await db.query<{ n: string }>(
-      `SELECT COUNT(*)::int AS n FROM pipeline_loads WHERE stage = 'calling'`,
-    );
-    return Number(r.rows[0]?.n ?? 0);
   }
 
   /**

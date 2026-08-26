@@ -26,6 +26,8 @@ import Redis from 'ioredis';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { updatePersonaStats } from '@/lib/pipeline/persona-selector';
+import { extractRegion } from '@/lib/matching/regions';
+import { getMyraTenantId } from '@/lib/tenants/get-myra-tenant-id';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 export interface FeedbackJobPayload extends BaseJobPayload {
@@ -41,6 +43,15 @@ interface FeedbackContext {
   shipperPhone: string | null;
   persona: string | null;
   callOutcome: 'booked' | 'declined' | 'callback' | 'no_answer';
+  // E2-03 M6: the REAL carrier that actually ran the load, read from the
+  // linked TMS loads row (loads.carrier_id) -- pipeline_loads.top_carrier_id
+  // is the Ranker's pre-cascade pick and can be stale, same class of bug
+  // fixed in dispatcher-worker.ts for the dispatch chain itself.
+  carrierRate: number | null;
+  originRegion: string | null;
+  destRegion: string | null;
+  equipmentType: string | null;
+  onTime: boolean | null;
 }
 
 export class FeedbackWorker extends BaseWorker<FeedbackJobPayload> {
@@ -87,6 +98,10 @@ export class FeedbackWorker extends BaseWorker<FeedbackJobPayload> {
     // (COUNT WHERE carrier_id=X AND status='Delivered'), so we don't
     // denormalize a counter on the carriers table here.
 
+    if (ctx.carrierId) {
+      await this.updateCarrierLane(ctx);
+    }
+
     const rateAccuracy =
       ctx.predictedMid > 0
         ? 1 - Math.abs(ctx.agreedRate - ctx.predictedMid) / ctx.predictedMid
@@ -127,11 +142,21 @@ export class FeedbackWorker extends BaseWorker<FeedbackJobPayload> {
       shipper_phone: string | null;
       persona: string | null;
       call_outcome: string | null;
+      delivered_at: Date | string | null;
+      delivery_date: Date | string | null;
+      tms_carrier_id: string | null;
+      tms_carrier_cost: string | null;
+      tms_origin: string | null;
+      tms_destination: string | null;
+      tms_equipment: string | null;
     }>(
       `SELECT pl.load_id, pl.agreed_rate, pl.market_rate_mid, pl.top_carrier_id,
-              pl.shipper_phone, pl.call_outcome,
+              pl.shipper_phone, pl.call_outcome, pl.delivered_at, pl.delivery_date,
+              l.carrier_id AS tms_carrier_id, l.carrier_cost AS tms_carrier_cost,
+              l.origin AS tms_origin, l.destination AS tms_destination, l.equipment AS tms_equipment,
               ac.persona
        FROM pipeline_loads pl
+       LEFT JOIN loads l ON l.id = pl.tms_load_id
        LEFT JOIN LATERAL (
          SELECT persona FROM agent_calls
          WHERE pipeline_load_id = pl.id
@@ -151,16 +176,89 @@ export class FeedbackWorker extends BaseWorker<FeedbackJobPayload> {
     const totalCost = Number(briefRow.rows[0]?.brief?.rates?.totalCost ?? 0);
 
     const outcome = (row.call_outcome ?? 'booked') as FeedbackContext['callOutcome'];
+
+    // E2-03 M6: on-time is delivered_at within the scheduled delivery date's
+    // grace window (through end of that calendar day) -- null when either
+    // timestamp is missing rather than guessing.
+    let onTime: boolean | null = null;
+    if (row.delivered_at && row.delivery_date) {
+      const delivered = new Date(row.delivered_at);
+      const scheduled = new Date(row.delivery_date);
+      scheduled.setHours(23, 59, 59, 999);
+      onTime = delivered.getTime() <= scheduled.getTime();
+    }
+
     return {
       loadId: pipelineLoadId,
       agreedRate: row.agreed_rate ? Number(row.agreed_rate) : 0,
       predictedMid: row.market_rate_mid ? Number(row.market_rate_mid) : 0,
       totalCost,
-      carrierId: row.top_carrier_id,
+      // Real carrier that ran the load, not the Ranker's pre-cascade pick.
+      carrierId: row.tms_carrier_id ?? row.top_carrier_id,
       shipperPhone: row.shipper_phone,
       persona: row.persona,
       callOutcome: outcome,
+      carrierRate: row.tms_carrier_cost ? Number(row.tms_carrier_cost) : null,
+      originRegion: row.tms_origin ? extractRegion(row.tms_origin) : null,
+      destRegion: row.tms_destination ? extractRegion(row.tms_destination) : null,
+      equipmentType: row.tms_equipment || null,
+      onTime,
     };
+  }
+
+  /**
+   * E2-03 M6: carrier_lanes.on_time_rate/avg_carrier_rate previously only
+   * updated via the manual, uncronned POST /api/matching/refresh-lanes
+   * endpoint. This mirrors that endpoint's upsert target (same unique key:
+   * carrier_id/origin_region/dest_region/equipment_type) but runs
+   * incrementally at the moment a load is actually scored, using the same
+   * running-average pattern upsertShipperPreferences() already uses in this
+   * file -- SET expressions read the pre-update row, so re-running on the
+   * same load isn't idempotent by itself (each call is one more delivered
+   * load), but a given load only ever reaches 'scored' once (base-worker's
+   * stage-mismatch guard on expectedStage='delivered' prevents replays).
+   */
+  private async updateCarrierLane(ctx: FeedbackContext): Promise<void> {
+    if (!ctx.carrierId || !ctx.originRegion || !ctx.destRegion) return;
+
+    // carrier_lanes' real unique index (post multi-tenant migration 028) is
+    // (tenant_id, carrier_id, origin_region, dest_region, equipment_type) --
+    // NOT the (carrier_id, origin_region, dest_region, equipment_type) its
+    // own 014-carrier-matching-engine.sql migration file still documents.
+    // The existing manual POST /api/matching/refresh-lanes endpoint uses the
+    // stale 4-column ON CONFLICT target and would 500 the moment it's
+    // actually exercised -- confirmed live against Neon while building this;
+    // that endpoint is pre-existing and out of this task's scope, left as a
+    // separate, flagged finding rather than fixed here.
+    const tenantId = await getMyraTenantId();
+    const id = `CL-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+    const equipment = ctx.equipmentType || 'Dry Van';
+    const onTimeValue = ctx.onTime === null ? null : ctx.onTime ? 1 : 0;
+
+    await db.query(
+      `INSERT INTO carrier_lanes (
+         id, tenant_id, carrier_id, origin_region, dest_region, equipment_type,
+         load_count, avg_carrier_rate, last_load_date, on_time_rate, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, CURRENT_DATE, $8, NOW())
+       ON CONFLICT (tenant_id, carrier_id, origin_region, dest_region, equipment_type)
+       DO UPDATE SET
+         load_count = carrier_lanes.load_count + 1,
+         avg_carrier_rate = CASE
+           WHEN $7 IS NOT NULL THEN
+             (COALESCE(carrier_lanes.avg_carrier_rate, 0) * carrier_lanes.load_count + $7)
+             / (carrier_lanes.load_count + 1)
+           ELSE carrier_lanes.avg_carrier_rate
+         END,
+         on_time_rate = CASE
+           WHEN $8 IS NOT NULL THEN
+             (COALESCE(carrier_lanes.on_time_rate, 0) * carrier_lanes.load_count + $8)
+             / (carrier_lanes.load_count + 1)
+           ELSE carrier_lanes.on_time_rate
+         END,
+         last_load_date = CURRENT_DATE,
+         updated_at = NOW()`,
+      [id, tenantId, ctx.carrierId, ctx.originRegion, ctx.destRegion, equipment, ctx.carrierRate, onTimeValue],
+    );
   }
 
   /**
