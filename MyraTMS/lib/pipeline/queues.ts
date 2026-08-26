@@ -288,6 +288,39 @@ export const SHIPPER_CONFIRMATION_QUEUE_CONFIG: QueueConfig = {
 };
 
 /**
+ * Queue 12: Carrier Brief Queue (E2-04 M3/M5)
+ * Source: lib/confirmation-actions.ts's submitConfirmation()/recordVerbalConfirmation()
+ *         → Target: carrier-brief-compiler-worker.ts (M5, not yet built)
+ * Concurrency: 20 (brief compilation, matches the shipper-side brief-queue)
+ * Built ahead of its own consumer, same as carrier-call-queue was in E2-03
+ * M2 -- the producer (a shipper confirming) has to exist and enqueue
+ * SOMEWHERE the moment M3 ships, even before M5's worker is there to drain
+ * it. Jobs queue harmlessly with zero consumer until M5 lands.
+ */
+export const CARRIER_BRIEF_QUEUE_CONFIG: QueueConfig = {
+  queueName: 'carrier-brief-queue',
+  description:
+    'Carrier Brief Compiler (E2-04 M5) — repackages a shipper-confirmed load into a carrier-facing negotiation brief',
+  concurrency: 20,
+  retryConfig: RETRY_BRIEF,
+  priority: true,
+  delayable: false,
+  defaultJobOptions: {
+    attempts: RETRY_BRIEF.attempts,
+    backoff: {
+      type: 'exponential',
+      delay: RETRY_BRIEF.initialDelayMs,
+    },
+    removeOnComplete: {
+      age: 3600,
+    },
+    removeOnFail: {
+      age: 86400,
+    },
+  },
+};
+
+/**
  * Queue 6: Dispatch Queue
  * Source: Voice Agent (Agent 6) → Target: Dispatcher (Agent 7)
  * Concurrency: 10 (TMS writes, lower to prevent conflicts)
@@ -412,6 +445,7 @@ export const ALL_QUEUE_CONFIGS: Record<string, QueueConfig> = {
   [ESCALATION_QUEUE_CONFIG.queueName]: ESCALATION_QUEUE_CONFIG,
   [CARRIER_CALL_QUEUE_CONFIG.queueName]: CARRIER_CALL_QUEUE_CONFIG,
   [SHIPPER_CONFIRMATION_QUEUE_CONFIG.queueName]: SHIPPER_CONFIRMATION_QUEUE_CONFIG,
+  [CARRIER_BRIEF_QUEUE_CONFIG.queueName]: CARRIER_BRIEF_QUEUE_CONFIG,
 };
 
 /**
@@ -442,6 +476,7 @@ export function getQueuesByOrder(): string[] {
     ESCALATION_QUEUE_CONFIG.queueName,
     CARRIER_CALL_QUEUE_CONFIG.queueName,
     SHIPPER_CONFIRMATION_QUEUE_CONFIG.queueName,
+    CARRIER_BRIEF_QUEUE_CONFIG.queueName,
   ];
 }
 
