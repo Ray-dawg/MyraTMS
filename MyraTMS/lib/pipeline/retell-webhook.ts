@@ -484,10 +484,12 @@ interface CarrierCallOutcome {
 
 function parseCarrierTranscript(transcript: string | undefined | null): CarrierCallOutcome {
   if (!transcript) return { outcome: 'decline', agreedRate: null };
-  // Lazy-skip (.*?) between "agreed to" and the first dollar amount so
-  // intervening words (e.g. "run the load at") don't defeat the match — the
-  // heuristic cares about "agreed to ... <amount>", not exact phrasing.
-  const acceptMatch = transcript.match(/agreed?\s+to\b.*?\$?(\d[\d,]*(?:\.\d+)?)/i);
+  // Bounded gap (up to 4 words) between "agreed to" and the dollar amount so
+  // short phrasing variants ("run the load at", "run it at") still match,
+  // but an unrelated number many words later — e.g. "agreed to think it
+  // over and get back to us at 1800 CAD tomorrow" — can't be reached by
+  // skipping across arbitrary intervening text (which an unbounded .*? did).
+  const acceptMatch = transcript.match(/agreed?\s+to(?:\s+\w+){0,4}\s+\$?(\d[\d,]*(?:\.\d+)?)/i);
   if (acceptMatch) {
     return { outcome: 'accept', agreedRate: Number(acceptMatch[1].replace(/,/g, '')) };
   }

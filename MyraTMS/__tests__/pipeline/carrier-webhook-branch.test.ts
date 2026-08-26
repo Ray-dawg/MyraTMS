@@ -168,4 +168,29 @@ describe('processCarrierCallCompleted (E2-03 M2 §6.7)', () => {
     expect(acRow.rows[0].carrier_outcome).toBe('escalated');
     expect(result.outcome).toBe('escalated');
   });
+
+  it('does not misclassify an aside containing an unrelated number as an accepted rate (regex false-positive guard)', async () => {
+    // Reviewer-flagged false positive: an unbounded lazy gap between "agreed
+    // to" and the first digit run would let this transcript's aside ("think
+    // it over and get back to us at") skip across nine words to reach "1800"
+    // and wrongly report outcome: 'accept', agreedRate: 1800 — even though
+    // the carrier explicitly did NOT agree to a rate here. The bounded
+    // (up to 4 words) gap must reject this and fall through to 'decline'.
+    const payload = mkPayload({
+      call_id: `carrier_call_4_${RUN_ID}`,
+      transcript: 'Carrier agreed to think it over and get back to us at 1800 CAD tomorrow.',
+    });
+    const metadata = mkMetadata({ retellCallId: `carrier_call_4_${RUN_ID}` });
+
+    const result = await processCarrierCallCompleted(payload, metadata);
+    expect(result.outcome).not.toBe('accept');
+    expect(result.outcome).toBe('decline');
+
+    const row = await db.query<{ carrier_outcome: string; carrier_agreed_rate: string | null }>(
+      `SELECT carrier_outcome, carrier_agreed_rate FROM agent_calls WHERE call_id = $1`,
+      [payload.call_id],
+    );
+    expect(row.rows[0].carrier_outcome).toBe('decline');
+    expect(row.rows[0].carrier_agreed_rate).toBeNull();
+  });
 });
