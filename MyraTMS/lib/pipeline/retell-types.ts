@@ -164,6 +164,9 @@ export interface CallResult {
     pain_points: string[];
   };
 
+  // E2-04 M0
+  shipper_email: string | null;
+
   analysis_notes: string;
 }
 
@@ -244,6 +247,9 @@ export interface PipelineLoadUpdate {
   auto_booked: boolean;
   booked_at: Date | null;
   tms_load_id: number | null;
+  // E2-04 M0 — raw, unvalidated. ShipperConfirmationWorker validates format
+  // before use; a bad/missing address there escalates rather than proceeding.
+  shipper_email?: string | null;
 }
 
 /**

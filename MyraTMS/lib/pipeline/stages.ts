@@ -38,6 +38,12 @@ export enum PipelineStage {
   /** Call succeeded, load booked */
   BOOKED = 'booked',
 
+  /** E2-04 M1: written confirmation requested from shipper, awaiting reply */
+  AWAITING_SHIPPER_CONFIRMATION = 'awaiting_shipper_confirmation',
+
+  /** E2-04 M1: shipper confirmed in writing, ready for carrier-side brief */
+  SHIPPER_CONFIRMED = 'shipper_confirmed',
+
   /** Call completed, shipper declined */
   DECLINED = 'declined',
 
@@ -68,7 +74,9 @@ export const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
   [PipelineStage.MATCHED]: [PipelineStage.BRIEFED, PipelineStage.ESCALATED],
   [PipelineStage.BRIEFED]: [PipelineStage.CALLING, PipelineStage.ESCALATED],
   [PipelineStage.CALLING]: [PipelineStage.BOOKED, PipelineStage.DECLINED, PipelineStage.CALLBACK, PipelineStage.ESCALATED, PipelineStage.EXPIRED],
-  [PipelineStage.BOOKED]: [PipelineStage.DISPATCHED, PipelineStage.ESCALATED],
+  [PipelineStage.BOOKED]: [PipelineStage.AWAITING_SHIPPER_CONFIRMATION, PipelineStage.DISPATCHED, PipelineStage.ESCALATED],
+  [PipelineStage.AWAITING_SHIPPER_CONFIRMATION]: [PipelineStage.SHIPPER_CONFIRMED, PipelineStage.ESCALATED, PipelineStage.EXPIRED],
+  [PipelineStage.SHIPPER_CONFIRMED]: [PipelineStage.DISPATCHED, PipelineStage.ESCALATED],
   [PipelineStage.DECLINED]: [PipelineStage.ESCALATED, PipelineStage.EXPIRED],
   [PipelineStage.ESCALATED]: [PipelineStage.BRIEFED, PipelineStage.CALLING, PipelineStage.EXPIRED],
   [PipelineStage.DISPATCHED]: [PipelineStage.DELIVERED, PipelineStage.ESCALATED],
@@ -79,7 +87,7 @@ export const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
 };
 
 export const TERMINAL_STAGES = new Set([PipelineStage.DISQUALIFIED, PipelineStage.SCORED, PipelineStage.EXPIRED]);
-export const ACTIVE_STAGES = new Set([PipelineStage.RESEARCHED, PipelineStage.MATCHED, PipelineStage.CALLING, PipelineStage.DISPATCHED]);
+export const ACTIVE_STAGES = new Set([PipelineStage.RESEARCHED, PipelineStage.MATCHED, PipelineStage.CALLING, PipelineStage.AWAITING_SHIPPER_CONFIRMATION, PipelineStage.SHIPPER_CONFIRMED, PipelineStage.DISPATCHED]);
 
 export function isValidTransition(fromStage: PipelineStage, toStage: PipelineStage): boolean {
   const allowed = VALID_TRANSITIONS[fromStage];
@@ -108,6 +116,8 @@ export function getStageName(stage: PipelineStage): string {
     [PipelineStage.BRIEFED]: 'Brief Compiled',
     [PipelineStage.CALLING]: 'Calling Shipper',
     [PipelineStage.BOOKED]: 'Booked',
+    [PipelineStage.AWAITING_SHIPPER_CONFIRMATION]: 'Awaiting Shipper Confirmation',
+    [PipelineStage.SHIPPER_CONFIRMED]: 'Shipper Confirmed',
     [PipelineStage.DECLINED]: 'Declined',
     [PipelineStage.ESCALATED]: 'Escalated',
     [PipelineStage.DISPATCHED]: 'Dispatched to TMS',

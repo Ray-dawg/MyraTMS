@@ -1,7 +1,19 @@
 import { withTenant } from "@/lib/db/tenant-context"
 import { del } from "@vercel/blob"
 
-const ALLOWED_DOC_TYPES = ["BOL", "POD", "Rate Confirmation", "Insurance", "Contract", "Invoice"] as const
+// E2-04 M1/M2/M3: shipper-side rate-con paper trail — the generated PDF we
+// send, and whatever the shipper mails back (their own copy, or the raw
+// inbound email body/attachment the IMAP poller matched to this load).
+const ALLOWED_DOC_TYPES = [
+  "BOL",
+  "POD",
+  "Rate Confirmation",
+  "Shipper Rate Confirmation",
+  "Shipper Rate Confirmation Reply",
+  "Insurance",
+  "Contract",
+  "Invoice",
+] as const
 type DocType = (typeof ALLOWED_DOC_TYPES)[number]
 
 interface AttachDocumentParams {

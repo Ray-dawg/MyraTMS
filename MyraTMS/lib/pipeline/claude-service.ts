@@ -216,6 +216,9 @@ const CallParseResultSchema = z.object({
     facility_notes: z.string().nullable(),
     pain_points: z.array(z.string()),
   }),
+  // E2-04 M0: captured only on the booking branch, read back to the
+  // shipper mid-call before close. Nullable -- not every call books.
+  shipper_email: z.string().nullable(),
   analysis_notes: z.string(),
 });
 
@@ -695,6 +698,7 @@ Return ONLY the JSON structure with these fields:
 - callback_details: {requested, day, time, timezone}
 - decision_maker_referral: {provided, name, phone, email}
 - shipper_intel: {weekly_volume, primary_lanes[], current_broker, facility_notes, pain_points[]}
+- shipper_email: email address the shipper gave for rate confirmation, only on booked calls, read back to confirm, or null
 - analysis_notes: one sentence summary`;
   }
 

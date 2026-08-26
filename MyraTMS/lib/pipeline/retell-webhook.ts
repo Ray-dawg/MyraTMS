@@ -1191,6 +1191,10 @@ function determinePipelineStage(result: CallResult): PipelineLoadUpdate {
     auto_booked: result.auto_book_eligible && result.outcome === 'booked',
     booked_at: result.outcome === 'booked' ? new Date() : null,
     tms_load_id: null,
+    // E2-04 M0 — raw pass-through, only meaningful on a booked outcome.
+    // Validation + the missing/malformed-email escalation happens in
+    // ShipperConfirmationWorker, not here, so that check lives in one place.
+    shipper_email: result.outcome === 'booked' ? result.shipper_email : null,
   };
 }
 
@@ -1254,6 +1258,10 @@ async function updatePipelineLoad(
   if (update.booked_at !== undefined) {
     fields.push(`booked_at = $${paramIndex++}`);
     values.push(update.booked_at);
+  }
+  if (update.shipper_email !== undefined) {
+    fields.push(`shipper_email = $${paramIndex++}`);
+    values.push(update.shipper_email);
   }
 
   if (fields.length === 0) {
