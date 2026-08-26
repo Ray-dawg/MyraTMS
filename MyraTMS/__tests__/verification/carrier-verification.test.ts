@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
 import { db } from '@/lib/pipeline/db-adapter';
 import { LEGACY_DEFAULT_TENANT_ID } from '@/lib/auth';
-import { verifyCarrierAuthority } from '@/lib/verification/carrier-verification';
+import { verifyCarrierAuthority, manuallyVerifyCarrier } from '@/lib/verification/carrier-verification';
 
 const RUN_ID = Date.now();
 
@@ -225,5 +225,36 @@ describe('verifyCarrierAuthority (E2-03 M4)', () => {
 
   it('throws for a nonexistent carrier id', async () => {
     await expect(verifyCarrierAuthority(`VERCAR-NOPE-${RUN_ID}`)).rejects.toThrow(/not found/);
+  });
+});
+
+describe('manuallyVerifyCarrier (E2-03 M4 human-confirmation path)', () => {
+  const seededIds: string[] = [];
+
+  afterAll(async () => {
+    if (seededIds.length) await db.query(`DELETE FROM carriers WHERE id = ANY($1)`, [seededIds]);
+  });
+
+  it('sets verified_at/verified_by/verification_snapshot without ever calling the lookup provider', async () => {
+    const id = `VERCAR-MANUAL-${RUN_ID}`;
+    seededIds.push(id);
+    await seedCarrier({ id, company: 'Small Local CVOR Carrier', mcNumber: '', dotNumber: '' });
+
+    await manuallyVerifyCarrier(id, { verifiedBy: 'user:42', notes: 'Confirmed via CVOR portal, not in FMCSA' });
+
+    const row = await db.query<{ verified_at: Date | null; verified_by: string | null; verification_snapshot: any }>(
+      `SELECT verified_at, verified_by, verification_snapshot FROM carriers WHERE id = $1`, [id],
+    );
+    expect(row.rows[0].verified_at).not.toBeNull();
+    expect(row.rows[0].verified_by).toBe('user:42');
+    expect(row.rows[0].verification_snapshot.manual).toBe(true);
+    expect(row.rows[0].verification_snapshot.notes).toBe('Confirmed via CVOR portal, not in FMCSA');
+    expect(row.rows[0].verification_snapshot.confirmedBy).toBe('user:42');
+  });
+
+  it('throws for a nonexistent carrier id', async () => {
+    await expect(
+      manuallyVerifyCarrier(`VERCAR-MANUAL-NOPE-${RUN_ID}`, { verifiedBy: 'user:1' }),
+    ).rejects.toThrow(/not found/);
   });
 });

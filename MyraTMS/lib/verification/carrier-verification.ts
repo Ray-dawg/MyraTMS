@@ -143,3 +143,28 @@ export async function verifyCarrierAuthority(
     snapshot: result,
   };
 }
+
+/**
+ * Human-confirmation path (PRD §8: "populated by the lookup or a human
+ * confirmation"). Bypasses the FMCSA/SAFER chain entirely for carriers the
+ * automated lookup can't resolve (e.g. small CVOR-only Canadian carriers).
+ * Callers (app/api/carriers/[id]/verify/route.ts) are responsible for
+ * auth/role checks and compliance_audit logging -- this function only owns
+ * the carriers row write.
+ */
+export async function manuallyVerifyCarrier(
+  carrierId: string,
+  opts: { verifiedBy: string; notes?: string | null },
+): Promise<void> {
+  const snapshot = { manual: true, notes: opts.notes ?? null, confirmedBy: opts.verifiedBy };
+  const r = await db.query(
+    `UPDATE carriers
+     SET verified_at = NOW(), verified_by = $2, verification_snapshot = $3
+     WHERE id = $1
+     RETURNING id`,
+    [carrierId, opts.verifiedBy, JSON.stringify(snapshot)],
+  );
+  if (r.rows.length === 0) {
+    throw new Error(`manuallyVerifyCarrier: carrier ${carrierId} not found`);
+  }
+}
