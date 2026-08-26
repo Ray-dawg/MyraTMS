@@ -235,11 +235,12 @@ export const CALL_QUEUE_CONFIG: QueueConfig = {
  */
 export const CARRIER_CALL_QUEUE_CONFIG: QueueConfig = {
   queueName: 'carrier-call-queue',
-  description: 'Dispatch One (E2-03 M2) via Retell AI — Makes outbound carrier calls, shadow-gated',
+  description:
+    'Dispatch One (E2-03 M2) via Retell AI — cascades outbound carrier calls through the ranked stack; shadow-gated by CARRIER_CALLS_ENABLED',
   concurrency: 5,
   retryConfig: RETRY_NO_RETRY,
   priority: true,
-  delayable: false,
+  delayable: true, // cascade-step re-enqueues use { delay } for the +2h voicemail retry (E2-03 M2 §6.3)
   defaultJobOptions: {
     attempts: RETRY_NO_RETRY.attempts,
     removeOnComplete: {
