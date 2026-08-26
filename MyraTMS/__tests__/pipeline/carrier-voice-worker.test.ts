@@ -3,9 +3,14 @@
  * this plan's scope — CARRIER_CALLS_ENABLED defaults false, so every test
  * here proves the cascade DECISION logic (which carrier, in what order, what
  * envelope) without ever making a real HTTP call to Retell. A local mock
- * server exists purely to prove zero requests reach it when shadow mode is
- * correctly enforced (matching E2-03 M0's dispatcher-carrier-confirmation-
- * gate.test.ts pattern).
+ * server exists purely as a low-cost regression guard: nothing in this
+ * worker's current implementation reads retellBaseUrl or makes an HTTP call
+ * at all (live dialing is unimplemented — see the throw in process()), so a
+ * requestCount of 0 here doesn't itself prove shadow-mode enforcement so much
+ * as prove no HTTP client code exists yet. It's still worth keeping: it WILL
+ * fail the moment someone wires up an actual dial without also gating it
+ * behind carrierCallsEnabled. The two dedicated tests below (shadow-mode
+ * default and live-mode throw) are what actually exercise the enforcement.
  *
  * NOTE on two fixes to the plan's original brief, applied here:
  *   1. The brief seeded match_results before carriers; match_results
@@ -44,7 +49,7 @@ describe('CarrierVoiceWorker — cascade (E2-03 M2 §6.8, shadow-only)', () => {
 
     mockServer = http.createServer((req, res) => {
       requestCount += 1;
-      res.writeHead(500).end('shadow mode should never reach Retell');
+      res.writeHead(500).end('unexpected request reached the mock Retell endpoint');
     });
     await new Promise<void>((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
     const addr = mockServer.address();
@@ -123,6 +128,48 @@ describe('CarrierVoiceWorker — cascade (E2-03 M2 §6.8, shadow-only)', () => {
     expect(result.details?.wouldCallCarrierId).toBe(CARRIERS[0]);
   }, 30_000);
 
+  it('defaults to shadow mode when CARRIER_CALLS_ENABLED is left completely unset (no explicit opt passed) — the actual production-protecting path', async () => {
+    // Every other test in this file passes `carrierCallsEnabled: false`
+    // explicitly, which never exercises the real default the kill switch
+    // relies on in production: the constructor falling back to
+    // `process.env.CARRIER_CALLS_ENABLED` when no opt is given at all. This
+    // test constructs the worker without the opt and with the env var
+    // deleted, so it's actually exercising that default.
+    const prevEnv = process.env.CARRIER_CALLS_ENABLED;
+    delete process.env.CARRIER_CALLS_ENABLED;
+    try {
+      const worker = new CarrierVoiceWorker(redisConnection, { retellBaseUrl: mockUrl });
+      const payload: CarrierCallCascadePayload = {
+        pipelineLoadId, loadId: TEST_LOAD_ID, loadBoardSource: 'DAT',
+        enqueuedAt: new Date().toISOString(), priority: 5,
+      };
+
+      const result = await worker.process(payload);
+      expect(requestCount).toBe(0);
+      expect(result.success).toBe(true);
+      expect(result.details?.shadowMode).toBe(true);
+    } finally {
+      if (prevEnv === undefined) delete process.env.CARRIER_CALLS_ENABLED;
+      else process.env.CARRIER_CALLS_ENABLED = prevEnv;
+    }
+  }, 30_000);
+
+  it('live mode (carrierCallsEnabled: true) throws — real dialing is not implemented in this build', async () => {
+    // This is the branch reached once CARRIER_CALLS_ENABLED is flipped true.
+    // It must throw, not silently no-op or partially dial — this test
+    // guards against a future edit that quietly removes the throw.
+    const worker = new CarrierVoiceWorker(redisConnection, { retellBaseUrl: mockUrl, carrierCallsEnabled: true });
+    const payload: CarrierCallCascadePayload = {
+      pipelineLoadId, loadId: TEST_LOAD_ID, loadBoardSource: 'DAT',
+      enqueuedAt: new Date().toISOString(), priority: 5,
+    };
+
+    await expect(worker.process(payload)).rejects.toThrow(
+      /CARRIER_CALLS_ENABLED=true but live dialing is not implemented/,
+    );
+    expect(requestCount).toBe(0);
+  }, 30_000);
+
   it('reads the top-N stack from match_results ordered by match_score DESC, default N=5', async () => {
     const worker = new CarrierVoiceWorker(redisConnection, { retellBaseUrl: mockUrl, carrierCallsEnabled: false });
     const payload: CarrierCallCascadePayload = {
@@ -169,7 +216,7 @@ describe('CarrierVoiceWorker — cascade (E2-03 M2 §6.8, shadow-only)', () => {
     }
   }, 30_000);
 
-  it('exhausts the stack and reports exhaustion when simulating all-decline in shadow mode', async () => {
+  it('reports a single-carrier cascade stack correctly (no artificial padding to the default depth)', async () => {
     // A load with only 1 ranked carrier — exercises the "would exhaust after
     // N" reporting path distinctly from the 5-deep default fixture above.
     const soloLoadId = `TEST-CASCADE-SOLO-${RUN_ID}`;
