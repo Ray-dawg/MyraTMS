@@ -47,6 +47,10 @@ const callbackQueue = new Queue('callback-queue', { connection: redis });
 const escalationQueue = new Queue('escalation-queue', { connection: redis });
 const retryQueue = new Queue('call-queue', { connection: redis });
 const carrierCallQueue = new Queue('carrier-call-queue', { connection: redis });
+// E2-04 M2: booking no longer enqueues dispatch-queue directly -- it goes
+// through shipper written-confirmation first. See enqueueNextAction()'s
+// 'booked' case below.
+const shipperConfirmationQueue = new Queue('shipper-confirmation-queue', { connection: redis });
 
 // ============================================================================
 // MAIN WEBHOOK HANDLER
@@ -1306,17 +1310,19 @@ async function enqueueNextAction(
   switch (outcome) {
     case 'booked':
       if (result.auto_book_eligible) {
-        const dispatchPayload: DispatchQueuePayload = {
+        // E2-04 M2: a booked, auto-book-eligible load no longer goes
+        // straight to dispatch-queue. It first needs written confirmation
+        // from the shipper -- ShipperConfirmationWorker's 'send' action
+        // handles the email/PDF/token, advances the stage, and self-
+        // schedules the nudge/escalate follow-ups. dispatch-queue is
+        // triggered later, once a carrier is secured (E2-04 M5/M6).
+        await shipperConfirmationQueue.add('send', {
           pipelineLoadId,
-          loadId: '', // Will be fetched from brief
-          agreedRate: result.final_rate || 0,
-          agreedRateCurrency: result.final_rate_currency || metadata.currency,
-          profit: result.profit || 0,
-          callId,
-          timestamp,
-        };
-        await dispatchQueue.add('dispatch', dispatchPayload, {
-          priority: Math.floor((result.profit || 0) / 100), // Higher profit = higher priority
+          loadId: '',
+          loadBoardSource: '',
+          enqueuedAt: timestamp,
+          priority: Math.floor((result.profit || 0) / 100),
+          action: 'send',
         });
       } else {
         // Below threshold — escalate

@@ -253,6 +253,41 @@ export const CARRIER_CALL_QUEUE_CONFIG: QueueConfig = {
 };
 
 /**
+ * Queue 11: Shipper Confirmation Queue (E2-04 M2)
+ * Source: retell-webhook.ts's enqueueNextAction() on 'booked' + auto_book_eligible
+ *         → Target: shipper-confirmation-worker.ts
+ * Concurrency: 10 (email send + PDF generation, moderate throughput)
+ * Job payload carries an `action: 'send'|'nudge'|'escalate'` discriminator —
+ * one queue, three self-re-enqueued job types, same pattern carrier-call-queue
+ * already uses for its voicemail retry. 'send' fires immediately when a load
+ * reaches 'booked'; 'nudge' and 'escalate' are scheduled via { delay } at
+ * +45min and +2h respectively, and both no-op cleanly if the shipper already
+ * confirmed (or the load moved on) by the time they fire.
+ */
+export const SHIPPER_CONFIRMATION_QUEUE_CONFIG: QueueConfig = {
+  queueName: 'shipper-confirmation-queue',
+  description:
+    "E2-04 M2 — sends the shipper written-confirmation request, then self-schedules a 45-min nudge and a 2h timeout escalation",
+  concurrency: 10,
+  retryConfig: RETRY_STANDARD,
+  priority: false,
+  delayable: true, // nudge (+45min) and escalate (+2h) both use { delay }
+  defaultJobOptions: {
+    attempts: RETRY_STANDARD.attempts,
+    backoff: {
+      type: 'exponential',
+      delay: RETRY_STANDARD.initialDelayMs,
+    },
+    removeOnComplete: {
+      age: 604800,
+    },
+    removeOnFail: {
+      age: 604800,
+    },
+  },
+};
+
+/**
  * Queue 6: Dispatch Queue
  * Source: Voice Agent (Agent 6) → Target: Dispatcher (Agent 7)
  * Concurrency: 10 (TMS writes, lower to prevent conflicts)
@@ -376,6 +411,7 @@ export const ALL_QUEUE_CONFIGS: Record<string, QueueConfig> = {
   [CALLBACK_QUEUE_CONFIG.queueName]: CALLBACK_QUEUE_CONFIG,
   [ESCALATION_QUEUE_CONFIG.queueName]: ESCALATION_QUEUE_CONFIG,
   [CARRIER_CALL_QUEUE_CONFIG.queueName]: CARRIER_CALL_QUEUE_CONFIG,
+  [SHIPPER_CONFIRMATION_QUEUE_CONFIG.queueName]: SHIPPER_CONFIRMATION_QUEUE_CONFIG,
 };
 
 /**
@@ -405,6 +441,7 @@ export function getQueuesByOrder(): string[] {
     CALLBACK_QUEUE_CONFIG.queueName,
     ESCALATION_QUEUE_CONFIG.queueName,
     CARRIER_CALL_QUEUE_CONFIG.queueName,
+    SHIPPER_CONFIRMATION_QUEUE_CONFIG.queueName,
   ];
 }
 
