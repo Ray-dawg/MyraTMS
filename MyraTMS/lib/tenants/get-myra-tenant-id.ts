@@ -12,5 +12,11 @@ export async function getMyraTenantId(): Promise<number> {
   if (r.rows.length === 0) {
     throw new Error(`getMyraTenantId: no tenants row with slug='myra'`);
   }
-  return r.rows[0].id;
+  // Neon's driver returns this INTEGER column as a JS string at runtime
+  // despite the declared `number` type here -- harmless everywhere this
+  // value only ever gets interpolated into a query param or template
+  // string, but a real bug against any strict runtime numeric check (e.g.
+  // withTenant()'s Number.isInteger() guard), confirmed via E2-04 M4's
+  // imap-poller.ts, the first caller to actually hit that combination.
+  return Number(r.rows[0].id);
 }
