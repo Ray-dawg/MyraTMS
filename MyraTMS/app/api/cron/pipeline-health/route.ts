@@ -4,21 +4,24 @@
  * Runs every 5 minutes. Three responsibilities:
  *   1. Advance pipeline_loads from 'dispatched' → 'delivered' when the linked
  *      TMS loads.status flips to 'Delivered' (driven by driver POD upload)
- *   2. Detect stuck loads — anything in non-terminal stage that hasn't moved
- *      in 60+ minutes — and log a warning so the operator can intervene
+ *   2. Health checks (E2-03 M5, see lib/pipeline/health-checks.ts):
+ *      stuck-load detection (now including 'dispatched', with its own 24h
+ *      threshold instead of being excluded entirely) and pre-dispatch
+ *      missed-pickup-window detection — both write visible exceptions rows
  *   3. Report queue depth for observability (BullMQ stats)
  *
  * Auth: Authorization: Bearer <CRON_SECRET>
  * Kill switch: PIPELINE_ENABLED
  *
  * No retries / heavy logic — failures are logged and return 200 so Vercel
- * doesn't disable the cron. Stuck-load alerting is a future Slack hook.
+ * doesn't disable the cron. Purely observational: writes exceptions rows,
+ * no automated remediation.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { advanceDeliveredLoads } from '@/lib/workers/dispatcher-worker';
+import { detectStuckPipelineLoads, detectMissedPickupWindows } from '@/lib/pipeline/health-checks';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -47,24 +50,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     logger.error('[cron:pipeline-health] advanceDeliveredLoads crash', err);
   }
 
-  let stuck: number = 0;
-  try {
-    const r = await db.query<{ stage: string; n: number }>(
-      `SELECT stage, COUNT(*)::int AS n
-       FROM pipeline_loads
-       WHERE stage NOT IN ('disqualified','scored','expired','delivered','dispatched')
-         AND stage_updated_at < NOW() - INTERVAL '60 minutes'
-       GROUP BY stage`,
-    );
-    stuck = r.rows.reduce((sum, x) => sum + Number(x.n), 0);
-    if (stuck > 0) {
-      logger.warn('[cron:pipeline-health] stuck loads detected', {
-        breakdown: r.rows,
-      });
-    }
-  } catch (err) {
-    logger.error('[cron:pipeline-health] stuck-load query crash', err);
-  }
+  const stuckResult = await detectStuckPipelineLoads();
+  const latePickupResult = await detectMissedPickupWindows();
 
-  return NextResponse.json({ ok: true, advanced, stuck });
+  return NextResponse.json({
+    ok: true,
+    advanced,
+    stuck: stuckResult.found,
+    stuckWritten: stuckResult.written,
+    latePickup: latePickupResult.found,
+    latePickupWritten: latePickupResult.written,
+  });
 }
