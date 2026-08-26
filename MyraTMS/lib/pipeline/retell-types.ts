@@ -255,6 +255,7 @@ export interface CallMetadata {
   recordingUrl: string | null;
   retellCallId: string;
   retellAgentId: string;
+  callType: 'outbound_shipper' | 'outbound_carrier';
 }
 
 // ============================================================================

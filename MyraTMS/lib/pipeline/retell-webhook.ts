@@ -118,7 +118,9 @@ export async function handleRetellWebhook(
     // Step 4: Route by call status
     let result: ProcessResult;
 
-    if (payload.call_status === 'completed') {
+    if (payload.call_status === 'completed' && metadata.callType === 'outbound_carrier') {
+      result = await processCarrierCallCompleted(payload, metadata);
+    } else if (payload.call_status === 'completed') {
       result = await processCallCompleted(payload, metadata);
     } else if (payload.call_status === 'failed') {
       result = await processCallFailed(payload, metadata);
@@ -458,6 +460,138 @@ export async function processCallCompleted(
   }
 }
 
+// ============================================================================
+// CARRIER CALL COMPLETION (E2-03 M2 §6.7)
+// ============================================================================
+//
+// Parallel to processCallCompleted() above, but for carrier calls. Writes to
+// agent_calls' carrier_* columns (Task 1's migration 042) and pipeline_loads'
+// carrier_* columns (E2-03 M0's migration 041) — never the shared agreed_rate/
+// profit/stage/outcome columns those functions own. Deliberately does not
+// call parseCall(), writeAgentCall(), updatePipelineLoad(), or
+// enqueueNextAction() — those are shipper-specific and stay untouched.
+//
+// Outcome/rate extraction here is a minimal heuristic, not Claude-based
+// transcript parsing — real carrier transcript understanding is out of scope
+// until M2 places real calls (a later session). This function's job for now
+// is proving the write-path is correct given a determined outcome, per PRD
+// §6.7's literal requirement.
+
+interface CarrierCallOutcome {
+  outcome: 'accept' | 'decline' | 'voicemail' | 'no_answer' | 'disconnected' | 'escalated';
+  agreedRate: number | null;
+}
+
+function parseCarrierTranscript(transcript: string | undefined | null): CarrierCallOutcome {
+  if (!transcript) return { outcome: 'decline', agreedRate: null };
+  // Lazy-skip (.*?) between "agreed to" and the first dollar amount so
+  // intervening words (e.g. "run the load at") don't defeat the match — the
+  // heuristic cares about "agreed to ... <amount>", not exact phrasing.
+  const acceptMatch = transcript.match(/agreed?\s+to\b.*?\$?(\d[\d,]*(?:\.\d+)?)/i);
+  if (acceptMatch) {
+    return { outcome: 'accept', agreedRate: Number(acceptMatch[1].replace(/,/g, '')) };
+  }
+  return { outcome: 'decline', agreedRate: null };
+}
+
+export async function processCarrierCallCompleted(
+  payload: RetellWebhookPayload,
+  metadata: CallMetadata,
+): Promise<ProcessResult> {
+  const { pipelineLoadId } = metadata;
+
+  try {
+    const parsed = parseCarrierTranscript((payload as any).transcript);
+
+    // Envelope enforcement (PRD §6.3/§6.5): an accepted rate above the
+    // ceiling is never booked, it's escalated — the same fail-closed
+    // posture as every other gate in this arc. Ceiling is computed from the
+    // shipper's already-agreed rate (pipeline_loads.agreed_rate), never from
+    // the carrier's own ask.
+    let finalOutcome: CarrierCallOutcome['outcome'] = parsed.outcome;
+    let carrierProfit: number | null = null;
+
+    if (parsed.outcome === 'accept' && parsed.agreedRate !== null) {
+      const loadRow = await db.query<{ agreed_rate: string | null; agreed_rate_currency: string | null }>(
+        `SELECT agreed_rate, agreed_rate_currency FROM pipeline_loads WHERE id = $1`,
+        [pipelineLoadId],
+      );
+      const agreedShipperRate = Number(loadRow.rows[0]?.agreed_rate ?? 0);
+      const currency = (loadRow.rows[0]?.agreed_rate_currency as 'CAD' | 'USD') ?? 'CAD';
+
+      const { calculateCarrierNegotiationParams } = await import('./cost-calculator');
+      const envelope = calculateCarrierNegotiationParams(agreedShipperRate, currency);
+
+      if (parsed.agreedRate > envelope.ceiling) {
+        finalOutcome = 'escalated';
+      } else {
+        carrierProfit = agreedShipperRate - parsed.agreedRate;
+      }
+    }
+
+    await db.query(
+      `INSERT INTO agent_calls (
+         pipeline_load_id, call_id, call_type, persona, language, currency,
+         retell_call_id, retell_agent_id, phone_number_called,
+         call_initiated_at, call_ended_at, duration_seconds,
+         carrier_outcome, carrier_agreed_rate, carrier_profit, created_at
+       ) VALUES (
+         $1, $2, 'outbound_carrier', $3, $4, $5,
+         $6, $7, $8,
+         $9, NOW(), $10,
+         $11, $12, $13, NOW()
+       )`,
+      [
+        pipelineLoadId, payload.call_id, metadata.persona, metadata.language, metadata.currency,
+        metadata.retellCallId, metadata.retellAgentId, metadata.toNumber,
+        metadata.startTime, metadata.durationSeconds,
+        finalOutcome, finalOutcome === 'accept' ? parsed.agreedRate : null,
+        finalOutcome === 'accept' ? carrierProfit : null,
+      ],
+    );
+
+    await db.query(
+      `UPDATE pipeline_loads
+       SET carrier_call_outcome = $2,
+           carrier_agreed_rate = $3,
+           carrier_agreed_currency = $4,
+           carrier_profit = $5,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [
+        pipelineLoadId, finalOutcome,
+        finalOutcome === 'accept' ? parsed.agreedRate : null,
+        finalOutcome === 'accept' ? metadata.currency : null,
+        finalOutcome === 'accept' ? carrierProfit : null,
+      ],
+    );
+
+    return {
+      success: true,
+      pipelineLoadId,
+      callId: payload.call_id,
+      outcome: finalOutcome,
+      nextAction: finalOutcome === 'accept' ? 'send_confirmation' : finalOutcome === 'escalated' ? 'escalate_human' : 'no_action',
+      details: { carrierOutcome: finalOutcome, carrierAgreedRate: finalOutcome === 'accept' ? parsed.agreedRate : null },
+      timestamp: new Date(),
+    };
+  } catch (error) {
+    console.error('[WEBHOOK] Error processing completed carrier call:', {
+      callId: payload.call_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      success: false,
+      pipelineLoadId,
+      callId: payload.call_id,
+      outcome: 'error',
+      nextAction: 'escalate_human',
+      error: error instanceof Error ? error.message : String(error),
+      timestamp: new Date(),
+    };
+  }
+}
+
 /**
  * Process a failed call (network error, Retell error, etc.)
  *
@@ -637,6 +771,10 @@ export function extractCallMetadata(
     recordingUrl: payload.recording_url,
     retellCallId: payload.call_id,
     retellAgentId: payload.agent_id,
+    // E2-03 M2: absent on every existing shipper call (voice-worker.ts never
+    // sets it), so this default preserves that path exactly. carrier-voice-
+    // worker.ts (Task 5) sets it explicitly when it dials.
+    callType: (payload.metadata as any).callType ?? 'outbound_shipper',
   };
 }
 
