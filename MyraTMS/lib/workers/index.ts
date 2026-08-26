@@ -38,6 +38,19 @@ export { DispatcherWorker } from './dispatcher-worker';
 // ─── Feedback Loop ───────────────────────────────────────────────────────────
 export { FeedbackWorker } from './feedback-worker';
 
+// ─── E2-04: Shipper Confirmation / Carrier Brief Compiler / Carrier Voice ────
+// NOTE: named exports only, deliberately not wired into startAllWorkers()
+// below -- that function's single-`deps`-arg signature has never matched any
+// real worker constructor (each existing worker below takes its own
+// distinct args: redis + one or more downstream Queue instances), and this
+// file is @ts-nocheck'd, so nothing catches that drift. scripts/run-workers.ts
+// is the actual boot path; it constructs every worker (including these 3)
+// with its real signature directly. Not fixed here -- out of scope for
+// E2-04, and startAllWorkers() was already unusable before this PRD.
+export { ShipperConfirmationWorker } from './shipper-confirmation-worker';
+export { CarrierBriefCompilerWorker } from './carrier-brief-compiler-worker';
+export { CarrierVoiceWorker } from './carrier-voice-worker';
+
 // ─── Convenience: register all workers in one call ───────────────────────────
 import { QualifierWorker } from './qualifier-worker';
 import { ResearcherWorker } from './researcher-worker';

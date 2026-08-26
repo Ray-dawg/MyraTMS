@@ -14,9 +14,18 @@
  * in-flight jobs can finish before the host kills the process.
  *
  * Kill switches honored:
- *   PIPELINE_ENABLED=false   → all workers stay paused (no jobs processed)
- *   SCANNER_ENABLED=false    → scanner cron heartbeat stays a noop
- *   MAX_CONCURRENT_CALLS=0   → Voice worker enters shadow mode (per worker)
+ *   PIPELINE_ENABLED=false     → all workers stay paused (no jobs processed)
+ *   SCANNER_ENABLED=false      → scanner cron heartbeat stays a noop
+ *   MAX_CONCURRENT_CALLS=0     → Voice worker enters shadow mode (per worker)
+ *   CARRIER_CALLS_ENABLED      → CarrierVoiceWorker's own shadow-mode gate
+ *                                (E2-03 M2/M6, still defaults false)
+ *
+ * E2-04: this host now also boots ShipperConfirmationWorker,
+ * CarrierBriefCompilerWorker, and CarrierVoiceWorker -- previously the
+ * carrier-call-queue consumer (CarrierVoiceWorker) had existed in
+ * lib/workers/ since E2-03 M2 without this file ever constructing it, and
+ * nothing anywhere enqueued that queue's first job until E2-04 M5's
+ * CarrierBriefCompilerWorker. Both gaps are closed here.
  */
 
 import { Queue } from 'bullmq';
@@ -40,6 +49,14 @@ import { CompilerWorker } from '../lib/workers/compiler-worker';
 import { VoiceWorker } from '../lib/workers/voice-worker';
 import { DispatcherWorker } from '../lib/workers/dispatcher-worker';
 import { FeedbackWorker } from '../lib/workers/feedback-worker';
+// E2-04 M2/M5, E2-03 M2 — previously never booted here. carrier-call-queue
+// has had a real consumer (CarrierVoiceWorker) sitting in lib/workers/ since
+// E2-03 M2, and a real producer (CarrierBriefCompilerWorker) since E2-04 M5,
+// but this host never constructed either one — confirmed via this session's
+// own architecture audit, the exact gap the E2-04 PRD exists to close.
+import { ShipperConfirmationWorker } from '../lib/workers/shipper-confirmation-worker';
+import { CarrierBriefCompilerWorker } from '../lib/workers/carrier-brief-compiler-worker';
+import { CarrierVoiceWorker } from '../lib/workers/carrier-voice-worker';
 
 interface WorkerEntry {
   name: string;
@@ -56,6 +73,11 @@ async function main() {
   const matchQ = new Queue('match-queue', { connection: redisConnection });
   const briefQ = new Queue('brief-queue', { connection: redisConnection });
   const callQ = new Queue('call-queue', { connection: redisConnection });
+  // E2-04: ShipperConfirmationWorker re-enqueues its own queue for the
+  // nudge/escalate self-schedule; CarrierBriefCompilerWorker's whole reason
+  // for existing is the enqueue onto carrierCallQ below.
+  const shipperConfirmationQ = new Queue('shipper-confirmation-queue', { connection: redisConnection });
+  const carrierCallQ = new Queue('carrier-call-queue', { connection: redisConnection });
 
   // Construct workers. Each one starts listening on its queue immediately;
   // PIPELINE_ENABLED gating happens inside the workers' process() methods,
@@ -84,6 +106,15 @@ async function main() {
   const feedback = new FeedbackWorker(redisConnection);
   workers.push({ name: 'feedback', shutdown: () => feedback.shutdown() });
 
+  const shipperConfirmation = new ShipperConfirmationWorker(redisConnection, shipperConfirmationQ);
+  workers.push({ name: 'shipper-confirmation', shutdown: () => shipperConfirmation.shutdown() });
+
+  const carrierBriefCompiler = new CarrierBriefCompilerWorker(redisConnection, carrierCallQ);
+  workers.push({ name: 'carrier-brief-compiler', shutdown: () => carrierBriefCompiler.shutdown() });
+
+  const carrierVoice = new CarrierVoiceWorker(redisConnection);
+  workers.push({ name: 'carrier-voice', shutdown: () => carrierVoice.shutdown() });
+
   logger.info(`[worker-host] ${workers.length} workers running: ${workers.map((w) => w.name).join(', ')}`);
   logger.info('[worker-host] Kill switches: ' + JSON.stringify({
     PIPELINE_ENABLED: process.env.PIPELINE_ENABLED ?? 'false',
@@ -111,6 +142,8 @@ async function main() {
         matchQ.close(),
         briefQ.close(),
         callQ.close(),
+        shipperConfirmationQ.close(),
+        carrierCallQ.close(),
       ]);
       logger.info('[worker-host] Shutdown complete');
       process.exit(0);
