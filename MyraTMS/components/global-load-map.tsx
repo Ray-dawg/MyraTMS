@@ -9,7 +9,12 @@ import { MapSidebar, type MapLoad, type MapFilters, type MapSummary } from "@/co
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || ""
 
-const ALL_STATUSES = ["Booked", "Dispatched", "In Transit", "Delivered", "Invoiced"]
+// F5 (closes V5): 'Awaiting Signature' (E2-04 M6) added -- it was
+// missing from the default filter set's own length check, so no filter
+// was ever silently hiding these loads (the check only activates once
+// the selection is narrower than the full list), but there was no
+// sidebar checkbox for it either.
+const ALL_STATUSES = ["Booked", "Awaiting Signature", "Dispatched", "In Transit", "Delivered", "Invoiced"]
 
 function buildGeoJSON(loads: MapLoad[], filters: MapFilters): GeoJSON.FeatureCollection {
   let filtered = loads

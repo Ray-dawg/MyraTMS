@@ -117,7 +117,10 @@ export default function IntelligencePage() {
   })), [rawShippers])
 
   // Computed metrics
-  const activeLoads = loads.filter((l: any) => ["Booked", "Dispatched", "In Transit"].includes(l.status))
+  // F5 (closes V5): 'Awaiting Signature' (E2-04 M6) added -- these
+  // loads are just as active as a freshly-booked one, and were being
+  // undercounted here.
+  const activeLoads = loads.filter((l: any) => ["Booked", "Awaiting Signature", "Dispatched", "In Transit"].includes(l.status))
   const atRiskLoads = loads.filter((l: any) => l.riskFlag)
   const atRiskRevenue = atRiskLoads.reduce((sum: number, l: any) => sum + l.revenue, 0)
   const totalRevenue = loads.reduce((sum: number, l: any) => sum + l.revenue, 0)

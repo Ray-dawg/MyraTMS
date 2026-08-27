@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
     const [loads, alerts, carriers] = await Promise.all([
       client.query(
         `SELECT id, origin, destination, shipper_name, carrier_name, status, margin_percent, risk_flag
-           FROM loads WHERE status IN ('Booked','Dispatched','In Transit') LIMIT 20`,
+           FROM loads WHERE status IN ('Booked','Awaiting Signature','Dispatched','In Transit') LIMIT 20`,
       ),
       client.query(
         `SELECT * FROM compliance_alerts WHERE resolved = false ORDER BY detected_at DESC LIMIT 10`,

@@ -54,8 +54,12 @@ import { toast } from "sonner"
 import { useWorkspace } from "@/lib/workspace-context"
 import { useLoads, useShippers, useCarriers, createLoad } from "@/lib/api"
 
+// F5 (closes V5): 'Awaiting Signature' (E2-04 M6) was missing here --
+// an operator could never explicitly filter this list down to it, even
+// though the default "all" view already showed these loads mixed in.
 const statusFilters: LoadStatus[] = [
   "Booked",
+  "Awaiting Signature",
   "Dispatched",
   "In Transit",
   "Delivered",

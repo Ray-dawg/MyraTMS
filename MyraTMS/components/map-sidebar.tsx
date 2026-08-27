@@ -55,8 +55,12 @@ export interface MapLoad {
   last_ping_at: string | null
 }
 
+// F5 (closes V5): 'Awaiting Signature' (E2-04 M6) added -- previously
+// missing, so a selected load in this status had no sidebar color (STATUS_CONFIG.find()
+// returned undefined) and there was no checkbox to filter by it.
 const STATUS_CONFIG = [
   { value: "Booked", label: "Booked", color: "#9E9E9E" },
+  { value: "Awaiting Signature", label: "Awaiting Signature", color: "#F9A825" },
   { value: "Dispatched", label: "Dispatched", color: "#FF9800" },
   { value: "In Transit", label: "In Transit", color: "#4CAF50" },
   { value: "Delivered", label: "Delivered", color: "#2E7D32" },
