@@ -9,8 +9,16 @@
 // presence of the same key facts, not byte-equality, since wording is
 // allowed to differ as long as the underlying numbers/decisions match.
 //
-// Note: Full run requires expensive pricing-engine API calls for every brief.
-// Set MAX_SAMPLE_SIZE to control scope; comment out or set to 0 to run all.
+// IMPORTANT NOTE ON TIMEOUTS: Each compileEnvelope() call invokes the full
+// Pricing Engine rate cascade, which includes external API calls (Claude,
+// benchmarking services, distance/region lookups). Observed latency: 30-50s
+// per call. The withTimeout() function uses Promise.race(), which stops
+// waiting for the result but does NOT cancel the underlying operation —
+// compileEnvelope() and its DB writes via quotePricing() will continue
+// running in the background even after timeout fires. This can result in
+// audit rows being written minutes after the harness reports them as
+// "timed out". The process does not hang waiting for these orphaned promises
+// because we do not await anything after main() completes.
 //
 // Usage: DATABASE_URL=<branch or prod URL> pnpm tsx --env-file=.env.local scripts/t22_shadow_parity_sell.ts
 
@@ -20,7 +28,7 @@ import { getMyraTenantId } from '../lib/tenants/get-myra-tenant-id';
 
 const REQUIRED_VOLUME = 30;
 const TOLERANCE = 0.01;
-const CALL_TIMEOUT_MS = 20000; // 20 seconds per compileEnvelope call
+const CALL_TIMEOUT_MS = 90000; // 90 seconds — accounts for 30-50s observed latency in pricing engine + buffer
 const MAX_SAMPLE_SIZE = 0; // 0 = unlimited; set to N to run first N briefs
 
 interface BriefRow {
@@ -71,9 +79,6 @@ async function main(): Promise<void> {
       );
     } catch (err) {
       callErrors++;
-      // For this ops script running against real services, API timeouts/failures
-      // are expected when load conditions are high. Record but don't treat as
-      // a parity failure -- the parity check requires successful calls.
       mismatchDetails.push(
         `load ${row.pipeline_load_id}: compileEnvelope unavailable (${err instanceof Error ? err.message : String(err)})`
       );
@@ -89,10 +94,6 @@ async function main(): Promise<void> {
       ['counterparty.phone (vs shipper.phone)', fresh.counterparty.phone === original.shipper?.phone],
       ['strategy.approach', fresh.strategy.approach === original.strategy?.approach],
     ];
-    // Pricing numbers are compared with tolerance -- both paths call the
-    // same quotePricing()/rate cascade, but it hits the same
-    // non-deterministic external sources T-21's own Tier B already
-    // documents, so exact-equality here would be the wrong bar.
     checks.push(['pricing.openingOffer', closeEnough(fresh.pricing.openingOffer, original.negotiation?.initialOffer ?? -1)]);
     checks.push(['pricing.finalOffer', closeEnough(fresh.pricing.finalOffer, original.negotiation?.finalOffer ?? -1)]);
 
@@ -131,12 +132,12 @@ async function main(): Promise<void> {
   if (compared === 0) {
     console.log(
       '\nRESULT: No successful comparisons possible. ' +
-      (callErrors > 0 ? 'All calls failed (external service timeout/unavailable).' : 'No calls attempted.')
+      (callErrors > 0 ? 'All calls failed (timeout or service unavailable).' : 'No calls attempted.')
     );
   } else if (mismatches === 0) {
     console.log(`\nRESULT: ${compared === 1 ? '1 brief' : `${compared} briefs`} matched 100%`);
   } else {
-    console.log(`\nRESULT: FAILED -- ${mismatches} mismatches found, investigate above, do not average away`);
+    console.log(`\nRESULT: FAILED — ${mismatches} mismatches found, investigate above, do not average away`);
   }
 
   if (rows.length < REQUIRED_VOLUME) {
