@@ -259,8 +259,12 @@ function getCurrency(originCountry: string): string {
  * Get margin thresholds for a given currency
  * @param currency - "CAD" or "USD"
  * @returns Object with floor, target, stretch margins
+ *
+ * Exported for T-21 (Pricing Engine) — resolveMargin()'s Myra-default path
+ * reuses this directly instead of re-hardcoding the same 270/470/675 and
+ * 200/350/500 constants a second time.
  */
-function getMarginThresholds(currency: string): {
+export function getMarginThresholds(currency: string): {
   floor: number;
   target: number;
   stretch: number;
@@ -725,5 +729,6 @@ export default {
   estimateMargin,
   calculateNegotiationParams,
   calculateCarrierNegotiationParams,
+  getMarginThresholds,
   estimateSimpleCost,
 };

@@ -109,6 +109,9 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'claude-opus-4-1-20250805': { input: 0.015, output: 0.045 },
   'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
   'claude-3-5-haiku-20241022': { input: 0.0008, output: 0.004 },
+  // Sonnet pricing tier carried forward unchanged across generations in this table's
+  // convention (3.5 -> 4 -> 5 all priced the same by Anthropic) -- not independently verified.
+  'claude-sonnet-5': { input: 0.003, output: 0.015 },
 };
 
 // ===== Zod Schemas for Structured Output =====
@@ -304,7 +307,7 @@ export class ClaudeService {
     this.config = {
       baseUrl: config?.baseUrl || 'https://api.anthropic.com',
       apiKey,
-      model: config?.model || 'claude-sonnet-4-20250514',
+      model: config?.model || 'claude-sonnet-5',
       maxTokens: config?.maxTokens || 2000,
     };
 
@@ -524,7 +527,7 @@ export class ClaudeService {
     model?: string,
   ): TokenCostEstimate {
     const modelToUse = model || this.config.model;
-    const pricing = MODEL_PRICING[modelToUse] || MODEL_PRICING['claude-sonnet-4-20250514'];
+    const pricing = MODEL_PRICING[modelToUse] || MODEL_PRICING['claude-sonnet-5'];
 
     const costUSD = (inputTokens * pricing.input + outputTokens * pricing.output) / 1000000;
 

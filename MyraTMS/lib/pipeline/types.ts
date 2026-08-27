@@ -10,7 +10,7 @@ export interface ClaudeConfig {
   baseUrl?: string;
   /** API key (defaults to ANTHROPIC_API_KEY env var) */
   apiKey?: string;
-  /** Model to use (default: claude-sonnet-4-20250514) */
+  /** Model to use (default: claude-sonnet-5) */
   model?: string;
   /** Max tokens per request (default: 2000) */
   maxTokens?: number;
