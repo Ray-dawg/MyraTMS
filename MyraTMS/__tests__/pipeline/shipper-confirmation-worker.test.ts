@@ -141,7 +141,7 @@ describe('ShipperConfirmationWorker (E2-04 M2)', () => {
     const result = await worker.process(jobPayload(id, 'send'));
 
     expect(result.details?.escalated).toBe(true);
-    expect(result.details?.reason).toBe('no_shipper_email');
+    expect(result.details?.reason).toBe('shipper_email_missing');
 
     const row = await db.query<{ stage: string; confirmation_outcome: string | null }>(
       `SELECT stage, confirmation_outcome FROM pipeline_loads WHERE id = $1`,
@@ -152,7 +152,29 @@ describe('ShipperConfirmationWorker (E2-04 M2)', () => {
 
     const exc = await db.query<{ type: string }>(`SELECT type FROM exceptions WHERE pipeline_load_id = $1`, [id]);
     expect(exc.rows).toHaveLength(1);
-    expect(exc.rows[0].type).toBe('shipper_confirmation_no_email');
+    expect(exc.rows[0].type).toBe('shipper_email_missing');
+  }, 15_000);
+
+  it('send: malformed shipper_email (e.g. a hallucinated non-email string) — escalates the same as missing, never attempts a send (F3, closes V3)', async () => {
+    const id = await seedPipelineLoad({ stage: 'booked', shipperEmail: 'not provided' });
+
+    const result = await worker.process(jobPayload(id, 'send'));
+
+    expect(result.details?.escalated).toBe(true);
+    expect(result.details?.reason).toBe('shipper_email_missing');
+    expect(mockSendEmail).not.toHaveBeenCalled();
+
+    const row = await db.query<{ stage: string; confirmation_outcome: string | null }>(
+      `SELECT stage, confirmation_outcome FROM pipeline_loads WHERE id = $1`,
+      [id],
+    );
+    expect(row.rows[0].stage).toBe('escalated');
+    expect(row.rows[0].confirmation_outcome).toBe('no_email');
+
+    const exc = await db.query<{ type: string; detail: string }>(`SELECT type, detail FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(1);
+    expect(exc.rows[0].type).toBe('shipper_email_missing');
+    expect(exc.rows[0].detail).toContain('not provided');
   }, 15_000);
 
   it('nudge: still awaiting confirmation and not yet nudged — sends reminder, sets confirmation_nudged_at', async () => {

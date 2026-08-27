@@ -69,6 +69,19 @@ const NUDGE_DELAY_MS = 45 * 60 * 1000; // 45 minutes
 const ESCALATE_DELAY_MS = 2 * 60 * 60 * 1000; // 2 hours
 const TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// F3 (closes V3): the call-parser's Zod schema (claude-service.ts) declares
+// shipper_email as z.string().nullable() with no .email() format check --
+// null/empty were already handled by a truthiness check, but a hallucinated
+// or malformed non-empty string (e.g. Claude mis-extracting a phone number,
+// or literally returning "not provided") would previously pass straight
+// through and this worker would attempt to generate a PDF and email a
+// garbage address. Deliberately simple (no full RFC 5322 parsing) -- this
+// only needs to catch "clearly not an email," not validate deliverability.
+const EMAIL_FORMAT_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidEmail(value: string | null): value is string {
+  return !!value && EMAIL_FORMAT_RE.test(value.trim());
+}
+
 interface PipelineLoadRow {
   id: number;
   load_id: string;
@@ -184,9 +197,9 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
       return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'shipper_confirmation_disabled' } };
     }
 
-    if (!load.shipper_email) {
+    if (!isValidEmail(load.shipper_email)) {
       await this.escalateMissingEmail(load);
-      return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'no_shipper_email' } };
+      return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'shipper_email_missing' } };
     }
 
     const token = crypto.randomBytes(32).toString('hex');
@@ -284,8 +297,8 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
     if (load.confirmation_nudged_at) {
       return { success: true, pipelineLoadId: load.id, stage: load.stage, duration: 0, details: { skipped: 'already_nudged' } };
     }
-    if (!load.shipper_email) {
-      return { success: true, pipelineLoadId: load.id, stage: load.stage, duration: 0, details: { skipped: 'no_shipper_email' } };
+    if (!isValidEmail(load.shipper_email)) {
+      return { success: true, pipelineLoadId: load.id, stage: load.stage, duration: 0, details: { skipped: 'shipper_email_missing' } };
     }
 
     const row = await db.query<{ confirmation_token: string | null }>(
@@ -361,23 +374,25 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
       [load.id],
     );
 
-    const title = `No shipper email on file: ${load.origin_city}, ${load.origin_state} → ${load.destination_city}, ${load.destination_state}`;
-    const detail =
-      `Load ${load.load_id} booked but the call parser did not capture a shipper email, so no written ` +
-      `confirmation request could be sent. Contact the shipper directly to collect an email or a verbal confirmation.`;
+    const title = `Shipper email missing or invalid: ${load.origin_city}, ${load.origin_state} → ${load.destination_city}, ${load.destination_state}`;
+    const detail = load.shipper_email
+      ? `Load ${load.load_id} booked, but the value the call parser captured for shipper_email ("${load.shipper_email}") ` +
+        `doesn't look like a valid email address, so no written confirmation request was sent. Contact the shipper directly to collect a valid email or a verbal confirmation.`
+      : `Load ${load.load_id} booked but the call parser did not capture a shipper email, so no written ` +
+        `confirmation request could be sent. Contact the shipper directly to collect an email or a verbal confirmation.`;
 
     await db.query(
       `INSERT INTO exceptions (
          load_id, carrier_id, type, severity, title, detail,
          pipeline_load_id, source_module, suggested_action, sla_due_at
        ) VALUES (
-         NULL, NULL, 'shipper_confirmation_no_email', 'high', $1, $2,
-         $3, 'shipper_confirmation_no_email', $4, NOW() + INTERVAL '1 hour'
+         NULL, NULL, 'shipper_email_missing', 'high', $1, $2,
+         $3, 'shipper_email_missing', $4, NOW() + INTERVAL '1 hour'
        )`,
-      [title, detail, load.id, 'Call the shipper back to collect an email address, or confirm verbally and record it.'],
+      [title, detail, load.id, 'Call the shipper back to collect a valid email address, or confirm verbally and record it.'],
     );
 
-    logger.warn(`[ShipperConfirmation] Load ${load.id} escalated: no shipper_email captured on the booking call`);
+    logger.warn(`[ShipperConfirmation] Load ${load.id} escalated: shipper_email missing or invalid ('${load.shipper_email ?? 'null'}')`);
   }
 
   // F2 (closes V2): the feature is off (SHIPPER_CONFIRMATION_ENABLED=false --
