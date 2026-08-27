@@ -15,6 +15,7 @@ describe('profileCarrier', () => {
     expect(profile.myraCarrierScore).toBeNull();
     expect(profile.counterpartyType).toBe('carrier');
     expect(profile.mcNumber).toBe('MC123');
+    expect(profile.isRepeat).toBe(false);
   });
 
   it('returns myraCarrierScore as a number when a real score exists', async () => {
@@ -26,5 +27,6 @@ describe('profileCarrier', () => {
     const profile = await profileCarrier(7);
     expect(profile.myraCarrierScore).toBe(78.5);
     expect(profile.previousOutcomes.length).toBe(2);
+    expect(profile.isRepeat).toBe(true);
   });
 });
