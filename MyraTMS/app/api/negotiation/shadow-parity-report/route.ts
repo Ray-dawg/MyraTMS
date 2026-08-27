@@ -19,9 +19,9 @@ export async function GET(req: NextRequest) {
     const { rows } = await db.query(
       `SELECT id, pipeline_load_id, output_envelope, computed_at
          FROM pricing_engine_requests
-        WHERE direction = 'sell' AND request_source = 'shadow_comparison' AND computed_at >= $1
+        WHERE tenant_id = $2 AND direction = 'sell' AND request_source = 'shadow_comparison' AND computed_at >= $1
         ORDER BY computed_at DESC`,
-      [since],
+      [since, auth.user.tenantId],
     );
     return NextResponse.json({ comparisons: rows });
   } catch (err) {
@@ -29,3 +29,4 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to fetch shadow-parity report' }, { status: 500 });
   }
 }
+

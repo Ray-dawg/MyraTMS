@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const brief = await compileEnvelope({
-      tenantId: body.tenantId ?? auth.user.tenantId,
+      tenantId: auth.user.tenantId,
       direction: body.direction,
       pipelineLoadId: body.pipelineLoadId,
       counterpartyId: body.counterpartyId ?? 0,
@@ -37,3 +37,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to compile negotiation envelope' }, { status: 500 });
   }
 }
+
