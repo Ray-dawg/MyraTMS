@@ -224,6 +224,7 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
           await completeDispatchOnSignedRateCon({
             tenantId,
             loadId: carrierMatch.id,
+            method: 'email_verified',
             signedPdfBuffer: first.content,
             signedFileName: first.filename || `RC-signed-${carrierMatch.id}.pdf`,
           });

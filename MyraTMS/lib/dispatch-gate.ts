@@ -226,13 +226,32 @@ export async function runAiCascadeDispatchGate(params: {
  * giving the paper trail both the broker's sent copy and the carrier's
  * countersigned copy.
  */
+export type SignatureConfirmationMethod = 'email_verified' | 'manual_ops';
+
 export async function completeDispatchOnSignedRateCon(params: {
   tenantId: number;
   loadId: string;
+  // E2-04 review session, F1: required, no default -- every caller must be
+  // explicit about how this confirmation was obtained. 'email_verified' is
+  // the IMAP poller matching a verified inbound reply (lib/email/imap-poller.ts);
+  // 'manual_ops' is a human recording it (POST /api/loads/[id]/confirm-carrier-signature).
+  // A manual override is weaker evidence and must never look identical to a
+  // verified inbound reply in any downstream record -- this is what keeps
+  // the two distinguishable everywhere completeDispatchOnSignedRateCon()'s
+  // result is read.
+  method: SignatureConfirmationMethod;
+  // Required for 'manual_ops' (who marked it) -- validated below, not at the
+  // type level, so a caller passing the wrong method/confirmedBy combination
+  // fails loudly rather than silently recording an unattributed override.
+  confirmedBy?: string;
+  notes?: string;
   signedPdfBuffer?: Buffer;
   signedFileName?: string;
 }): Promise<CompleteDispatchResult> {
-  const { tenantId, loadId, signedPdfBuffer, signedFileName } = params;
+  const { tenantId, loadId, method, confirmedBy, notes, signedPdfBuffer, signedFileName } = params;
+  if (method === 'manual_ops' && !confirmedBy) {
+    throw new Error('completeDispatchOnSignedRateCon: confirmedBy is required when method is manual_ops');
+  }
 
   const load = await withTenant(tenantId, async (client) => {
     const { rows } = await client.query<{ id: string; status: string }>(
@@ -271,9 +290,11 @@ export async function completeDispatchOnSignedRateCon(params: {
       `UPDATE loads
        SET status = 'Dispatched',
            carrier_signature_received_at = NOW(),
+           carrier_signature_method = $2,
+           carrier_signature_confirmed_by = $3,
            updated_at = NOW()
        WHERE id = $1 AND status = 'Awaiting Signature'`,
-      [loadId],
+      [loadId, method, confirmedBy ?? null],
     );
   });
 
@@ -285,9 +306,48 @@ export async function completeDispatchOnSignedRateCon(params: {
       blobUrl: (await put(`rate-con/${loadId}/signed-${Date.now()}.pdf`, signedPdfBuffer, { access: 'public', addRandomSuffix: false })).url,
       fileName: signedFileName || `RC-signed-${loadId}.pdf`,
       fileSize: signedPdfBuffer.length,
-      uploadedBy: 'system',
+      uploadedBy: method === 'manual_ops' ? (confirmedBy ?? 'system') : 'system:imap-poller',
     });
   }
+
+  // A manual override bypasses the same compliance-shaped gate the shipper
+  // side's verbal-confirmation override does (lib/confirmation-actions.ts's
+  // recordVerbalConfirmation()) -- same reasoning, same audit trail.
+  if (method === 'manual_ops') {
+    await withTenant(tenantId, async (client) => {
+      await client.query(
+        `INSERT INTO compliance_audit (check_type, result, details, checked_at)
+         VALUES ('carrier_signature_manual_override', 'success', $1, NOW())`,
+        [JSON.stringify({ load_id: loadId, confirmed_by: confirmedBy, notes: notes ?? null, had_pdf: !!signedPdfBuffer })],
+      );
+    });
+  }
+
+  // E2-04 review session, V1: detectOverdueCarrierSignatures() (health-checks.ts)
+  // never had a resolve path -- a late-but-successful signature left a stale
+  // "overdue" exception open forever, same class of bug lib/exceptions/
+  // detector.ts's own resolveException() exists to prevent elsewhere. Close it
+  // here, at the one place this state transition actually happens, mirroring
+  // that established resolve pattern (status='resolved' + clear has_exception
+  // once no other active exceptions remain for the load).
+  await withTenant(tenantId, async (client) => {
+    const { rows: openExceptions } = await client.query<{ id: string }>(
+      `SELECT id FROM exceptions WHERE load_id = $1 AND type = 'carrier_signature_overdue' AND status = 'active'`,
+      [loadId],
+    );
+    for (const exc of openExceptions) {
+      await client.query(`UPDATE exceptions SET status = 'resolved', resolved_at = NOW() WHERE id = $1`, [exc.id]);
+    }
+    if (openExceptions.length > 0) {
+      const { rows: others } = await client.query(
+        `SELECT 1 FROM exceptions WHERE load_id = $1 AND status = 'active' LIMIT 1`,
+        [loadId],
+      );
+      if (others.length === 0) {
+        await client.query(`UPDATE loads SET has_exception = false WHERE id = $1`, [loadId]);
+      }
+    }
+  });
 
   return { outcome: 'dispatched', loadId, trackingToken };
 }

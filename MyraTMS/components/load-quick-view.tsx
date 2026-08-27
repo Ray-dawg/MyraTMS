@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useTrackingPositions, createCheckCall } from "@/lib/api"
+import { useTrackingPositions, createCheckCall, confirmCarrierSignature } from "@/lib/api"
 import { toast } from "sonner"
 
 interface TrackingPosition {
@@ -146,6 +146,25 @@ export function LoadQuickView({
   const [ccNotes, setCcNotes] = useState("")
   const [ccStatus, setCcStatus] = useState("on_schedule")
   const [submitting, setSubmitting] = useState(false)
+  const [confirmingSignature, setConfirmingSignature] = useState(false)
+
+  // E2-04 review session, F1 (closes V1): manual override for a carrier's
+  // signed rate confirmation. Before this existed, a load at
+  // 'Awaiting Signature' had no exit path unless the (disabled-by-default)
+  // IMAP poller matched an inbound reply -- this is also the path for a
+  // carrier who faxes back or signs in a portal instead of emailing.
+  const submitConfirmSignature = useCallback(async () => {
+    if (!loadId) return
+    setConfirmingSignature(true)
+    try {
+      await confirmCarrierSignature(loadId, {})
+      toast.success("Carrier signature confirmed", { description: `${loadId} dispatched.` })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to confirm carrier signature")
+    } finally {
+      setConfirmingSignature(false)
+    }
+  }, [loadId])
 
   const submitCheckCall = useCallback(async () => {
     setSubmitting(true)
@@ -233,6 +252,18 @@ export function LoadQuickView({
               <StatusBadge status={load.source} />
             </div>
             <div className="flex items-center gap-1.5">
+              {load.status === "Awaiting Signature" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  disabled={confirmingSignature}
+                  onClick={submitConfirmSignature}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  {confirmingSignature ? "Confirming…" : "Confirm Carrier Signature"}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"

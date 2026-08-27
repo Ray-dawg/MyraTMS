@@ -204,6 +204,23 @@ export async function createCheckCall(data: Record<string, unknown>) {
   return res.json()
 }
 
+// E2-04 review session, F1: manual ops override for a carrier's signed rate
+// confirmation -- mirrors createCheckCall's shape. Only ever used when a
+// load is at loads.status='Awaiting Signature'.
+export async function confirmCarrierSignature(loadId: string, data: { notes?: string }) {
+  const res = await fetch(`/api/loads/${loadId}/confirm-carrier-signature`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.error || "Failed to confirm carrier signature")
+  }
+  mutate((key: string) => typeof key === "string" && key.startsWith(`/api/loads/${loadId}`), undefined, { revalidate: true })
+  return res.json()
+}
+
 // --- Tracking Positions ---
 export function useTrackingPositions() {
   return useSWR("/api/tracking/positions", fetcher, { ...swrDefaults, refreshInterval: 30000 })
