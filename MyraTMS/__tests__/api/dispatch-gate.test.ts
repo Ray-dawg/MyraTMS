@@ -114,7 +114,16 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
       await db.query(`DELETE FROM exceptions WHERE pipeline_load_id = ANY($1)`, [seededPipelineLoadIds]);
       await db.query(`DELETE FROM pipeline_loads WHERE id = ANY($1)`, [seededPipelineLoadIds]);
     }
-    if (seededLoadIds.length) await db.query(`DELETE FROM loads WHERE id = ANY($1)`, [seededLoadIds]);
+    if (seededLoadIds.length) {
+      // F1's manual-override test inserts an exceptions row keyed by
+      // load_id (TMS loads.id), not pipeline_load_id -- the cleanup above
+      // only catches the pipeline_load_id-keyed rows every other test in
+      // this file produces. Also cleans the compliance_audit row F1's test
+      // writes, which nothing in this file needed before.
+      await db.query(`DELETE FROM exceptions WHERE load_id = ANY($1)`, [seededLoadIds]);
+      await db.query(`DELETE FROM compliance_audit WHERE details->>'load_id' = ANY($1)`, [seededLoadIds]);
+      await db.query(`DELETE FROM loads WHERE id = ANY($1)`, [seededLoadIds]);
+    }
     if (seededCarrierIds.length) await db.query(`DELETE FROM carriers WHERE id = ANY($1)`, [seededCarrierIds]);
     if (mockServer) await new Promise<void>((resolve) => mockServer.close(() => resolve()));
   });
@@ -262,7 +271,7 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     expect(exc.rows[0].type).toBe('carrier_verification_failed');
   }, 30_000);
 
-  it('completeDispatchOnSignedRateCon: flips Awaiting Signature to Dispatched, records receipt, issues a tracking token', async () => {
+  it('completeDispatchOnSignedRateCon: flips Awaiting Signature to Dispatched, records receipt, issues a tracking token (email_verified)', async () => {
     const carrierId = `GATE-E-${RUN_ID}`;
     const loadId = `LD-GATE-E-${RUN_ID}`;
     await seedCarrier({ id: carrierId, company: 'Gate Test Carrier E', contactEmail: null, preVerified: true });
@@ -275,16 +284,22 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     expect(gateResult.outcome).toBe('awaiting_signature');
     if (gateResult.outcome === 'awaiting_signature') seededDocIds.push(gateResult.rateCon.docId);
 
-    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
+    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, method: 'email_verified' });
     expect(result.outcome).toBe('dispatched');
     if (result.outcome === 'dispatched') expect(result.trackingToken).toHaveLength(64);
 
-    const row = await db.query<{ status: string; carrier_signature_received_at: Date | null; tracking_token: string | null }>(
-      `SELECT status, carrier_signature_received_at, tracking_token FROM loads WHERE id = $1`, [loadId],
+    const row = await db.query<{
+      status: string; carrier_signature_received_at: Date | null; tracking_token: string | null;
+      carrier_signature_method: string | null; carrier_signature_confirmed_by: string | null;
+    }>(
+      `SELECT status, carrier_signature_received_at, tracking_token, carrier_signature_method, carrier_signature_confirmed_by
+         FROM loads WHERE id = $1`, [loadId],
     );
     expect(row.rows[0].status).toBe('Dispatched');
     expect(row.rows[0].carrier_signature_received_at).not.toBeNull();
     expect(row.rows[0].tracking_token).not.toBeNull();
+    expect(row.rows[0].carrier_signature_method).toBe('email_verified');
+    expect(row.rows[0].carrier_signature_confirmed_by).toBeNull();
   }, 30_000);
 
   it('completeDispatchOnSignedRateCon: a second call after already dispatched is idempotent, not an error', async () => {
@@ -299,15 +314,70 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     });
     if (gateResult.outcome === 'awaiting_signature') seededDocIds.push(gateResult.rateCon.docId);
 
-    await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
-    const second = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId });
+    await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, method: 'email_verified' });
+    const second = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, method: 'email_verified' });
 
     expect(second.outcome).toBe('not_awaiting_signature');
     if (second.outcome === 'not_awaiting_signature') expect(second.status).toBe('Dispatched');
   }, 30_000);
 
   it('completeDispatchOnSignedRateCon: unknown load returns not_found', async () => {
-    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId: `LD-NONEXISTENT-${RUN_ID}` });
+    const result = await completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId: `LD-NONEXISTENT-${RUN_ID}`, method: 'email_verified' });
     expect(result.outcome).toBe('not_found');
   });
+
+  it('completeDispatchOnSignedRateCon: manual_ops requires confirmedBy', async () => {
+    await expect(
+      completeDispatchOnSignedRateCon({ tenantId: LEGACY_DEFAULT_TENANT_ID, loadId: `LD-WHATEVER-${RUN_ID}`, method: 'manual_ops' }),
+    ).rejects.toThrow('confirmedBy is required');
+  });
+
+  it('completeDispatchOnSignedRateCon: manual_ops records the method + confirmer, logs compliance_audit, resolves an open overdue-signature exception', async () => {
+    const carrierId = `GATE-G-${RUN_ID}`;
+    const loadId = `LD-GATE-G-${RUN_ID}`;
+    await seedCarrier({ id: carrierId, company: 'Gate Test Carrier G', contactEmail: null, preVerified: true });
+    await seedTmsLoad({ id: loadId, carrierId });
+    const pipelineLoadId = await seedPipelineLoad();
+
+    const gateResult = await runAiCascadeDispatchGate({
+      tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
+    });
+    if (gateResult.outcome === 'awaiting_signature') seededDocIds.push(gateResult.rateCon.docId);
+
+    // Simulate detectOverdueCarrierSignatures() having already fired before
+    // the manual override comes in -- the exception it wrote must not be
+    // left stale once the load actually dispatches.
+    await db.query(
+      `INSERT INTO exceptions (load_id, carrier_id, type, severity, title, detail, sla_due_at)
+       VALUES ($1, NULL, 'carrier_signature_overdue', 'high', 'test', 'test', NOW() + INTERVAL '2 hours')`,
+      [loadId],
+    );
+    await db.query(`UPDATE loads SET has_exception = true WHERE id = $1`, [loadId]);
+
+    const result = await completeDispatchOnSignedRateCon({
+      tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, method: 'manual_ops', confirmedBy: 'user:test-ops', notes: 'confirmed by phone',
+    });
+    expect(result.outcome).toBe('dispatched');
+
+    const row = await db.query<{
+      status: string; carrier_signature_method: string | null; carrier_signature_confirmed_by: string | null; has_exception: boolean;
+    }>(
+      `SELECT status, carrier_signature_method, carrier_signature_confirmed_by, has_exception FROM loads WHERE id = $1`, [loadId],
+    );
+    expect(row.rows[0].status).toBe('Dispatched');
+    expect(row.rows[0].carrier_signature_method).toBe('manual_ops');
+    expect(row.rows[0].carrier_signature_confirmed_by).toBe('user:test-ops');
+    expect(row.rows[0].has_exception).toBe(false);
+
+    const audit = await db.query<{ check_type: string }>(
+      `SELECT check_type FROM compliance_audit WHERE check_type = 'carrier_signature_manual_override' AND details->>'load_id' = $1`,
+      [loadId],
+    );
+    expect(audit.rows.length).toBeGreaterThan(0);
+
+    const exc = await db.query<{ status: string }>(
+      `SELECT status FROM exceptions WHERE load_id = $1 AND type = 'carrier_signature_overdue'`, [loadId],
+    );
+    expect(exc.rows[0].status).toBe('resolved');
+  }, 30_000);
 });
