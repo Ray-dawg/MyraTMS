@@ -125,8 +125,20 @@ export async function compileEnvelope(input: {
     ? (load.delivery_date instanceof Date ? load.delivery_date : new Date(load.delivery_date))
     : null;
   const isCrossBorder = load.origin_country !== load.destination_country;
+  // Known limitation: timezoneForState() always uses the shipper's origin
+  // state, even on the buy path where the call is actually placed to the
+  // carrier. A correct buy-side timezone would need a carrier location/state
+  // field -- `carriers` currently has home_city/home_lat/home_lng but no
+  // state/province column, and inventing one (or a geocoding lookup) is out
+  // of scope for this task. This only affects the *displayed* calling-window
+  // timezone/compliance block, not the negotiation math itself.
   const timezone = timezoneForState(load.shipper_phone || '', load.origin_state);
-  const dncHit = await checkDnc(load.shipper_phone || '');
+  // DNC must be checked against whoever is actually being called: the
+  // shipper on the sell path, the carrier on the buy path.
+  // counterparty.phone is populated by both profileShipper() and
+  // profileCarrier(), so this is direction-agnostic -- unlike
+  // load.shipper_phone, which is only ever the shipper's number.
+  const dncHit = await checkDnc(counterparty.phone || '');
 
   return {
     meta: { briefId: 0, direction: input.direction, pipelineLoadId: load.id, tenantId: input.tenantId, generatedAt: new Date().toISOString() },
