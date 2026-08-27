@@ -27,8 +27,29 @@
  * because the three actions expect three different stages — same reasoning
  * carrier-voice-worker.ts documents for its own multi-state cascade.
  *
- * Kill switch: PIPELINE_ENABLED=false skips every job, matching every other
- * worker in this pipeline.
+ * Kill switches:
+ *   PIPELINE_ENABLED=false             skips every job (whole-pipeline halt,
+ *                                       matches every other worker).
+ *   SHIPPER_CONFIRMATION_ENABLED       E2-04 review session, F2 (closes V2).
+ *                                       Defaults FALSE -- outbound SMTP is
+ *                                       not configured anywhere in production
+ *                                       today (confirmed via `vercel env ls`),
+ *                                       so this worker cannot succeed regardless.
+ *                                       Before this flag existed, 'send' ran
+ *                                       unconditionally, the email send's
+ *                                       success/failure was never checked, and
+ *                                       a load silently sat in
+ *                                       'awaiting_shipper_confirmation' for the
+ *                                       full 2h nudge/escalate SLA before a
+ *                                       human ever saw it -- a real regression
+ *                                       against E2-03 M0's immediate-hold
+ *                                       principle. When this flag is off, or
+ *                                       when the send genuinely fails, 'send'
+ *                                       now escalates to Alert Center
+ *                                       immediately instead of scheduling the
+ *                                       nudge/escalate SLA at all -- that SLA
+ *                                       is for shipper inaction, not for
+ *                                       infrastructure that doesn't exist yet.
  */
 
 import { Queue } from 'bullmq';
@@ -70,11 +91,12 @@ interface PipelineLoadRow {
 export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJobPayload> {
   private selfQueue: Queue<ShipperConfirmationJobPayload>;
   private trackingBaseUrl: string;
+  private shipperConfirmationEnabled: boolean;
 
   constructor(
     redis: Redis,
     selfQueue: Queue<ShipperConfirmationJobPayload>,
-    opts: { trackingBaseUrl?: string } = {},
+    opts: { trackingBaseUrl?: string; shipperConfirmationEnabled?: boolean } = {},
   ) {
     const config: WorkerConfig = {
       queueName: 'shipper-confirmation-queue',
@@ -96,6 +118,12 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
     this.selfQueue = selfQueue;
     this.trackingBaseUrl =
       opts.trackingBaseUrl ?? process.env.NEXT_PUBLIC_TRACKING_URL ?? 'http://localhost:3002';
+    // Defaults false -- see file header. .trim().toLowerCase() so a stray
+    // trailing newline/casing on the Vercel env value (a documented prior
+    // incident across every other kill switch in this codebase) can't
+    // silently defeat the exact-match check.
+    this.shipperConfirmationEnabled =
+      opts.shipperConfirmationEnabled ?? process.env.SHIPPER_CONFIRMATION_ENABLED?.trim().toLowerCase() === 'true';
   }
 
   // Overridden: the base class's validateLoad() gates on a single
@@ -147,6 +175,15 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
       logger.debug(`[ShipperConfirmation] Load ${load.id} not at 'booked' (is '${load.stage}') — skipping send`);
       return { success: true, pipelineLoadId: load.id, stage: load.stage, duration: 0, details: { skipped: 'stage_mismatch' } };
     }
+
+    // F2 (closes V2): checked before anything else -- if the feature is off,
+    // nothing downstream (email validity, PDF generation) matters. Straight
+    // to Alert Center rather than silently doing nothing.
+    if (!this.shipperConfirmationEnabled) {
+      await this.escalateConfirmationDisabled(load);
+      return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'shipper_confirmation_disabled' } };
+    }
+
     if (!load.shipper_email) {
       await this.escalateMissingEmail(load);
       return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'no_shipper_email' } };
@@ -170,16 +207,37 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
       snapshotAt: new Date().toISOString(),
     };
 
-    const pdfBuffer = await generateShipperRateConfirmation(load.id);
-    const confirmUrl = `${this.trackingBaseUrl}/track/${token}`;
-
-    const sent = await sendShipperConfirmationRequestEmail(
-      load.shipper_email,
-      load.shipper_contact_name,
-      load.load_id,
-      confirmUrl,
-      pdfBuffer,
-    );
+    // F2 (closes V2): PDF generation and the email send are wrapped here,
+    // deliberately NOT allowed to propagate to BaseWorker's outer try/catch
+    // (base-worker.ts's handleJob) -- that path retries 3x with exponential
+    // backoff before dead-lettering, which is the right shape for a
+    // transient infrastructure blip but the wrong shape for "SMTP isn't
+    // configured at all," which will never succeed on retry. Escalate on the
+    // FIRST hard failure instead of burning the retry budget or (previously)
+    // silently proceeding as if nothing was wrong. sendShipperConfirmation
+    // RequestEmail() returning false (SMTP unconfigured) is exactly as much
+    // a hard failure here as it throwing -- both used to be treated as
+    // success.
+    let pdfBuffer: Buffer;
+    let sent: boolean;
+    try {
+      pdfBuffer = await generateShipperRateConfirmation(load.id);
+      const confirmUrl = `${this.trackingBaseUrl}/track/${token}`;
+      sent = await sendShipperConfirmationRequestEmail(
+        load.shipper_email,
+        load.shipper_contact_name,
+        load.load_id,
+        confirmUrl,
+        pdfBuffer,
+      );
+    } catch (err) {
+      await this.escalateSendFailed(load, err instanceof Error ? err.message : String(err));
+      return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'shipper_confirmation_send_failed' } };
+    }
+    if (!sent) {
+      await this.escalateSendFailed(load, 'sendShipperConfirmationRequestEmail returned false (SMTP unconfigured or send failed)');
+      return { success: true, pipelineLoadId: load.id, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'shipper_confirmation_send_failed' } };
+    }
 
     await db.query(
       `UPDATE pipeline_loads
@@ -206,7 +264,7 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
     );
 
     logger.info(
-      `[ShipperConfirmation] Load ${load.id} confirmation request sent=${sent}, token issued, advanced to 'awaiting_shipper_confirmation'`,
+      `[ShipperConfirmation] Load ${load.id} confirmation request sent, token issued, advanced to 'awaiting_shipper_confirmation'`,
     );
 
     return {
@@ -214,7 +272,7 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
       pipelineLoadId: load.id,
       stage: 'awaiting_shipper_confirmation',
       duration: 0,
-      details: { emailSent: sent, tokenIssued: true },
+      details: { emailSent: true, tokenIssued: true },
     };
   }
 
@@ -320,5 +378,67 @@ export class ShipperConfirmationWorker extends BaseWorker<ShipperConfirmationJob
     );
 
     logger.warn(`[ShipperConfirmation] Load ${load.id} escalated: no shipper_email captured on the booking call`);
+  }
+
+  // F2 (closes V2): the feature is off (SHIPPER_CONFIRMATION_ENABLED=false --
+  // defaults false today, since outbound SMTP isn't configured in production).
+  private async escalateConfirmationDisabled(load: PipelineLoadRow): Promise<void> {
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'escalated', stage_updated_at = NOW(), confirmation_outcome = 'disabled', updated_at = NOW()
+       WHERE id = $1`,
+      [load.id],
+    );
+
+    const title = `Shipper confirmation disabled: ${load.origin_city}, ${load.origin_state} → ${load.destination_city}, ${load.destination_state}`;
+    const detail =
+      `Load ${load.load_id} booked, but SHIPPER_CONFIRMATION_ENABLED is off -- no confirmation request was ` +
+      `attempted. Confirm the load with the shipper directly (phone or manual email) and record the confirmation.`;
+
+    await db.query(
+      `INSERT INTO exceptions (
+         load_id, carrier_id, type, severity, title, detail,
+         pipeline_load_id, source_module, suggested_action, sla_due_at
+       ) VALUES (
+         NULL, NULL, 'shipper_confirmation_disabled', 'high', $1, $2,
+         $3, 'shipper_confirmation_disabled', $4, NOW() + INTERVAL '1 hour'
+       )`,
+      [title, detail, load.id, 'Contact the shipper directly to confirm the load in writing, then record it via the ops override.'],
+    );
+
+    logger.warn(`[ShipperConfirmation] Load ${load.id} escalated: SHIPPER_CONFIRMATION_ENABLED=false`);
+  }
+
+  // F2 (closes V2): the send genuinely failed (SMTP unreachable, unconfigured,
+  // or sendShipperConfirmationRequestEmail() returned false) -- escalate on
+  // this first hard failure rather than silently proceeding as if it
+  // succeeded (the previous behavior: the `sent` boolean was captured and
+  // never checked) or waiting out the full 2h nudge/escalate SLA, which is
+  // for shipper inaction, not for infrastructure that doesn't exist.
+  private async escalateSendFailed(load: PipelineLoadRow, reason: string): Promise<void> {
+    await db.query(
+      `UPDATE pipeline_loads
+       SET stage = 'escalated', stage_updated_at = NOW(), confirmation_outcome = 'send_failed', updated_at = NOW()
+       WHERE id = $1`,
+      [load.id],
+    );
+
+    const title = `Shipper confirmation send failed: ${load.origin_city}, ${load.origin_state} → ${load.destination_city}, ${load.destination_state}`;
+    const detail =
+      `Load ${load.load_id} booked, but the confirmation request could not be sent (${reason}). ` +
+      `Confirm the load with the shipper directly (phone or manual email) and record the confirmation.`;
+
+    await db.query(
+      `INSERT INTO exceptions (
+         load_id, carrier_id, type, severity, title, detail,
+         pipeline_load_id, source_module, suggested_action, sla_due_at
+       ) VALUES (
+         NULL, NULL, 'shipper_confirmation_send_failed', 'high', $1, $2,
+         $3, 'shipper_conf_send_failed', $4, NOW() + INTERVAL '1 hour'
+       )`,
+      [title, detail, load.id, 'Contact the shipper directly to confirm the load in writing, then record it via the ops override.'],
+    );
+
+    logger.warn(`[ShipperConfirmation] Load ${load.id} escalated: confirmation send failed (${reason})`);
   }
 }

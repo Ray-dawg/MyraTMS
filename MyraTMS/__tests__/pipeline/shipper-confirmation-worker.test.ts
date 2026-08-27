@@ -1,11 +1,21 @@
 /**
- * ShipperConfirmationWorker integration test (E2-04 M2).
+ * ShipperConfirmationWorker integration test (E2-04 M2 + review session F2).
  * Runs against live Neon + live Upstash-backed BullMQ (this suite's
  * established convention — see dispatch-gate.test.ts, compiler.test.ts).
- * Covers all 3 actions (send/nudge/escalate) and their no-op skip paths.
+ * Covers all 3 actions (send/nudge/escalate), their no-op skip paths, and
+ * F2's two new escalation paths (feature disabled, send failure).
+ *
+ * sendShipperConfirmationRequestEmail() is mocked at the module boundary --
+ * this dev/test environment has no SMTP configured either (same as
+ * production today), so without the mock every "successful send" test below
+ * would now correctly hit F2's new escalate-on-failure path instead of
+ * reaching 'awaiting_shipper_confirmation', making the happy path
+ * untestable here. Matches this suite's established pattern of mocking at
+ * the I/O boundary (dispatch-gate.test.ts mocks @vercel/blob's put() the
+ * same way).
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
 import { redisConnection } from '@/lib/pipeline/redis-bullmq';
@@ -13,6 +23,13 @@ import {
   ShipperConfirmationWorker,
   type ShipperConfirmationJobPayload,
 } from '@/lib/workers/shipper-confirmation-worker';
+
+vi.mock('@/lib/email', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/email')>('@/lib/email');
+  return { ...actual, sendShipperConfirmationRequestEmail: vi.fn() };
+});
+import { sendShipperConfirmationRequestEmail } from '@/lib/email';
+const mockSendEmail = vi.mocked(sendShipperConfirmationRequestEmail);
 
 const RUN_ID = Date.now();
 const seededPipelineLoadIds: number[] = [];
@@ -66,7 +83,17 @@ describe('ShipperConfirmationWorker (E2-04 M2)', () => {
   beforeAll(() => {
     process.env.PIPELINE_ENABLED = 'true';
     selfQueue = new Queue(`shipper-confirmation-queue-test-${RUN_ID}`, { connection: redisConnection });
-    worker = new ShipperConfirmationWorker(redisConnection, selfQueue);
+    // F2: shipperConfirmationEnabled defaults false (SHIPPER_CONFIRMATION_ENABLED
+    // unset) -- explicitly true here so the existing happy-path tests below
+    // still exercise 'send' rather than the new disabled-escalation path.
+    // The dedicated disabled/failure tests construct their own worker or
+    // override the mock per-case.
+    worker = new ShipperConfirmationWorker(redisConnection, selfQueue, { shipperConfirmationEnabled: true });
+  });
+
+  beforeEach(() => {
+    mockSendEmail.mockReset();
+    mockSendEmail.mockResolvedValue(true);
   });
 
   afterAll(async () => {
@@ -87,7 +114,7 @@ describe('ShipperConfirmationWorker (E2-04 M2)', () => {
 
     expect(result.success).toBe(true);
     expect(result.stage).toBe('awaiting_shipper_confirmation');
-    expect(typeof result.details?.emailSent).toBe('boolean');
+    expect(result.details?.emailSent).toBe(true);
 
     const row = await db.query<{
       stage: string;
@@ -192,5 +219,75 @@ describe('ShipperConfirmationWorker (E2-04 M2)', () => {
 
     const row = await db.query<{ stage: string }>(`SELECT stage FROM pipeline_loads WHERE id = $1`, [id]);
     expect(row.rows[0].stage).toBe('shipper_confirmed');
+  }, 15_000);
+
+  it('send: SHIPPER_CONFIRMATION_ENABLED=false — escalates immediately, no token, no nudge/escalate scheduled (F2, closes V2)', async () => {
+    const disabledQueue = new Queue(`shipper-confirmation-queue-test-disabled-${RUN_ID}`, { connection: redisConnection });
+    const disabledWorker = new ShipperConfirmationWorker(redisConnection, disabledQueue, { shipperConfirmationEnabled: false });
+    try {
+      const id = await seedPipelineLoad({ stage: 'booked' });
+
+      const result = await disabledWorker.process(jobPayload(id, 'send'));
+
+      expect(result.details?.escalated).toBe(true);
+      expect(result.details?.reason).toBe('shipper_confirmation_disabled');
+      expect(mockSendEmail).not.toHaveBeenCalled();
+
+      const row = await db.query<{ stage: string; confirmation_outcome: string | null; confirmation_token: string | null }>(
+        `SELECT stage, confirmation_outcome, confirmation_token FROM pipeline_loads WHERE id = $1`, [id],
+      );
+      expect(row.rows[0].stage).toBe('escalated');
+      expect(row.rows[0].confirmation_outcome).toBe('disabled');
+      expect(row.rows[0].confirmation_token).toBeNull();
+
+      const exc = await db.query<{ type: string }>(`SELECT type FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+      expect(exc.rows).toHaveLength(1);
+      expect(exc.rows[0].type).toBe('shipper_confirmation_disabled');
+
+      const jobs = await disabledQueue.getJobs(['delayed', 'waiting']);
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await disabledWorker.shutdown();
+      await disabledQueue.obliterate({ force: true });
+      await disabledQueue.close();
+    }
+  }, 15_000);
+
+  it('send: email send returns false (SMTP unconfigured) — escalates on first failure, does not wait out the 2h SLA (F2, closes V2)', async () => {
+    mockSendEmail.mockResolvedValueOnce(false);
+    const id = await seedPipelineLoad({ stage: 'booked' });
+
+    const result = await worker.process(jobPayload(id, 'send'));
+
+    expect(result.details?.escalated).toBe(true);
+    expect(result.details?.reason).toBe('shipper_confirmation_send_failed');
+
+    const row = await db.query<{ stage: string; confirmation_outcome: string | null; confirmation_token: string | null }>(
+      `SELECT stage, confirmation_outcome, confirmation_token FROM pipeline_loads WHERE id = $1`, [id],
+    );
+    expect(row.rows[0].stage).toBe('escalated');
+    expect(row.rows[0].confirmation_outcome).toBe('send_failed');
+    expect(row.rows[0].confirmation_token).toBeNull();
+
+    const exc = await db.query<{ type: string }>(`SELECT type FROM exceptions WHERE pipeline_load_id = $1`, [id]);
+    expect(exc.rows).toHaveLength(1);
+    expect(exc.rows[0].type).toBe('shipper_confirmation_send_failed');
+
+    const jobs = await selfQueue.getJobs(['delayed', 'waiting']);
+    expect(jobs.filter((j) => j.data.pipelineLoadId === id)).toHaveLength(0);
+  }, 15_000);
+
+  it('send: email send throws — escalates rather than propagating into BaseWorker retry (F2, closes V2)', async () => {
+    mockSendEmail.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const id = await seedPipelineLoad({ stage: 'booked' });
+
+    const result = await worker.process(jobPayload(id, 'send'));
+
+    expect(result.success).toBe(true); // handled, not re-thrown
+    expect(result.details?.escalated).toBe(true);
+    expect(result.details?.reason).toBe('shipper_confirmation_send_failed');
+
+    const row = await db.query<{ stage: string }>(`SELECT stage FROM pipeline_loads WHERE id = $1`, [id]);
+    expect(row.rows[0].stage).toBe('escalated');
   }, 15_000);
 });
