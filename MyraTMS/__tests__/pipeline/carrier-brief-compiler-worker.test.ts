@@ -21,7 +21,7 @@ const seededPipelineLoadIds: number[] = [];
 const seededMatchResultIds: string[] = [];
 let seededTestPersonaId: number | null = null;
 
-async function seedPipelineLoad(opts: { stage: string; loadId?: string }): Promise<{ id: number; loadId: string }> {
+async function seedPipelineLoad(opts: { stage: string; loadId?: string; loadSourceClass?: string }): Promise<{ id: number; loadId: string }> {
   const loadId = opts.loadId ?? `TEST-CBC-${RUN_ID}-${Math.random().toString(36).slice(2, 8)}`;
   const ins = await db.query<{ id: number }>(
     `INSERT INTO pipeline_loads (
@@ -30,14 +30,14 @@ async function seedPipelineLoad(opts: { stage: string; loadId?: string }): Promi
        pickup_date, delivery_date, equipment_type, weight_lbs,
        shipper_company, shipper_email, shipper_phone,
        posted_rate, posted_rate_currency, stage, agreed_rate, agreed_rate_currency,
-       confirmed_rate, confirmed_rate_currency, confirmed_at
+       confirmed_rate, confirmed_rate_currency, confirmed_at, load_source_class
      ) VALUES ($1, 'DAT', 'Toronto', 'ON', 'CA', 'Sudbury', 'ON', 'CA',
        NOW() + INTERVAL '3 days', NOW() + INTERVAL '4 days', 'Dry Van', 42000,
        'Carrier Brief Test Co', 'shipper@test.test', '+17055550000',
        2400, 'CAD', $2, 2200, 'CAD',
-       2200, 'CAD', NOW()
+       2200, 'CAD', NOW(), $3
      ) RETURNING id`,
-    [loadId, opts.stage],
+    [loadId, opts.stage, opts.loadSourceClass ?? null],
   );
   seededPipelineLoadIds.push(ins.rows[0].id);
   return { id: ins.rows[0].id, loadId };
@@ -145,12 +145,27 @@ describe('CarrierBriefCompilerWorker (E2-04 M5)', () => {
     expect(row.rows[0].carrier_brief.retellAgentId).toBe('agent_test_carrier_persona');
     expect(row.rows[0].carrier_brief.envelope.ceiling).toBeGreaterThan(0);
     expect(row.rows[0].carrier_brief.envelope.ceiling).toBeLessThan(2200);
+    // F4 (closes V4): no load_source_class seeded on this fixture -- the
+    // brief degrades explicitly to null rather than omitting the field or
+    // crashing.
+    expect(row.rows[0].carrier_brief.loadSourceClass).toBeNull();
 
     const jobs = await carrierCallQueue.getJobs(['waiting', 'paused']);
     const job = jobs.find((j) => j.data.pipelineLoadId === id);
     expect(job).toBeDefined();
     expect(job?.data.cascadePosition).toBe(0);
     expect(job?.data.voicemailRetryCount).toBe(0);
+  }, 15_000);
+
+  it('with load_source_class set: the brief carries it (F4, closes V4)', async () => {
+    const { id, loadId } = await seedPipelineLoad({ stage: 'shipper_confirmed', loadSourceClass: 'shipper_direct' });
+    await seedMatchResult(loadId, REAL_CARRIER_ID, 0.8);
+
+    const result = await worker.process(jobPayload(id, loadId));
+    expect(result.details?.briefCompiled).toBe(true);
+
+    const row = await db.query<{ carrier_brief: any }>(`SELECT carrier_brief FROM pipeline_loads WHERE id = $1`, [id]);
+    expect(row.rows[0].carrier_brief.loadSourceClass).toBe('shipper_direct');
   }, 15_000);
 
   it('load not at shipper_confirmed: no-ops', async () => {

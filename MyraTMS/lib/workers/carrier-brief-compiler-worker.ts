@@ -53,6 +53,11 @@ interface PipelineLoadRow {
   confirmed_rate_currency: string | null;
   agreed_rate: string | null;
   agreed_rate_currency: string | null;
+  // F4 (closes V4): E2-01 M1's qualifier-worker.ts classifies this, but not
+  // every load path runs through that classification (or it can be NULL if
+  // qualification predates the column). Nullable end to end -- the brief
+  // degrades explicitly rather than crashing when it's missing.
+  load_source_class: string | null;
 }
 
 interface MatchResultRow {
@@ -70,6 +75,11 @@ export interface CarrierBrief {
   persona: { name: string; sampledValue: number } | null;
   retellAgentId: string | null;
   generatedAt: string;
+  // F4 (closes V4): E2-04 PRD §10 -- lets the carrier-facing agent truthfully
+  // answer "is this your freight or are you double-brokering it?" Null when
+  // qualifier-worker.ts never classified this load (logged as a warning
+  // below, not treated as an error -- the brief still compiles).
+  loadSourceClass: string | null;
 }
 
 export class CarrierBriefCompilerWorker extends BaseWorker<CarrierBriefJobPayload> {
@@ -132,12 +142,17 @@ export class CarrierBriefCompilerWorker extends BaseWorker<CarrierBriefJobPayloa
       return { success: true, pipelineLoadId, stage: 'escalated', duration: 0, details: { escalated: true, reason: 'no_active_carrier_persona' } };
     }
 
+    if (!load.load_source_class) {
+      logger.warn(`[CarrierBriefCompiler] Load ${pipelineLoadId} has no load_source_class -- brief will carry it as null`);
+    }
+
     const brief: CarrierBrief = {
       carrierStack,
       envelope: { ...envelope },
       persona: { name: persona.persona_name, sampledValue: persona.sampled_value },
       retellAgentId,
       generatedAt: new Date().toISOString(),
+      loadSourceClass: load.load_source_class,
     };
 
     await db.query(
@@ -174,7 +189,7 @@ export class CarrierBriefCompilerWorker extends BaseWorker<CarrierBriefJobPayloa
 
   private async fetchLoad(pipelineLoadId: number): Promise<PipelineLoadRow | null> {
     const r = await db.query<PipelineLoadRow>(
-      `SELECT id, load_id, stage, confirmed_rate, confirmed_rate_currency, agreed_rate, agreed_rate_currency
+      `SELECT id, load_id, stage, confirmed_rate, confirmed_rate_currency, agreed_rate, agreed_rate_currency, load_source_class
          FROM pipeline_loads WHERE id = $1`,
       [pipelineLoadId],
     );
