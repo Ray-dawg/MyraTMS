@@ -23,6 +23,18 @@ export async function POST(req: NextRequest) {
   if (body?.pipelineLoadId == null) {
     return NextResponse.json({ error: 'pipelineLoadId is required' }, { status: 400 });
   }
+  // Buy direction requires a real counterpartyId (carrier_registry.id is a
+  // SERIAL PK, so 1 is the lowest valid id -- 0/null/undefined always means
+  // "not provided"). Without this check a missing counterpartyId silently
+  // defaulted to 0, which profileCarrier() previously turned into a
+  // null-filled profile instead of an error (see Fix 3 in the T-22 fix
+  // wave) -- reject it here instead of letting it reach that far.
+  if (body.direction === 'buy' && !(Number(body.counterpartyId) > 0)) {
+    return NextResponse.json(
+      { error: 'counterpartyId is required and must be a positive carrier_registry id for direction=buy' },
+      { status: 400 },
+    );
+  }
 
   try {
     const brief = await compileEnvelope({
@@ -37,4 +49,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to compile negotiation envelope' }, { status: 500 });
   }
 }
-
