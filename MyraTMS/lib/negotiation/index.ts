@@ -62,7 +62,11 @@ export async function compileEnvelope(input: {
   const pricingResult = await quotePricing({
     tenantId: input.tenantId,
     direction: input.direction,
-    requestSource: input.direction === 'sell' ? 'engine2_researcher_shadow' : 'dispatch_one',
+    // Buy-direction requests through this route are API-initiated previews
+    // (POST /api/negotiation/envelope), not live Dispatch One pricing calls
+    // -- 'dispatch_one' must stay reserved for the real thing so
+    // pricing_engine_requests audit rows aren't mislabeled as live calls.
+    requestSource: input.direction === 'sell' ? 'engine2_researcher_shadow' : 'negotiation_api_preview',
     pipelineLoadId: input.pipelineLoadId,
     load: {
       originCity: load.origin_city, originState: load.origin_state, originCountry: load.origin_country,
@@ -77,7 +81,7 @@ export async function compileEnvelope(input: {
 
   const counterparty = input.direction === 'sell'
     ? await profileShipper(load)
-    : await profileCarrier(input.counterpartyId);
+    : await profileCarrier(input.tenantId, input.counterpartyId);
 
   const counterpartyType: 'shipper' | 'carrier' = input.direction === 'sell' ? 'shipper' : 'carrier';
   const objections = await getObjectionPlaybook(counterpartyType, []);
