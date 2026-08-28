@@ -17,7 +17,11 @@ import { computeBuyEnvelope, type BuyEnvelope } from './buy-envelope';
 export interface PricingQuoteRequest {
   tenantId: number;
   direction: 'sell' | 'buy';
-  requestSource: 'engine2_researcher_shadow' | 'engine2_researcher_live' | 'dispatch_one' | 'shadow_comparison';
+  // 'negotiation_api_preview' — T-22 fix wave: POST /api/negotiation/envelope
+  // is an API-initiated preview, not a live Dispatch One pricing call, and
+  // must not write pricing_engine_requests audit rows indistinguishable from
+  // a real 'dispatch_one' request.
+  requestSource: 'engine2_researcher_shadow' | 'engine2_researcher_live' | 'dispatch_one' | 'shadow_comparison' | 'negotiation_api_preview';
   pipelineLoadId?: number;
   load: {
     originCity: string; originState: string; originCountry: string;
