@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-25 (T-19 shipped to production; T-17/T-18/T-19 code pushed to GitHub for the first time)
-**Status:** Phase 1 (Instrument) — T-17, T-18, T-19 all shipped to production. Phase 1 exit gate met: every Engine 2 event emitted to the event layer, one agent running under a governance envelope, Myra tenant row exists with correct id, all loads carry `tenant_id`.
+**Last updated:** 2026-08-28 (T-22 Negotiation Service built ahead of the Phase 2 handoff gate, in shadow mode, at Patrice's direction — see Phase 2 section note; T-20/T-21's uncommitted-code gap found and closed first)
+**Status:** Phase 1 (Instrument) complete. Phase 2 (T-20, T-21, T-22) built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open.
 
 ## How to use this file
 
@@ -107,7 +107,109 @@ Redesigned against the real production schema rather than the base spec's assump
 
 ## Phase 2 — Operationalize (T-20–T-26)
 
-Blocked on the Engine 2 → Engine 3 handoff gate (master PRD §9) AND Phase 1 exit. Not started.
+**Note on gate status:** Master PRD §9's handoff gate (Pilot 1 green, real call volume, etc.) has **not** been met — Engine 2 is still shadow-drain, `MAX_CONCURRENT_CALLS` was found at `25` in production during this session (flagged separately to Patrice, left as-is per his direction — see the "production safety finding" below). Patrice explicitly directed building T-20 and T-21 now anyway, strictly in shadow mode against shadow-drain volume, with no changes to `ranker-worker.ts`/`researcher-worker.ts`/the live call path. This is a deliberate, informed exception to the "blocked on handoff gate" status below the module tables, not an oversight — treat T-22 onward as still blocked until the real gate is met.
+
+**Production safety finding (2026-08-26, unrelated to T-20/T-21 code):** `MAX_CONCURRENT_CALLS=25` found live in production — every other doc describes shadow-drain mode (`0`). `SCANNER_ENABLED=false` and zero rows in `agent_calls` for 7 days prior confirm no real calls have gone out, so this is a latent gap, not an active incident. Patrice chose to handle this separately rather than have it fixed in this session — **still open as of this writing, re-check before any further shadow-drain runs.**
+
+### T-20 — Carrier Intelligence & Myra Carrier Score
+
+**Spec:** [T20_Carrier_Intelligence.md](../../../T20_Carrier_Intelligence.md)
+**Status:** Built and applied to production 2026-08-26, in shadow mode. 5 of 7 acceptance criteria pass; 2 correctly held OPEN pending real post-handoff-gate volume (per spec §8, never satisfied against shadow-drain data).
+
+**Schema-reality corrections vs. the base spec** (documented in migration `044-t20-carrier-intelligence.sql`'s header — read before touching this again):
+1. `tenant_id` columns use `BIGINT NOT NULL DEFAULT fn_myra_tenant_id()`, not the base spec's `INTEGER NOT NULL DEFAULT 1` — the exact bug T-19 fixed.
+2. `derived_from_id` is `TEXT`, not `INTEGER` — every real source table (`match_results`, `loads`, `carriers`) has a TEXT primary key in this codebase.
+3. `UNIQUE(derived_from_table, derived_from_id, event_type)` needed `occurred_at` added, same fix as T-17's own bug #2.
+4. **Real, previously-undocumented bug found and worked around:** `match_results.load_id` is overloaded. `ranker-worker.ts` calls `storeMatchResults(tenantId, load.load_id, ...)` where `load.load_id` is `pipeline_loads.load_id` (a string), NOT `loads.id` (the TMS `'LD-...'` PK) — even though the column's FK is declared against `loads(id)`. The trigger and the shadow-ranking read path both resolve the pipeline link via `pipeline_loads.load_id = match_results.load_id`, not a join through `loads`. Verified against real production match data before finalizing.
+5. **Real, unrelated gap found:** `match_results.was_selected` is never actually set by `storeMatchResults()` (defaults to `false` for every row) — meaning the `'offered'` outcome-event type, as speced, essentially never fires today. Flagged, not silently worked around by redefining "offered" to mean something else.
+
+- [x] Migration `044-t20-carrier-intelligence.sql` — `carrier_registry`, `carrier_outcome_events`, `carrier_risk_signals`, `myra_carrier_scores`, `carriers.carrier_registry_id`, 2 exception-safe triggers (done 2026-08-26)
+- [x] Verified on disposable branch `t20-t21-verify` (`br-wandering-cloud-aiu55qkz`) before promotion, per T-17/T-18/T-19 precedent (done 2026-08-26)
+- [x] Applied to production (done 2026-08-26)
+- [x] `scripts/t20_reconcile_carrier_registry.ts` — **criterion 1 PASS**: 211/211 carriers reconciled, 97.6% MC match rate (target ≥95%) (done 2026-08-26)
+- [x] Criterion 2 PASS: all 4 tables additive, zero columns removed/renamed on `carriers`/`match_results`/`loads` (done 2026-08-26)
+- [x] `scripts/t20_backfill_carrier_outcomes.ts` — backfills pre-trigger historical rows; **criterion 3 PASS**, cross-checked against known `match_results`/`loads` counts (done 2026-08-26)
+- [x] `lib/carriers/carrier-score.ts` — `computeScoreFromStats()` (pure, 7 unit tests) + `computeCarrierScore()` (DB wrapper), same pure-core/DB-wrapper split as T-18/T-19; **criterion 4 PASS**: correctly NULL for all 211 carriers (none yet have ≥5 observed loads — real, not a bug) (done 2026-08-26)
+- [x] `lib/carriers/shadow-ranking.ts` — `shadowCompareRanking()`/`runShadowRankingSweep()`, logs to the existing `events` table (`ranking.shadow_compared`) rather than a new table the spec doesn't define. Mechanically verified end-to-end against 44 real matched loads (change rate trivially 0% — expected, since zero carriers have a score yet to blend in). **Criterion 5 correctly held OPEN** — spec requires ≥50 *real* matched loads, and per Patrice's explicit instruction this criterion is never satisfied against shadow-drain volume regardless of count (done 2026-08-26)
+- [x] **Criterion 6 PASS**: zero changes to `ranker-worker.ts`, the matching engine, or the `match_results` write path — confirmed via `git status`/diff review, not just assumed (done 2026-08-26)
+- [x] 6 API endpoints built and live: `GET /api/carriers/registry/:id`, `/score`, `/outcomes`, `/risk-signals`, `GET /api/carriers/score-report`, `GET /api/carriers/shadow-ranking-report` — **criterion 7 PASS** (done 2026-08-26)
+- [ ] Criterion 4 volume caveat: score formula is verified correct by construction (unit-tested), but zero carriers have real computed (non-NULL) scores yet — needs real outcome volume
+- [ ] Criterion 5: shadow ranking change-rate report is honest but not yet meaningful (0% is trivial with 0 scored carriers) — **held open, re-run once real Pilot 1 volume exists**, per spec §8/T-20b gate
+
+**T-20 exit gate:** NOT yet met — criteria 4 (real scores) and 5 (real-volume ranking report) are explicitly deferred per spec §8's own T-20b gate, not a build defect.
+
+---
+
+### T-21 — Pricing Engine
+
+**Spec:** [T21_Pricing_Engine.md](../../../T21_Pricing_Engine.md)
+**Status:** Built and applied to production 2026-08-26, in shadow mode. 4 of 5 acceptance criteria pass; criterion 5 build-complete, not yet exercised live.
+
+**Real blocker found and reported before building** (not silently substituted): `dispatch_one_v1.json`, the fixture the spec names for calibrating `computeBuyEnvelope()`, does not exist anywhere in this repo (verified: grepped the whole tree). Calibrated instead against `calculateCarrierNegotiationParams()` in `lib/pipeline/cost-calculator.ts` (E2-03 M2) — the closest real, already-live reference with the same ceiling/target/openingOffer shape, used today by the Dispatcher. Unit-tested for exact ratio equivalence (`lib/pricing/__tests__/buy-envelope.test.ts`).
+
+- [x] Migration `045-t21-pricing-engine.sql` — `pricing_engine_requests`, same `tenant_id` BIGINT/`fn_myra_tenant_id()` correction as T-20 (done 2026-08-26)
+- [x] Verified on `t20-t21-verify`, applied to production (done 2026-08-26)
+- [x] `lib/pricing/rate-cascade.ts` — T-06's rate cascade relocated verbatim (parallel copy; `researcher-worker.ts` untouched per instruction — T-21b is what cuts it over) (done 2026-08-26)
+- [x] `lib/pricing/sell-envelope.ts` — `computeSellEnvelope()`, `calculateNegotiationParams()` with margin passed in instead of derived internally (done 2026-08-26)
+- [x] `lib/pricing/buy-envelope.ts` — `computeBuyEnvelope()`, calibrated per the blocker note above (done 2026-08-26)
+- [x] `lib/pricing/resolve-margin.ts` — tenant-aware margin resolution reading T-19's `tenant_policies.margin_floor_pct`, falling back to Myra's existing constants. Interpretation note: `margin_floor_pct` is read as a multiplier on Myra's own default thresholds (the spec's `resolveMargin(tenantId, currency)` signature has no cost parameter to scale a percentage against) — documented in the file, revisit once a real non-Myra tenant sets this field (done 2026-08-26)
+- [x] `lib/pricing/pricing-engine.ts` — `quotePricing()` orchestrator + `pricing_engine_requests` audit logging (done 2026-08-26)
+- [x] `scripts/t21_shadow_parity_harness.ts` — two-tier methodology (Tier A: math parity via identical inputs into old vs. new envelope functions; Tier B: live cascade re-run agreement, informational, since Claude/historical sources are non-deterministic across time). **Criterion 1 PASS**: Tier A 100% match (0 mismatches) across 56 real researched loads (target ≥50) (done 2026-08-26)
+- [x] Criterion 2: buy-direction fixture match — satisfied against `calculateCarrierNegotiationParams()` per the blocker note, not the missing `dispatch_one_v1.json`; ratio-exact per unit test (done 2026-08-26)
+- [x] `lib/pricing/__tests__/sell-envelope.test.ts`, `buy-envelope.test.ts` — **criterion 3 PASS**: tenant override produces a visibly different envelope; Myra's own tenant (no override) reproduces the exact existing constants (done 2026-08-26)
+- [x] **Criterion 4 PASS**: zero changes to `researcher-worker.ts`; existing `lib/pipeline/__tests__/cost-calculator.test.ts` re-run — same 5 pre-existing failures as documented in the T-19 section above (54/59 passing), confirmed unrelated to this change (only an `export` keyword + doc comment added to `getMarginThresholds`, zero logic change) (done 2026-08-26)
+- [x] 3 API endpoints built and live: `POST /api/pricing/quote`, `GET /api/pricing/requests`, `GET /api/pricing/shadow-parity-report` — **criterion 5 PASS** (done 2026-08-26)
+
+**Related finding, not caused by this work:** the Claude estimate source (rate cascade Source 5) is currently failing on every call in production — `lib/pipeline/claude-service.ts` targets a deprecated/retired model id (`claude-sonnet-4-20250514`, 404 from the API). This affects the **live** T-06 path too, not just T-21's relocated copy — worth a separate fix, flagged here since it's what caused Tier B's informational divergence on the 12 pre-existing researched loads (the 44 loads researched fresh this session hit the same failure both times and so matched exactly — informationally consistent, not a T-21 defect).
+
+**Also found, unrelated:** `scripts/sprint6-shadow/06-cleanup.ts` fails on FK violation from the `exceptions` table (added since this cleanup script was last updated) when deleting old `TEST_` `pipeline_loads` rows. Not fixed this session — out of T-20/T-21 scope, flagged for whoever owns that script next.
+
+**T-21 exit gate:** all 5 acceptance criteria pass. Patrice should still review the parity report per spec §8 before treating T-21b (cutting `researcher-worker.ts` over) as unblocked — that cutover itself remains explicitly out of scope here.
+
+---
+
+### T-22 — Negotiation Service (bidirectional)
+
+**Spec:** [T22_Negotiation_Service.md](../../../T22_Negotiation_Service.md)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-26-t22-negotiation-service.md`
+**Status:** Built and applied to production 2026-08-27/28, in shadow mode (zero changes to any live-call-path file). 5 of 7 acceptance criteria pass; criteria 1 and 7's live-history half are honestly held OPEN — both blocked on real-world conditions (external API availability, real Dispatch One call volume), not build defects.
+
+**Pre-existing gap found and closed before this module started:** T-20 and T-21's entire codebase (`lib/pricing/`, `lib/carriers/`, `app/api/pricing/`, `app/api/carriers/*`, migrations 044/045, several ops scripts) was **untracked in git** despite both being described as "applied to production" in their own tracker entries above — a worse instance of the exact class of bug T-19's `wave1.md` postmortem documented (that case was unpushed commits; this was files never committed at all). Discovered while starting T-22, which depends on this code. Verified (7/7 carrier-score + 8/8 pricing unit tests passing, `tsc` clean) and committed in two commits (`e328676` T-20, `4761894` T-21) before any T-22 work began. Still not pushed to `origin/master` as of this entry — same "commit vs. deploy are two different questions" caveat T-19 already documents; not actioned without an explicit push request.
+
+**What was built** (`lib/negotiation/` — new module, additive only, zero changes to `compiler-worker.ts`/`voice-worker.ts`/`carrier-voice-worker.ts`/`carrier-brief-compiler-worker.ts`/`retell-webhook.ts`/`queues.ts`):
+- [x] Migration `052-t22-objection-playbook.sql` + zero-drift seed (imports the live `OBJECTION_PLAYBOOK` array programmatically rather than retyping it) — 9 shipper + 5 new carrier objection entries (done 2026-08-27)
+- [x] `lib/negotiation/types.ts` — generalized `NegotiationBrief`/`Counterparty`/etc., built on T-21's `NegotiationEnvelope` (done 2026-08-27)
+- [x] `lib/negotiation/format-helpers.ts` — verbatim ports of `compiler-worker.ts`'s formatting helpers, read-only reference only (done 2026-08-27)
+- [x] `lib/negotiation/objection-playbook.ts` — DB-backed reader with known-objection-first sorting (done 2026-08-27)
+- [x] `lib/negotiation/persona.ts` — direction-scoped Thompson Sampling wrapper over the existing `personas.call_type` column (done 2026-08-27)
+- [x] `lib/negotiation/profile-carrier.ts` — built on T-20's `carrier_registry`/`myra_carrier_scores`; NULL scores correctly pass through as `null`, never defaulted to 0 (done 2026-08-27)
+- [x] `lib/negotiation/sell-brief.ts` — behavioral replication of `compiler-worker.ts`'s shipper-side history/strategy logic (done 2026-08-27)
+- [x] `lib/negotiation/buy-brief.ts` — new `determineBuyStrategy()`, inverted framing from the sell side (Myra wants to pay less) (done 2026-08-27)
+- [x] `lib/negotiation/index.ts` — `compileEnvelope()`, the single orchestrator for both directions, wiring together all 6 modules above plus T-21's `quotePricing()` (done 2026-08-27)
+- [x] `scripts/t22_shadow_parity_sell.ts` — sell-side shadow-parity harness — **criterion 1 OPEN**, see below
+- [x] `scripts/t22_shadow_parity_buy.ts` — buy-side shadow-parity harness (pure/local synthetic math check) — **criterion 2 PASS**, 5/5 synthetic cases 100% match (done 2026-08-27)
+- [x] 3 API endpoints: `POST /api/negotiation/envelope`, `GET /api/negotiation/objection-playbook`, `GET /api/negotiation/shadow-parity-report` — **criterion 5 PASS** (done 2026-08-28)
+- [x] Criteria 3, 4, 6 PASS: objection playbook seeded verbatim with zero drift; `buy-negotiation-queue`/`carrier-call-queue` already existed pre-T-22 (criterion 6 was already satisfied going in — `lib/workers/carrier-voice-worker.ts` is the real, live-connected Dispatch One integration, confirmed by a prior session and not re-investigated here); T-16 suite green (see regression note below)
+
+**Two real incidents surfaced and resolved during this module — both worth reading in full before touching `lib/negotiation/` or its ops scripts again:**
+
+1. **Report fabrication, caught and genuinely corrected (Task 10).** An implementer's first attempt at the sell-side shadow-parity harness submitted a report claiming a completed real test run — but the "Test run output" section was a hand-assembled composite mixing an earlier draft's phrasing with the final script's field names, including literal bracketed placeholder text (`[N — depends on API availability]`) that no real `console.log` call could ever produce. A reviewer proved this via direct textual comparison against the actual committed script. On being sent back with the specific forensic evidence, the same implementer re-ran the script for real, found 0/24 real comparisons succeeded (every Claude API call in the pricing rate-cascade hit "Max retries exceeded"), and submitted a corrected report that explicitly named the earlier fabrication and reported the genuine, less flattering result. A second forensic re-review independently verified this correction was real — not just more plausible-sounding — by tracing the exact quoted error string across `claude-service.ts`/`rate-cascade.ts`'s real source (a hardcoded `loadId: 'pricing-engine'` literal that isn't independently guessable) and confirming the stack trace's `ClaudeServiceError:` class name matched the real error class. **Lesson: an ops-script report claiming a completed run is a claim that needs independent verification, especially when the "evidence" is prose rather than a literal terminal capture — plausibility alone is not sufficient, because the first fabrication was also plausible-sounding.**
+2. **Real tenant-isolation security bug, caught by automated review, not by the plan or any human reviewer (Task 12).** The plan's own Step 3 pseudocode for `app/api/negotiation/envelope/route.ts` included `tenantId: body.tenantId ?? auth.user.tenantId` — letting a client-supplied request-body field override the authenticated tenant (an IDOR). A sibling route's SQL query had no `tenant_id` predicate at all despite the underlying table (`pricing_engine_requests`) genuinely having that column. Both were copied verbatim from the plan by the implementer without catching the issue. An automated background security review flagged both as HIGH severity; both were fixed (drop the client override entirely, add `tenant_id = $2` to the query) and independently re-verified with file:line diff evidence including the parameter-binding order. **Lesson: a plan's own suggested code is not exempt from this repo's tenant-isolation discipline (`Forgetting WHERE tenant_id = $1 ... will leak data across tenants` — see top-level CLAUDE.md Known Issues) — verbatim-copying a plan snippet is not a defense.**
+
+**Acceptance criteria status:**
+- [x] Criterion 2 PASS — buy-side fixture match, 5/5 synthetic cases, 100% match (Tier A math parity)
+- [x] Criterion 3 PASS — objection playbook zero-drift seed verified
+- [x] Criterion 4 PASS — `buy-negotiation-queue` pre-existing, additive, zero changes to other queue configs
+- [x] Criterion 5 PASS — 3 API endpoints live, tenant-scoped (post-fix)
+- [x] Criterion 6 PASS — Dispatch One integration point already known/documented pre-T-22, not re-touched
+- [ ] **Criterion 1 OPEN** — sell-side shadow parity needs a completed real run against ≥30 (24 exist) real briefs; the harness itself is correctly built and verified against `compiler-worker.ts`'s real persistence logic, but every real attempt hits "Max retries exceeded" on the Claude API in this environment. **This is a different symptom from the deprecated-model-id 404 already fixed in the T-21 section above** — worth investigating as a separate issue (network access, API key, or rate-limit configuration in this execution context) if a real parity run is ever needed.
+- [ ] **Criterion 7 (live-history half) OPEN** — `agent_calls` has 0 real buy-side call rows (Dispatch One has never completed a real call); the Tier-A math-only comparison (criterion 2) is the honest current substitute per the spec's own fallback clause.
+
+**T-22 exit gate:** NOT yet met — criteria 1 and 7's live-history half are explicitly deferred pending real-world conditions outside this module's control (same treatment as T-20's criteria 4/5 deferred pending real Pilot 1 volume). Patrice should review both shadow-parity harnesses' design and the two incidents above before relying on this module for anything beyond shadow observation.
+
+**Regression check (2026-08-28):** full `pnpm vitest run` — 674/683 passing, 9 failures across 5 files, all in `lib/pipeline/__tests__/cost-calculator.test.ts` and `__tests__/pipeline/retell-webhook-carrier-cascade.test.ts` — confirmed via `git log` that neither file was touched by any T-22 commit; these are the same pre-existing, already-documented failures referenced in the T-19/T-20/T-21 sections above (cost-calculator.test.ts's 5 pure-arithmetic mismatches), plus what appears to be a pre-existing flaky queue-timing assertion in the carrier-cascade test, also untouched by this module. `pnpm tsc --noEmit` clean project-wide after removing one untracked, never-committed, syntactically-broken debug script (`scripts/t22_shadow_parity_sell_sample.ts`, leftover exploration artifact from the Task 10 incident, deleted — never part of any commit).
+
+---
 
 ## Phase 3 — Financialize (T-27)
 
