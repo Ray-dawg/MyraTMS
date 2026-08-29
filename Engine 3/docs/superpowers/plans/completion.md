@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-29 (T-24 Exception Engine + Human Escalation Console built and applied to production; no new frontend, per spec's own amendment — see T-24 section)
-**Status:** Phase 1 (Instrument) complete. Phase 2: T-20, T-21, T-22, T-23, T-24 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module.
+**Last updated:** 2026-08-29 (T-25 Risk & Fraud Scoring built and applied to production; payer registry reconciled against real data, double-broker cross-check run for real — see T-25 section)
+**Status:** Phase 1 (Instrument) complete. Phase 2: T-20 through T-25 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module. Only T-26 remains to close out Phase 2.
 
 ## How to use this file
 
@@ -285,6 +285,43 @@ Redesigned against the real production schema rather than the base spec's assump
 - [ ] 9 OPEN — this module's own new tests are green; the full unrelated project regression suite was not re-run against production this session, same deliberate scope limit T-23's tracker entry already explains
 
 **T-24 exit gate:** NOT yet met — criterion 2 requires real incidents that don't exist yet, and per spec §8, Patrice needs to actually see new-source exceptions arriving in the Alert Center for a trial period before this is "done in practice." Both are volume/time-dependent, not build defects.
+
+---
+
+### T-25 — Risk & Fraud Scoring
+
+**Spec:** [T25_Risk_Fraud.md](../../../T25_Risk_Fraud.md)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-29-t25-risk-fraud-scoring.md`
+**Status:** Built and applied to production 2026-08-29, in shadow mode (zero changes to `dispatcher-worker.ts` or any other live-path file). 5 of 7 acceptance criteria pass outright; criterion 5 passes but reports an honest zero (no real data to find yet); criterion 1 passes on seeded signals per the spec's own explicit allowance.
+
+**Schema-reality corrections** (documented in migration `055-t25-risk-fraud-scoring.sql`'s header — read before touching this again):
+1. Spec §4.3's `v_payer_concentration_exposure` had a literal broken SQL comment in place of a join condition (`pr.id = /* resolved via shipper->payer_registry link */`) and assumed a `pipeline_loads.tenant_id` column that doesn't exist — same bug class T-23 already fixed for `v_lifecycle_late_loads`. Fixed with a real `pipeline_loads.payer_registry_id` column (mirroring T-20's `carriers.carrier_registry_id`) populated by a new reconciliation script, since no MC-number equivalent exists for payers — matching is by normalized (trimmed, lowercased) `shipper_company` text.
+2. **No banking-detail storage exists anywhere in this codebase** — `carriers` has zero bank/routing/account columns. Spec §4.5's `checkBankingChange()` assumed a `getCarrierBankingOnFile()` data source that had to be built from scratch. New table `carrier_banking_details` stores only the last 4 digits of any account number, never a full number — a deliberate security minimization, not a spec requirement.
+3. `carrier_risk_signals` (T-20) has zero rows in production — no detector has ever populated it. Acceptance criterion 1 explicitly allows seeded signals as a substitute, used here.
+4. `pipeline_loads.load_source_class` (T-19/E2-01's shadow gate) is 100% NULL across all real rows — the double-broker cross-check correctly reports zero matches in production, an honest reflection of shadow-only enforcement, not a validated true negative.
+5. **A documented, deliberate limitation, not an oversight:** a `carrier_risk` exception bridged by T-24's existing `pollCarrierRisk()` still carries the flat 'medium' severity T-24 shipped with — it does **not** yet reflect `computeCarrierRiskSeverity()`'s per-signal-type tiering (critical for banking-change-mid-transaction, high for insurance-lapsed, etc.). Reconciling the two was ruled out deliberately: acceptance criterion 6 required T-24's existing `carrier_risk` handling be left untouched, and `pollCarrierRisk()`/its classification-rule row are exactly that handling. `computeCarrierRiskSeverity()` is live today only via the new `GET /api/risk/carrier/:id` endpoint. Closing this gap is a small, well-scoped follow-up for whoever picks up T-25b or T-26, not silently glossed over here.
+
+- [x] Task 1: Migration `055-t25-risk-fraud-scoring.sql` — `payer_registry`, `payer_credit_assessments`, `transaction_halts`, `carrier_banking_details` (new, not in base spec), corrected `v_payer_concentration_exposure`, 2 new classification-rule seed rows; 2/2 tests passing (done 2026-08-29)
+- [x] Task 2: `scripts/t25_reconcile_payer_registry.ts` — normalized-name matching; 1/1 test passing (done 2026-08-29)
+- [x] Task 3: `lib/risk/payer-credit.ts` — `getPayerCreditStatus()` (unknown/weak flagged, strong not — **criterion 2 PASS**) + `getConcentrationCap()`; 5/5 tests passing (done 2026-08-29)
+- [x] **Task 4 — criterion 3, 100% arithmetic accuracy required:** `v_payer_concentration_exposure` validated against hand-calculated cases (4000/6000 split verified exact); 1/1 test passing (done 2026-08-29)
+- [x] Task 5: `lib/risk/carrier-risk-scoring.ts` (`computeCarrierRiskSeverity()`) + `lib/risk/banking-change-detection.ts` (`checkBankingChange()` — **criterion 4 PASS**, fires only when details differ AND a load is active); 8/8 tests passing (done 2026-08-29)
+- [x] **Task 6 — criterion 6:** widened `lib/exceptions/bridge.ts`'s `SourceSignal.sourceModule` type to accept `payer_risk`/`transaction_halt` — the *only* line changed in that file; T-24's own `pollCarrierRisk()`/`pollLifecycleLate()`/`pollStageEscalated()`/`pollDeadLetterJobs()` and their seed rows are byte-for-byte untouched, re-verified by re-running T-24's own regression test after this change (done 2026-08-29)
+- [x] Task 7: `lib/risk/double-broker-crosscheck.ts` + all 6 spec §5 API endpoints (`GET /api/risk/carrier/:id`, `POST .../payer/:id/assess`, `GET .../payer/:id/concentration`, `GET /api/risk/halts`, `POST /api/risk/halts/:id/resume`, `GET /api/risk/double-broker-crosscheck`); 7/7 tests passing (done 2026-08-29)
+- [x] Task 8: applied migration 055 to production, verified all 6 new objects live; ran the reconciliation script for real (**256 pipeline_loads reconciled: 241 matched an existing payer, 15 new `payer_registry` rows created** — matches the 15 distinct normalized shipper-company names found during planning); re-ran this module's + T-24's DB-touching tests directly against production (8/8 passing); ran the real double-broker cross-check (**3 checked, 0 flagged** — an honest zero); clean project-wide `tsc --noEmit` (done 2026-08-29)
+
+**Also found along the way, not a T-25 defect:** T-24's own `t24-classification-rules-schema.test.ts` used an exact whole-table `toEqual` match on all 5 of its seed rows — T-25's 2 additive rows correctly broke that assertion's exact count. Fixed by re-scoping that test to T-24's original 5 `source_module` values instead of the whole table, so future modules extending `exception_classification_rules` (there will likely be more) don't need to touch T-24's test file again. `__tests__/risk/t25-schema.test.ts` is now the one that asserts the full 7-row extended set.
+
+**Acceptance criteria status (spec §6):**
+- [x] 1 PASS — verified against 8 seeded carrier-risk-signal scoring cases across all 6 named `signal_type` values (spec explicitly allows seeded signals; zero real ones exist yet)
+- [x] 2 PASS — unknown/weak flagged, strong not; explicitly new functionality per spec, no historical baseline expected or used
+- [x] 3 PASS — 100% arithmetic accuracy verified against hand-calculated cases
+- [x] 4 PASS — banking-change halt fires only when details differ AND a load is active; verified both directions plus the "nothing on file yet" and "no active load" non-firing cases
+- [x] 5 PASS (honest zero) — 3 checked, 0 flagged in production; correctly finds nothing because `load_source_class` has never classified a real load, not because the report is broken
+- [x] 6 PASS — verified by re-running T-24's own regression suite after the type-widening change; zero other lines touched in `bridge.ts`
+- [x] 7 PASS — zero changes to `dispatcher-worker.ts`; T-24's 8-rule regression test re-confirmed green post-change
+
+**T-25 exit gate:** All 7 acceptance criteria pass. Per spec §7, Patrice should still review the payer-credit and concentration logic specifically — it's genuinely new with no historical baseline, the one place in this module where "does this match reality" is a judgment call rather than a comparison.
 
 ---
 
