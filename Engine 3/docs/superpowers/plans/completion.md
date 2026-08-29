@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-28 (T-23 Dispatch & Load Lifecycle Monitor built and verified on a disposable branch; production apply explicitly deferred pending the user's go-ahead — see T-23 section)
-**Status:** Phase 1 (Instrument) complete. Phase 2: T-20, T-21, T-22 built and applied to production in shadow mode, ahead of the formal handoff gate; T-23 code-complete and verified but NOT yet applied to production — see below for what's satisfied vs. explicitly held open.
+**Last updated:** 2026-08-29 (T-23 Dispatch & Load Lifecycle Monitor built and applied to production in shadow mode; acceptance-gap report run for real — see T-23 section)
+**Status:** Phase 1 (Instrument) complete. Phase 2: T-20, T-21, T-22, T-23 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module.
 
 ## How to use this file
 
@@ -215,7 +215,9 @@ Redesigned against the real production schema rather than the base spec's assump
 
 **Spec:** [T23_Dispatch_Lifecycle_Monitor.md](../../../T23_Dispatch_Lifecycle_Monitor.md)
 **Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-28-t23-dispatch-lifecycle-monitor.md`
-**Status:** Code complete and verified on disposable branch `t23-verify` (`br-aged-waterfall-aip8fs19`). **NOT yet applied to production** — the user explicitly chose to stop before the production-apply step this session (asked directly; declined). Nothing in this module has touched the live database. All 6 commits are on `master`, unpushed to `origin/master` (same "commit vs. deploy are two different questions" caveat T-19/T-22 already document).
+**Status:** Built and applied to production 2026-08-28/29, in shadow mode (zero changes to `dispatcher-worker.ts`/`dispatch-gate.ts`). All 6 new objects verified live on production (`carrier_acceptance_state`, `dispatch_routing_rules` + Myra's seeded row, both new triggers, `v_lifecycle_late_loads`). The measurement report (spec §5) ran for real against production — see below for the actual, honestly-reported number. All commits are on `master`, unpushed to `origin/master` (same "commit vs. deploy are two different questions" caveat T-19/T-22 already document).
+
+**Note on sequencing this session:** the user was asked directly before the production-apply step; the first answer was to stop and leave the module on the disposable `t23-verify` branch only. A follow-up message ("Apply to main/merge") reversed that and authorized proceeding, so Task 7 ran after all — recorded here so the sequence is honest, not smoothed over.
 
 **Schema-reality corrections vs. the base spec** (documented in migration `053-t23-dispatch-lifecycle-monitor.sql`'s header — read before touching this again):
 1. The spec's central premise — "assignment and acceptance are the same event, no confirmation step exists" — predates migrations `049`/`051` (2026-08-26, E2-04 M6/F1), which already added a real signed-rate-con gate (`loads.carrier_signature_received_at`/`_method`/`_confirmed_by`, `lib/dispatch-gate.ts`) for AI-cascade loads. The real, still-open gap is narrower: manual (non-pipeline) assignments never run that gate at all, and an AI-cascade load's signature SLA can still lapse. `carrier_acceptance_state` reports the real split instead of assuming 100% unconfirmed.
@@ -230,12 +232,20 @@ Redesigned against the real production schema rather than the base spec's assump
 - [x] Task 3: `lib/dispatch/routing.ts` — `resolveDispatchRouting()`/`setDispatchRoutingOverride()`; 5/5 unit tests passing (done 2026-08-28)
 - [x] Task 4: `GET`/`POST /api/dispatch/routing/:tenantId` — 6/6 tests passing, including a tenant-isolation IDOR fix (see below) (done 2026-08-28)
 - [x] Task 5: `GET /api/lifecycle/load/:id`, `GET /api/lifecycle/late`, `GET /api/lifecycle/acceptance-gap-report` — 4/4 tests passing; the timeline route scopes by `tenant_id`, not just the guessable `pipeline_load_id`, from the start (done 2026-08-28)
-- [x] Task 6: `scripts/t23_acceptance_gap_report.ts` — smoke-tested against `t23-verify` (0/0, expected — no backfill has run there); **not yet run against production**, since production apply didn't happen this session (done 2026-08-28, deliverable run still pending)
-- [ ] Task 7: Apply migration 053 + backfill to production, run the real acceptance-gap report, validate `v_lifecycle_late_loads` against ≥5 real historical late loads, run the full regression suite, update this entry with real numbers — **explicitly not started**, pending the user's go-ahead
+- [x] Task 6: `scripts/t23_acceptance_gap_report.ts` — smoke-tested against `t23-verify` (0/0), then run for real against production (done 2026-08-28)
+- [x] Task 7: Applied migration 053 to production; ran backfill + report there; typechecked project-wide; ran T-23's own DB-touching tests directly against production for a second confirmation. Full unrelated regression suite (`pnpm vitest run` across the whole project) was **deliberately not run against live production data** this session — that's a much larger blast radius than a scoped migration apply, and wasn't clearly covered by the go-ahead given; recommend running it (or re-verifying on a fresh disposable branch) before relying on this module beyond what's verified here (done 2026-08-28, with that one exception noted)
 
 **Real bug found and fixed during this module, not a build defect worth re-litigating if seen again:** a background automated security review (post-commit) flagged that `GET`/`POST /api/dispatch/routing/:tenantId` let any authenticated non-super-admin user read or override *another* tenant's dispatch routing by changing the URL path parameter — the handler never checked `auth.user.tenantId` against the requested `tenantId`. This is the same class of IDOR T-22's postmortem already documents (§2 above) — a plan/implementation copying an existing route shape without re-deriving the tenant check for a *new* per-tenant path parameter. Fixed by requiring `isSuperAdmin` for any cross-tenant request (mirroring `resolveTenantId()`'s existing pattern), verified with 3 new tests (GET/POST rejection + legitimate super-admin path). Applied the same discipline proactively to `/api/lifecycle/load/:id` before it could be flagged too — scoped its `events` query by `tenant_id`, not just `pipeline_load_id` (a guessable `SERIAL` id).
 
-**T-23 exit gate:** NOT yet met — Task 7 (production apply, the real measurement report run, live-loads validation, full regression suite) has not started. All 6 acceptance criteria (spec §7) are pending that step; nothing about the criteria themselves is in question, only whether they've been exercised against production data yet.
+**Production apply — verified live, 2026-08-28/29:**
+- All 6 new objects confirmed live via direct query (not just a clean migration exit): `carrier_acceptance_state`, `dispatch_routing_rules` (Myra's `myra_managed` row seeded), `trg_lifecycle_events_loads`, `trg_lifecycle_event_location_ping`, `v_lifecycle_late_loads`.
+- Backfill script run against production: **0 of 0 candidates** — genuine, not a bug. Confirmed by direct query: 0 `pipeline_loads` rows are currently in `dispatched`/`delivered` stage, and 0 pipeline-linked `loads` rows have a `carrier_id` set at all. Consistent with the already-documented shadow-drain state (T-20/T-21/T-22: `SCANNER_ENABLED=false`, no real Dispatcher activity yet).
+- Measurement report (spec §5, the module's required deliverable) run for real against production: **total=0, confirmed=0, unconfirmed=0**, all breakdown fields 0 — the honest result of zero real dispatch activity to measure yet, not a placeholder. Re-run this script once real Pilot 1/dispatch volume exists; that's when the number becomes meaningful, same treatment as T-18's replay harness and T-20's shadow-ranking report.
+- `v_lifecycle_late_loads` returns 0 rows in production right now (0 loads in `dispatched` stage to evaluate) — **acceptance criterion 4 (validate against ≥5 real historical late loads) is correctly held OPEN**, not fabricated. Same pattern as T-20's criteria 4/5 and T-22's criteria 1/7: deferred pending real volume, not a build defect.
+- `pnpm tsc --noEmit -p tsconfig.json`: clean, project-wide.
+- T-23's own 8 DB-touching tests (`t23-triggers.test.ts`, `t23-backfill.test.ts`) re-run directly against production (not just `t23-verify`): **8/8 passing**, self-cleaning.
+
+**T-23 exit gate:** NOT yet met. Criteria 1, 2, 3, 5, 6 (spec §7) pass — the mechanism is built, deployed, and verified correct by construction and by test. **Criterion 4 is explicitly OPEN**, deferred pending real dispatch volume, exactly the same class of honest deferral as T-20's criteria 4/5 and T-22's criteria 1/7. The full unrelated regression suite has not been re-run against production this session (see Task 7 note) — recommended before treating this module as fully closed out.
 
 ---
 
