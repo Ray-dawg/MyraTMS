@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
-import { authorizeGovernanceRequest } from '@/lib/governance/api-helpers';
+import { authorizeGovernanceRequest, resolveTenantId } from '@/lib/governance/api-helpers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -16,12 +16,13 @@ export async function GET(req: NextRequest) {
   if (!allowedStatuses.includes(resolvedStatus)) {
     return NextResponse.json({ error: 'Invalid status filter' }, { status: 400 });
   }
+  const tenantId = resolveTenantId(req.nextUrl.searchParams, auth.user);
 
   try {
     const { rows } = await db.query(
       `SELECT id, name, type, related_to, terms_match_status, parsed_terms, created_at
-         FROM documents WHERE terms_match_status = $1 ORDER BY created_at DESC`,
-      [resolvedStatus],
+         FROM documents WHERE terms_match_status = $1 AND tenant_id = $2 ORDER BY created_at DESC`,
+      [resolvedStatus, tenantId],
     );
     return NextResponse.json({ mismatches: rows });
   } catch (err) {

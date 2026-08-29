@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
-import { authorizeGovernanceRequest } from '@/lib/governance/api-helpers';
+import { authorizeGovernanceRequest, resolveTenantId } from '@/lib/governance/api-helpers';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,14 +20,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ pipe
   if (!Number.isInteger(pipelineLoadId)) {
     return NextResponse.json({ error: 'Invalid pipelineLoadId' }, { status: 400 });
   }
+  const tenantId = resolveTenantId(req.nextUrl.searchParams, auth.user);
 
   try {
     const { rows } = await db.query(
       `SELECT event_type, occurred_at, payload FROM events
-        WHERE pipeline_load_id = $1
+        WHERE pipeline_load_id = $1 AND tenant_id = $2
           AND event_type IN ('document.rate_con_sent', 'document.rate_con_received', 'document.rate_con_matched', 'document.terms_mismatch_detected')
         ORDER BY occurred_at ASC`,
-      [pipelineLoadId],
+      [pipelineLoadId, tenantId],
     );
     return NextResponse.json({ pipelineLoadId, events: rows });
   } catch (err) {

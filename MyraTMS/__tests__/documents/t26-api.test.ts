@@ -16,7 +16,7 @@ import { GET as getIntakeReport } from '@/app/api/documents/intake-match-report/
 describe('T-26 documents API', () => {
   beforeEach(() => queryMock.mockReset());
 
-  it('GET rate-con status returns both outbound and inbound events for a load', async () => {
+  it('GET rate-con status returns both outbound and inbound events for a load, scoped by tenant', async () => {
     queryMock.mockResolvedValueOnce({
       rows: [
         { event_type: 'document.rate_con_sent', occurred_at: '2026-08-01' },
@@ -27,15 +27,16 @@ describe('T-26 documents API', () => {
     const res = await getRateConStatus(req, { params: Promise.resolve({ pipelineLoadId: '42' }) });
     const body = await res.json();
     expect(body.events.length).toBe(2);
+    expect(queryMock.mock.calls[0][1]).toEqual([42, 2]);
   });
 
-  it('GET terms-mismatches defaults to mismatch status, via a parameterized query', async () => {
+  it('GET terms-mismatches defaults to mismatch status, scoped by tenant via a parameterized query', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ id: 'DOC-1', terms_match_status: 'mismatch' }] });
     const req = new NextRequest('http://x/api/documents/terms-mismatches');
     const res = await getMismatches(req);
     const body = await res.json();
     expect(body.mismatches.length).toBe(1);
-    expect(queryMock.mock.calls[0][1]).toEqual(['mismatch']);
+    expect(queryMock.mock.calls[0][1]).toEqual(['mismatch', 2]);
   });
 
   it('GET terms-mismatches rejects an invalid status value', async () => {
@@ -44,7 +45,7 @@ describe('T-26 documents API', () => {
     expect(res.status).toBe(400);
   });
 
-  it('GET intake-match-report reports real counts, not a placeholder', async () => {
+  it('GET intake-match-report reports real counts, not a placeholder, with tenant-scoped parseable count', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ total: '10', matched: '3', parseable: '2' }] });
     const req = new NextRequest('http://x/api/documents/intake-match-report?since=90');
     const res = await getIntakeReport(req);
@@ -52,5 +53,6 @@ describe('T-26 documents API', () => {
     expect(body.total).toBe(10);
     expect(body.matchRatePct).toBe(30);
     expect(body.extractionAccuracyPct).toBeCloseTo(66.67, 1);
+    expect(queryMock.mock.calls[0][1]).toEqual([90, 2]);
   });
 });
