@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-29 (T-25 Risk & Fraud Scoring built and applied to production; payer registry reconciled against real data, double-broker cross-check run for real — see T-25 section)
-**Status:** Phase 1 (Instrument) complete. Phase 2: T-20 through T-25 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module. Only T-26 remains to close out Phase 2.
+**Last updated:** 2026-08-29 (T-26 Document Automation built and applied to production — the Phase 2 module SET (T-20–T-26) is now complete; E3-00 §8's own Phase 2 EXIT GATE is a separate, much higher bar not yet met — see the T-26 section's closing note)
+**Status:** Phase 1 (Instrument) complete. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module.
 
 ## How to use this file
 
@@ -322,6 +322,45 @@ Redesigned against the real production schema rather than the base spec's assump
 - [x] 7 PASS — zero changes to `dispatcher-worker.ts`; T-24's 8-rule regression test re-confirmed green post-change
 
 **T-25 exit gate:** All 7 acceptance criteria pass. Per spec §7, Patrice should still review the payer-credit and concentration logic specifically — it's genuinely new with no historical baseline, the one place in this module where "does this match reality" is a judgment call rather than a comparison.
+
+---
+
+### T-26 — Document Automation (final Phase 2 module)
+
+**Spec:** [T26_Document_Automation.md](../../../T26_Document_Automation.md)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-29-t26-document-automation.md`
+**Status:** Built and applied to production 2026-08-29, in shadow mode (zero changes to `dispatcher-worker.ts` or `/api/loads/[id]/assign`'s generation logic). All 7 acceptance criteria pass — one (criterion 4) required zero new production code, just a confirming test.
+
+**The spec's own central premise was factually wrong — the biggest finding of any Phase 2 module.** T-26 v1.0 states "nothing receives, parses, or validates an inbound shipper rate con today... that's the actual gap T-26 closes." A full inbound-email pipeline already existed (E2-04 M0–M6, built after this spec was dated 2026-08-22): `lib/email/imap-poller.ts` + `lib/email/inbound-classifier.ts` + `inbound_emails`, already receiving shipper replies, verifying the sender, and attaching the reply as a `'Shipper Rate Confirmation Reply'` document. It deliberately does **not** parse or compare terms — an explicit M0 design decision that the real confirmation is the link click, not the document. Building the spec's proposed `inbound_document_intake` table + a new poller would have duplicated a working system exactly the way T-24 v1.0 would have duplicated the Exception Detection Engine before its v1.1 amendment course-corrected. This module extends the existing pipeline instead of replacing it.
+
+**Other schema-reality findings:**
+1. `documents.tenant_id` already existed — spec §4.1's first `ALTER` was redundant; only `parsed_terms`/`terms_match_status` are genuinely new columns.
+2. **Acceptance criterion 4 was already fully satisfied end-to-end, zero new code needed.** `lib/dispatch-gate.ts`'s `completeDispatchOnSignedRateCon()` (called by the IMAP poller's `carrier_reply` branch) sets `loads.carrier_signature_received_at`/`carrier_signature_method`; T-23's own `fn_lifecycle_events_from_loads()` trigger (migration 053, already live since 2026-08-28/29) already watches those columns and updates `carrier_acceptance_state.confirmation_method = 'rate_con_signed'`. Verified with a real end-to-end test, not a synthetic column UPDATE.
+3. The public tracking page's document exclusion is a literal `type IN ('BOL', 'POD', 'Invoice')` allow-list, confirmed correct and pinned by a new regression test.
+4. No PDF-understanding capability existed anywhere in this codebase — `extractRateConTerms()` is new, isolated code using Claude's native PDF-document input, deliberately not built into the shared `ClaudeService` class (wrong shape for a PDF input; that class already has documented reliability issues unrelated to this module).
+5. **A second real, previously-untested bug found via this module's own regression test, unrelated to the module's stated scope:** `app/api/tracking/[token]/documents/route.ts` passed `resolveTrackingToken()`'s `tenantId` (a `BIGINT` column, returned as a JS string by Neon's driver) straight into `withTenant()`, whose `Number.isInteger()` guard rejects a string — every real call to this route was throwing before the fix. Fixed with a `Number()` coercion only; the security-relevant allow-list itself was untouched.
+6. **A real tenant-isolation IDOR, caught by the same automated background security review that's now caught one in every module from T-23 onward:** all 3 new API routes (`rate-con` status, `terms-mismatches`, `intake-match-report`) queried without any tenant filter. Fixed by scoping every query that touches a genuinely tenant-owned column (`events.tenant_id`, `documents.tenant_id`). `inbound_emails`/`pipeline_loads` still have no `tenant_id` column at all (same reality already documented for T-23/T-24/T-25) — the report's `total`/`matched` counts are honestly left system-wide by construction, not silently left unscoped by oversight.
+
+- [x] Task 1: Migration `056-t26-document-automation.sql` — `documents.parsed_terms`/`terms_match_status` + 5 document-lifecycle event triggers (2 on `documents`, 2 on `inbound_emails`, `document.delivered` already free from T-17); 5/5 tests passing (done 2026-08-29)
+- [x] Task 2: `lib/documents/rate-con-terms.ts` — `extractRateConTerms()` (Claude PDF input) + `compareTerms()` (pure); 7/7 tests passing, including a real-API-call failure path (missing key) tested without mocking (done 2026-08-29)
+- [x] Task 3: widened `lib/exceptions/bridge.ts`'s `SourceSignal` for `document_terms_mismatch` (only change to that file) + wired extraction/comparison into the existing `imap-poller.ts` `shipper_reply` branch as one additive block after its existing `attachDocument()` call; 6/6 bridge tests + 1/1 new wiring test + all 6 pre-existing `imap-poller` tests still passing (done 2026-08-29)
+- [x] **Task 4 — criterion 4, already satisfied:** end-to-end test proving `completeDispatchOnSignedRateCon()` + T-23's existing trigger close T-23's own acceptance gap with zero new production code; 1/1 passing (done 2026-08-29)
+- [x] Task 5: regression test pinning the tracking page's BOL/POD/Invoice-only allow-list (criterion 5); found and fixed the real `tenantId` coercion bug above along the way; 1/1 passing (done 2026-08-29)
+- [x] Task 6: 3 of spec's 4 API endpoints (`GET /api/documents/rate-con/:id`, `GET .../terms-mismatches`, `GET .../intake-match-report`) — `POST /api/documents/inbound-intake` deliberately not built, since it would be a redundant second webhook target superseding the already-working IMAP poller; 4/4 tests passing, plus the tenant-isolation IDOR fix above (done 2026-08-29)
+- [x] Task 7: applied migration 056 to production, verified all 4 new objects live (2 columns + 2 triggers); re-ran this module's + T-24's DB-touching tests directly against production (12/12 passing); ran the real intake-match-report against production (**0 total, 0 matched, 0 parseable** — the honest zero, consistent with every prior Phase 2 module's shadow-drain finding); clean project-wide `tsc --noEmit` aside from one confirmed pre-existing, unrelated error in a T-23 test file (done 2026-08-29)
+
+**Acceptance criteria status (spec §6):**
+- [x] 1 PASS — `document.rate_con_sent` fires on every `documents` insert of type `'Rate Confirmation'`/`'Shipper Rate Confirmation'`, zero PDFKit changes
+- [x] 2 PASS — extraction + comparison tested against seeded cases and a real (honestly-failing) Claude call; real production intake-match-report reports 0/0/0, an honest number
+- [x] 3 PASS — zero false positives on 5 matched-rate seeded cases; correctly flags rate/lane/date mismatches independently
+- [x] 4 PASS — already satisfied by existing code, confirmed by a real end-to-end test
+- [x] 5 PASS — tracking-page allow-list pinned by regression test, unchanged
+- [x] 6 PASS — `documents.tenant_id` already existed; zero behavior change, confirmed
+- [x] 7 PASS — zero changes to `dispatcher-worker.ts` or `/api/loads/[id]/assign`'s generation logic
+
+**T-26 exit gate:** All 7 acceptance criteria pass. Per spec §7, Patrice should still review the inbound-parser accuracy report specifically, since it's genuinely new with no historical baseline — same caveat as T-25's payer-credit logic.
+
+**Phase 2 module set (T-20–T-26) is now complete — but this is explicitly NOT the same thing as Phase 2's own exit gate.** Per the master PRD §8 (and this spec's own §7, which states it plainly): the real Phase 2 exit gate is 100 consecutive loads through `booked → dispatched → delivered → scored` with ≥80% zero-touch — a real-volume operational bar, not a "were the 7 modules built" checklist. Every module in this set (T-20 through T-26) has at least one acceptance criterion honestly held open or reporting a real zero, precisely because the shadow-drain state this whole phase was built under has never produced that volume. Building these 7 modules was necessary for Phase 2's exit gate to ever be reachable; it does not itself satisfy that gate.
 
 ---
 
