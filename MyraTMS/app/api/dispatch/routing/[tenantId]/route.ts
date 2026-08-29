@@ -19,6 +19,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ tena
   const tenantId = parseTenantId(raw);
   if (tenantId === null) return NextResponse.json({ error: 'Invalid tenantId' }, { status: 400 });
 
+  // Tenant isolation: only a super-admin may read another tenant's dispatch
+  // routing. A non-super-admin's own tenantId is the only value they may
+  // pass here, same enforcement pattern as resolveTenantId() elsewhere in
+  // this codebase.
+  if (!auth.user.isSuperAdmin && auth.user.tenantId !== tenantId) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
   try {
     const resolution = await resolveDispatchRouting(tenantId);
     return NextResponse.json(resolution);
@@ -35,6 +43,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ ten
   const { tenantId: raw } = await params;
   const tenantId = parseTenantId(raw);
   if (tenantId === null) return NextResponse.json({ error: 'Invalid tenantId' }, { status: 400 });
+
+  // Tenant isolation: only a super-admin may override another tenant's
+  // dispatch routing.
+  if (!auth.user.isSuperAdmin && auth.user.tenantId !== tenantId) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
 
   let body: any;
   try {
