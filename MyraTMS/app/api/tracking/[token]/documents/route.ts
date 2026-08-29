@@ -12,7 +12,17 @@ export async function GET(
   const resolved = await resolveTrackingToken(token)
   if (!resolved) return apiError("Invalid or expired tracking token", 404)
 
-  const documents = await withTenant(resolved.tenantId, async (client) => {
+  // tracking_tokens.tenant_id is BIGINT — Neon's serverless driver returns
+  // BIGINT columns as a JS string at runtime despite the declared `number`
+  // type on resolveTrackingToken()'s return value (same documented quirk as
+  // lib/tenants/get-myra-tenant-id.ts). withTenant()'s own Number.isInteger()
+  // guard rejects a string, so every real call here was throwing before this
+  // fix — found via T-26's tracking-exclusion regression test, not present
+  // in any prior test for this route. Coercion only; the security-relevant
+  // BOL/POD/Invoice allow-list below is untouched.
+  const tenantId = Number(resolved.tenantId)
+
+  const documents = await withTenant(tenantId, async (client) => {
     const { rows: tokens } = await client.query(
       `SELECT load_id, expires_at FROM tracking_tokens WHERE token = $1 LIMIT 1`,
       [token],
