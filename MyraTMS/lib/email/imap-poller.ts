@@ -13,7 +13,11 @@
  *     shipper's actual confirmation is the CLICK on the confirm link;
  *     lib/confirmation-actions.ts already handles that. This reply is
  *     stored for human review and attached to the load's documents, never
- *     a trigger).
+ *     a trigger). T-26 adds one additive step here: after the attachment
+ *     is stored, extract its terms and compare against what was negotiated
+ *     (lib/documents/rate-con-terms.ts) — visibility only, still never a
+ *     trigger; a mismatch is recorded and surfaced via T-24's console, not
+ *     acted on.
  *   - carrier_reply: DOES drive a state transition when the sender is
  *     verified and a PDF is attached — calls
  *     completeDispatchOnSignedRateCon() (lib/dispatch-gate.ts, M6), the
@@ -35,6 +39,8 @@ import { getMyraTenantId } from '@/lib/tenants/get-myra-tenant-id';
 import { logger } from '@/lib/logger';
 import { attachDocument } from '@/lib/documents';
 import { completeDispatchOnSignedRateCon } from '@/lib/dispatch-gate';
+import { extractRateConTerms, compareTerms } from '@/lib/documents/rate-con-terms';
+import { bridgeToExceptions } from '@/lib/exceptions/bridge';
 import { classifyInboundEmail } from './inbound-classifier';
 
 export interface ImapEnvelopeAddress {
@@ -168,7 +174,7 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
             first.content,
             { access: 'public', addRandomSuffix: false },
           );
-          await attachDocument({
+          const attachedDoc = await attachDocument({
             tenantId,
             loadId: documentLoadId,
             docType: 'Shipper Rate Confirmation Reply',
@@ -177,6 +183,51 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
             fileSize: first.size ?? first.content.length,
             uploadedBy: 'system:imap-poller',
           });
+
+          // T-26 — additive: extract terms from the attachment and compare
+          // against what was negotiated. Never blocks or alters the
+          // paper-trail attachment above, which remains the M0 design's
+          // actual confirmation mechanism (the link click) — this only
+          // adds visibility on top of it.
+          try {
+            const extracted = await extractRateConTerms(first.content);
+            const negotiatedRow = await db.query<{
+              agreed_rate: string | null; origin_city: string; destination_city: string; pickup_date: string;
+            }>(
+              `SELECT agreed_rate, origin_city, destination_city, pickup_date FROM pipeline_loads WHERE id = $1`,
+              [matchedLoadId],
+            );
+            const neg = negotiatedRow.rows[0];
+            const status = neg && neg.agreed_rate
+              ? compareTerms(extracted, {
+                  rate: Number(neg.agreed_rate),
+                  origin: neg.origin_city,
+                  destination: neg.destination_city,
+                  pickupDate: new Date(neg.pickup_date).toISOString().slice(0, 10),
+                })
+              : 'unparseable';
+
+            await db.query(
+              `UPDATE documents SET parsed_terms = $1, terms_match_status = $2 WHERE id = $3`,
+              [extracted ? JSON.stringify(extracted) : null, status, attachedDoc.id],
+            );
+
+            if (status === 'mismatch') {
+              await bridgeToExceptions({
+                tenantId,
+                sourceModule: 'document_terms_mismatch',
+                exceptionType: 'rate_con_terms_mismatch',
+                title: `Rate con terms mismatch — pipeline load ${matchedLoadId}`,
+                description: `Shipper's returned rate con terms don't match what was negotiated. Parsed: ${JSON.stringify(extracted)}`,
+                context: {},
+                pipelineLoadId: matchedLoadId,
+                loadId: null,
+                carrierId: null,
+              });
+            }
+          } catch (err) {
+            logger.error(`[imap-poller] term extraction/comparison failed for load ${classification.loadId}`, err);
+          }
         } catch (err) {
           logger.error(`[imap-poller] Failed attaching shipper reply document for load ${classification.loadId}`, err);
         }
