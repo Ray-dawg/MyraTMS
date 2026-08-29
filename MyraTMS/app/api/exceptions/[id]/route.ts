@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
+import { db } from "@/lib/pipeline/db-adapter"
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = getCurrentUser(req)
@@ -56,6 +57,28 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         return exception
       })
       if (!exc) return NextResponse.json({ error: "Exception not found" }, { status: 404 })
+
+      // T-24 §5 — additive: log a permanent T-17 event for every resolution
+      // regardless of source_module, so the record covers both the 8
+      // original rules and the new bridged categories uniformly. Never
+      // blocks or alters the response above — a logging failure here must
+      // never turn a successful resolve into an error response.
+      try {
+        await db.query(
+          `INSERT INTO events (
+             tenant_id, event_type, entity_type, entity_id, pipeline_load_id,
+             source, actor_type, payload, occurred_at, derived_from_table, derived_from_id
+           ) VALUES ($1, 'exception.resolved', 'exception', $2, $3, 'exceptions-api', 'human',
+             $4, LOCALTIMESTAMP, 'exceptions', $2)`,
+          [
+            ctx.tenantId, 0, exc.pipeline_load_id ?? null,
+            JSON.stringify({ exceptionId: exc.id, type: exc.type, source_module: exc.source_module }),
+          ],
+        )
+      } catch (err) {
+        console.error("[PATCH /api/exceptions/:id] resolution-event logging failed (non-blocking):", err)
+      }
+
       return NextResponse.json(exc)
     }
 
