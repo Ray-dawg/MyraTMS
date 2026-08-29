@@ -64,4 +64,13 @@ describe('bridgeToExceptions', () => {
     });
     expect(result).toBe(false); // exercises the type accepting the value; behavior already covered by the "no rule matches" case above
   });
+
+  it('accepts sourceModule=document_terms_mismatch (T-26 extension)', async () => {
+    (matchClassificationRule as any).mockResolvedValueOnce(null);
+    const result = await bridgeToExceptions({
+      tenantId: 2, sourceModule: 'document_terms_mismatch', exceptionType: 'rate_con_terms_mismatch',
+      title: 'Terms mismatch', description: 'desc', context: {}, pipelineLoadId: 501, loadId: null, carrierId: null,
+    });
+    expect(result).toBe(false);
+  });
 });
