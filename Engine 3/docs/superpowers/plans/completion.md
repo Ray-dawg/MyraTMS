@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-29 (T-23 Dispatch & Load Lifecycle Monitor built and applied to production in shadow mode; acceptance-gap report run for real — see T-23 section)
-**Status:** Phase 1 (Instrument) complete. Phase 2: T-20, T-21, T-22, T-23 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module.
+**Last updated:** 2026-08-29 (T-24 Exception Engine + Human Escalation Console built and applied to production; no new frontend, per spec's own amendment — see T-24 section)
+**Status:** Phase 1 (Instrument) complete. Phase 2: T-20, T-21, T-22, T-23, T-24 built and applied to production in shadow mode, ahead of the formal handoff gate — see below for what's satisfied vs. explicitly held open per module.
 
 ## How to use this file
 
@@ -246,6 +246,45 @@ Redesigned against the real production schema rather than the base spec's assump
 - T-23's own 8 DB-touching tests (`t23-triggers.test.ts`, `t23-backfill.test.ts`) re-run directly against production (not just `t23-verify`): **8/8 passing**, self-cleaning.
 
 **T-23 exit gate:** NOT yet met. Criteria 1, 2, 3, 5, 6 (spec §7) pass — the mechanism is built, deployed, and verified correct by construction and by test. **Criterion 4 is explicitly OPEN**, deferred pending real dispatch volume, exactly the same class of honest deferral as T-20's criteria 4/5 and T-22's criteria 1/7. The full unrelated regression suite has not been re-run against production this session (see Task 7 note) — recommended before treating this module as fully closed out.
+
+---
+
+### T-24 — Exception Engine + Human Escalation Console
+
+**Spec:** [T24_Exception_Engine_Console.md](../../../T24_Exception_Engine_Console.md) (v1.1 — supersedes v1.0 same day)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-29-t24-exception-engine-console.md`
+**Status:** Built and applied to production 2026-08-29, in shadow mode. No new frontend — per the spec's own v1.1 amendment, this module makes the existing, live Exception Detection Engine + Alert Center the one true console rather than building a rival. 7 of 9 acceptance criteria pass; criteria 2 and 9's live-volume half are honestly held open (same treatment as every other Phase 2 module).
+
+**Real findings from live-schema investigation (spec §4.0's own required step), more significant than most prior modules' schema-reality corrections:**
+1. **The spec's proposed migration (§4.2) was already redundant before this module started.** `exceptions.tenant_id`/`pipeline_load_id`/`source_module`/`suggested_action`/`sla_due_at` all already existed — added by `028_add_tenant_id.sql` and `041-sellside-expansion-schema.sql`, the latter explicitly labeled in its own header comment as "T-24 §4.2 columns M0's escalation branch needs, added independently" of this module. Migration `054` therefore adds only the new `exception_classification_rules` table — zero `ALTER TABLE exceptions` anywhere.
+2. **The spec's assumed 8 existing rule names are wrong.** It guessed `unassigned_urgent, late_delivery_risk, missing_gps, detention_risk, carrier_capacity, rate_escalation, missing_docs, missing_checkcall`. The real 8, read directly from `lib/exceptions/detector.ts`: `unassigned_urgent, late_pickup, eta_breach, gps_dark, pod_missing, invoice_overdue, insurance_expiring, missing_checkcall`. Only 2 of 8 names matched. The regression test (below) asserts against the real names.
+3. **A third, previously-undocumented source already writes into `exceptions` with zero new work needed:** `lib/dispatch-gate.ts`'s `escalate()` (`carrier_verification_failed`, `rate_con_generation_failed`) and `lib/pipeline/health-checks.ts`'s three functions (`pipeline_stage_stuck`, `pipeline_load_missed_pickup_window`, `carrier_signature_overdue`, all `source_module='pipeline_health_cron'`) — both built E2-03 M0/M5, after this spec was dated. They're already "T-24-compliant" by construction; this module does not touch either file.
+4. T-18's `escalations` table gets no active poller in this pass, per the spec's own bridge design (§4.4): every row is `sourceModule === 'authority_shadow'` until T-18b ships, so the guard clause in `bridgeToExceptions()` *is* the entire T-18 integration surface here — a poller with nothing consequential to ever find would be dead code.
+5. This project's cron schedules run far less often than their own docblocks claim (`exception-detect`/`pipeline-health` both say "every 5 minutes" in comments; `vercel.json` runs them once daily) — a strong signal of a Vercel plan cron-frequency cap. The new `exception-bridge` cron follows `vercel.json` (daily, 1pm) as the actual source of truth, not the aspirational comments.
+
+- [x] Task 1: Migration `054-t24-exception-classification-rules.sql` — `exception_classification_rules` table + 5 seed rows (2 lifecycle_late tiers, 1 each for carrier_risk/stage_escalated/dead_letter); 2/2 tests passing (done 2026-08-29)
+- [x] Task 2: `lib/exceptions/classification-rules.ts` — `matchClassificationRule()` with tiered-severity condition matching (a load 400 minutes late correctly resolves to the `critical` tier, not just the first matching `low` one); 4/4 unit tests passing (done 2026-08-29)
+- [x] Task 3: `lib/exceptions/bridge.ts` — `bridgeToExceptions()` + 4 pollers (`pollLifecycleLate`, `pollCarrierRisk`, `pollStageEscalated`, `pollDeadLetterJobs`), same check-before-insert dedup discipline as `detector.ts`/`health-checks.ts`; 3/3 unit tests passing (done 2026-08-29)
+- [x] **Task 4 — acceptance criterion 3, the spec's own "single most important criterion":** regression test proving all 8 existing rules fire unaffected, run against both `t24-verify` and production directly; 3/3 passing in both places (done 2026-08-29)
+- [x] Task 5: new daily `GET /api/cron/exception-bridge` cron (existing `exception-detect` cron untouched); 2/2 tests passing (done 2026-08-29)
+- [x] Task 6: additive `exception.resolved` T-17 event logging on the existing `PATCH /api/exceptions/[id]` route — response shape unchanged, verified by test; regression test (Task 4) re-run afterward to confirm no disturbance (done 2026-08-29)
+- [x] Task 7: `GET`/`POST /api/exceptions/classification-rules`, `GET /api/exceptions/sla-breaches`; 4/4 tests passing, including a proactive tenant-isolation guard on `POST` (client-supplied `tenantId` requires `isSuperAdmin`, same fix class as T-23's dispatch-routing IDOR) (done 2026-08-29)
+- [x] Task 8: applied migration 054 to production, verified all 5 seed rows live; re-ran Tasks 1/4/6's DB-touching tests directly against production (6/6 passing); clean project-wide `tsc --noEmit` (done 2026-08-29)
+
+**A real, honest limitation found while attempting criterion 2's spot-check:** production currently has 0 rows in `v_lifecycle_late_loads` (late_status IS NOT NULL), 0 unreviewed `carrier_risk_signals`, and 0 dead-lettered `agent_jobs` — consistent with the shadow-drain state every prior Phase 2 module has already documented. It does have **3** `pipeline_loads` rows at `stage='escalated'`, but all 3 have `TEST-`-prefixed `load_id` values (`TEST-CASCADE-DISPATCH-...`, `TEST-PROSPECT-...`) — leftover fixtures from earlier sessions' test runs, not real business incidents. **Criterion 2 (spot-check against ≥10 real incidents) is therefore held OPEN** — there are zero genuine candidates right now, not merely fewer than 10. Deliberately did not run `runExceptionBridge()` against production this session: doing so would bridge those 3 test fixtures into the live Alert Center as visible (if harmless) noise for Patrice to see and wonder about. The new cron will run for real on its own daily schedule once deployed, same as every other cron in this project — no manual trigger was forced ahead of that.
+
+**Acceptance criteria status (spec §7):**
+- [x] 1 — live schema confirmed before writing any migration (documented above)
+- [ ] 2 OPEN — zero genuine historical incidents currently exist to spot-check against (see finding above)
+- [x] 3 PASS — the single most important criterion; verified by dedicated regression test, twice
+- [x] 4 PASS — existing 3 routes' response shapes unchanged, verified by test
+- [x] 5 PASS — resolution-event logging is additive and non-blocking, verified by test
+- [x] 6 PASS — code review confirms zero outbound call/message/cancellation anywhere in this module
+- [x] 7 PASS — Stuck Load Detector, Dead Letter Sweep, and the existing Exception Detection cron are byte-for-byte untouched
+- [x] 8 PASS — no new notification channel; nothing in this module calls `/api/notifications` at all yet since no bridged exception has reached `critical`/`high` in a live poller run (the mechanism exists in the spec's own §4.4 design; wiring it is a small follow-up once the cron has real signal to fire on)
+- [ ] 9 OPEN — this module's own new tests are green; the full unrelated project regression suite was not re-run against production this session, same deliberate scope limit T-23's tracker entry already explains
+
+**T-24 exit gate:** NOT yet met — criterion 2 requires real incidents that don't exist yet, and per spec §8, Patrice needs to actually see new-source exceptions arriving in the Alert Center for a trial period before this is "done in practice." Both are volume/time-dependent, not build defects.
 
 ---
 
