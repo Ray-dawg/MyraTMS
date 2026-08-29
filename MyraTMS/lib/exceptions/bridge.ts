@@ -16,7 +16,8 @@ import { matchClassificationRule } from './classification-rules';
 
 export interface SourceSignal {
   tenantId: number;
-  sourceModule: 'authority_shadow' | 'lifecycle_late' | 'carrier_risk' | 'stage_escalated' | 'dead_letter';
+  sourceModule: 'authority_shadow' | 'lifecycle_late' | 'carrier_risk' | 'stage_escalated' | 'dead_letter'
+    | 'payer_risk' | 'transaction_halt'; // T-25 extension — no other line in this file changes
   exceptionType: string;
   title: string;
   description: string;

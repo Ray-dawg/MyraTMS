@@ -3,10 +3,16 @@ import { describe, it, expect } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
 
 describe('exception_classification_rules (054)', () => {
-  it('has the 5 seeded rows with the expected source_module/severity pairs', async () => {
+  it('has the 5 T-24 seeded rows with the expected source_module/severity pairs', async () => {
+    // Scoped to T-24's own 5 source_modules (not a whole-table exact match)
+    // so later modules (T-25 added payer_risk/transaction_halt) extending
+    // this table don't break this test — additive rows are expected, not
+    // a regression. See __tests__/risk/t25-schema.test.ts for the row that
+    // asserts the full extended set.
     const { rows } = await db.query<{ source_module: string; severity: string; version: number }>(
       `SELECT source_module, severity, version FROM exception_classification_rules
-        WHERE tenant_id = 2 ORDER BY source_module, version`,
+        WHERE tenant_id = 2 AND source_module IN ('lifecycle_late','carrier_risk','stage_escalated','dead_letter')
+        ORDER BY source_module, version`,
     );
     expect(rows).toEqual([
       { source_module: 'carrier_risk', severity: 'medium', version: 1 },

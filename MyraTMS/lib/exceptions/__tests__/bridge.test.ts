@@ -43,4 +43,25 @@ describe('bridgeToExceptions', () => {
     expect(result).toBe(true);
     expect(queryMock).toHaveBeenCalledTimes(2);
   });
+
+  it('accepts sourceModule=transaction_halt (T-25 extension) and routes it through the same insert path', async () => {
+    (matchClassificationRule as any).mockResolvedValueOnce({ severity: 'critical', slaMinutes: 15, suggestedAction: 'Review now.' });
+    const queryMock = vi.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ id: 'exc-2' }] });
+    (withTenant as any).mockImplementationOnce((_id: number, cb: any) => cb({ query: queryMock }));
+
+    const result = await bridgeToExceptions({
+      tenantId: 2, sourceModule: 'transaction_halt', exceptionType: 'banking_change_detected',
+      title: 'Halt', description: 'desc', context: {}, pipelineLoadId: 501, loadId: null, carrierId: null,
+    });
+    expect(result).toBe(true);
+  });
+
+  it('accepts sourceModule=payer_risk (T-25 extension)', async () => {
+    (matchClassificationRule as any).mockResolvedValueOnce(null); // no rule configured for this test tenant
+    const result = await bridgeToExceptions({
+      tenantId: 2, sourceModule: 'payer_risk', exceptionType: 'payer_credit_flagged',
+      title: 'Payer risk', description: 'desc', context: {}, pipelineLoadId: null, loadId: null, carrierId: null,
+    });
+    expect(result).toBe(false); // exercises the type accepting the value; behavior already covered by the "no rule matches" case above
+  });
 });
