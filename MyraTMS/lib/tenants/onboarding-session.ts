@@ -1,5 +1,8 @@
 import { db } from '@/lib/pipeline/db-adapter';
 import { createTenantRow } from './provision';
+import { evaluatePolicy } from '@/lib/governance/evaluate-policy-db';
+import { resolveDispatchRouting } from '@/lib/dispatch/routing';
+import { quotePricing } from '@/lib/pricing/pricing-engine';
 
 export type OnboardingStep =
   | 'sign_up' | 'company_created' | 'users_created' | 'billing_captured'
@@ -59,3 +62,68 @@ export async function provisionTenantFromSession(sessionId: number): Promise<{ t
   return { tenantId };
 }
 
+/** Synthetic fixtures for the dry-run — never written to pipeline_loads.
+ *  Two different shapes because evaluatePolicy's PolicyEvaluationLoad and
+ *  quotePricing's PricingQuoteRequest['load'] are genuinely different types,
+ *  not the same "load" object reused (verified against both real interfaces). */
+function syntheticPolicyLoad() {
+  return {
+    isDirect: true,
+    postingSource: 'onboarding_dry_run',
+    originCountry: 'CA',
+    destinationCountry: 'CA',
+  };
+}
+
+function syntheticPricingLoad() {
+  return {
+    originCity: 'Toronto', originState: 'ON', originCountry: 'CA',
+    destinationCity: 'Montreal', destinationState: 'QC', destinationCountry: 'CA',
+    equipmentType: 'Dry Van', postedRate: null,
+    // Fixed distance so a dry-run never triggers a live Mapbox geocode/directions
+    // call (lib/quoting/geo/distance-service.ts) or a distance_cache write. That
+    // write path also has a pre-existing bug unrelated to T-28: it inserts a
+    // `route_geometry` column that does not exist in any migration script
+    // (scripts/020-quoting-engine.sql defines distance_cache without it), so it
+    // throws whenever NEXT_PUBLIC_MAPBOX_TOKEN is set. Supplying distanceMiles/
+    // distanceKm here short-circuits quotePricing's distance lookup
+    // (lib/pricing/pricing-engine.ts's resolveDistance, ~line 63) before it ever
+    // reaches that code. Real Toronto->Montreal driving distance, ~336 mi / 541 km.
+    distanceMiles: 336, distanceKm: 541,
+  };
+}
+
+export async function runDryRun(sessionId: number): Promise<{ policyOk: boolean; dispatchMode: string; pricingOk: boolean }> {
+  const { rows } = await db.query<{ tenant_id: number | null }>(
+    `SELECT tenant_id FROM tenant_onboarding_sessions WHERE id = $1`,
+    [sessionId],
+  );
+  if (rows.length === 0) throw new Error(`No tenant_onboarding_sessions row with id=${sessionId}`);
+  const tenantId = rows[0].tenant_id;
+  if (tenantId === null) {
+    throw new Error(`runDryRun: session ${sessionId} has no provisioned tenant yet — call provisionTenantFromSession first`);
+  }
+
+  const policyResult = await evaluatePolicy({
+    tenantId,
+    load: syntheticPolicyLoad(),
+    correlationId: `t28-dryrun-${sessionId}`,
+  });
+  const dispatchResult = await resolveDispatchRouting(tenantId);
+  const pricingResult = await quotePricing({
+    tenantId,
+    direction: 'sell',
+    requestSource: 'negotiation_api_preview',
+    load: syntheticPricingLoad(),
+  });
+
+  const summary = {
+    policyOk: policyResult.decision === 'accept',
+    dispatchMode: dispatchResult.mode,
+    pricingOk: pricingResult != null,
+  };
+
+  await advanceSession(sessionId, 'tested', summary);
+
+  return summary;
+}

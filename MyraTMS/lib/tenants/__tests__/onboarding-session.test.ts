@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
-import { startSession, advanceSession, provisionTenantFromSession } from '../onboarding-session';
+import { startSession, advanceSession, provisionTenantFromSession, runDryRun } from '../onboarding-session';
+import { applyTenantTypePolicyTemplate } from '../provision';
 
 const createdTenantIds: number[] = [];
 const createdSessionIds: number[] = [];
@@ -52,4 +53,35 @@ describe('lib/tenants/onboarding-session', () => {
     createdSessionIds.push(sessionId);
     await expect(provisionTenantFromSession(sessionId)).rejects.toThrow(/company_created/);
   });
+
+  // Extended timeout: runDryRun's quotePricing -> runRateCascade calls the real
+  // Claude API (ANTHROPIC_API_KEY is set in .env.local) when historical rate data
+  // is unavailable, which it is for this synthetic tenant. In this environment
+  // that call currently fails and exhausts ClaudeService's 3-retry exponential
+  // backoff (~1s+2s+4s per attempt plus real HTTP round trips) before the
+  // cascade falls back to the benchmark rate source -- observed ~60s wall time.
+  // The fallback is by design (lib/pricing/rate-cascade.ts catches the failure
+  // and continues), so the test still asserts real behavior; it just needs
+  // longer than Vitest's 5s default to observe it complete.
+  it('runDryRun exercises policy/dispatch/pricing against a synthetic load with zero pipeline_loads writes', async () => {
+    const { sessionId } = await startSession();
+    createdSessionIds.push(sessionId);
+    const slug = `t28-dryrun-${Date.now()}`;
+    await advanceSession(sessionId, 'company_created', {
+      companyName: 'Dry Run Co', slug, tenantType: 'saas_customer', freightBusinessType: 'carrier',
+    });
+    const { tenantId } = await provisionTenantFromSession(sessionId);
+    createdTenantIds.push(tenantId);
+    await applyTenantTypePolicyTemplate(db, tenantId, 'carrier');
+
+    const { rows: beforeCount } = await db.query<{ count: string }>(`SELECT COUNT(*) FROM pipeline_loads`);
+
+    const result = await runDryRun(sessionId);
+    expect(result.policyOk).toBe(true);
+    expect(typeof result.dispatchMode).toBe('string');
+    expect(typeof result.pricingOk).toBe('boolean');
+
+    const { rows: afterCount } = await db.query<{ count: string }>(`SELECT COUNT(*) FROM pipeline_loads`);
+    expect(afterCount[0].count).toBe(beforeCount[0].count);
+  }, 90000);
 });
