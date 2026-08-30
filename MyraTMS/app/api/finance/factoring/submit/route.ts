@@ -1,7 +1,7 @@
 // app/api/finance/factoring/submit/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { logger } from '@/lib/logger';
-import { authorizeGovernanceRequest } from '@/lib/governance/api-helpers';
+import { authorizeGovernanceRequest, resolveTenantId } from '@/lib/governance/api-helpers';
 import { submitToEcapitalSandbox, recordFactoringSubmission } from '@/lib/finance/adapters/ecapital';
 import { syncInvoiceFactoringStatus } from '@/lib/finance/factoring-sync';
 
@@ -18,11 +18,12 @@ export async function POST(req: NextRequest) {
   if (!Number.isInteger(pipelineLoadId) || !Number.isFinite(feePct)) {
     return NextResponse.json({ error: 'Invalid pipelineLoadId or feePct' }, { status: 400 });
   }
+  const tenantId = resolveTenantId(req.nextUrl.searchParams, auth.user);
 
   try {
     const result = submitToEcapitalSandbox(feePct);
     const id = await recordFactoringSubmission(pipelineLoadId, result);
-    await syncInvoiceFactoringStatus(pipelineLoadId, result.status);
+    await syncInvoiceFactoringStatus(pipelineLoadId, result.status, tenantId);
     return NextResponse.json({ id, ...result });
   } catch (err) {
     logger.error('[finance/factoring/submit POST] failed', err);

@@ -20,6 +20,24 @@ describe('T-27 credit/preference lookups', () => {
     expect(await getPayerCreditLevel(42)).toBe('unknown');
   });
 
+  it('accepts every known credit level verbatim', async () => {
+    for (const level of ['unknown', 'weak', 'acceptable', 'strong']) {
+      queryMock.mockResolvedValueOnce({ rows: [{ credit_level: level }] });
+      expect(await getPayerCreditLevel(42)).toBe(level);
+    }
+  });
+
+  it('collapses an unrecognized DB credit_level to unknown — credit_level is an unconstrained VARCHAR(20), and passing a novel value through would fail OPEN into decideRoute\'s finance branches', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [{ credit_level: 'watchlist' }] });
+    expect(await getPayerCreditLevel(42)).toBe('unknown');
+
+    queryMock.mockResolvedValueOnce({ rows: [{ credit_level: 'STRONG' }] });
+    expect(await getPayerCreditLevel(42)).toBe('unknown');
+
+    queryMock.mockResolvedValueOnce({ rows: [{ credit_level: null }] });
+    expect(await getPayerCreditLevel(42)).toBe('unknown');
+  });
+
   it('returns true when carrier_registry.payment_preference is quick_pay', async () => {
     queryMock.mockResolvedValueOnce({ rows: [{ payment_preference: 'quick_pay' }] });
     expect(await getCarrierWantsQuickPay(42)).toBe(true);

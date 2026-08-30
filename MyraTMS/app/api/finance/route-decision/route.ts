@@ -4,6 +4,7 @@ import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import { authorizeGovernanceRequest, resolveTenantId } from '@/lib/governance/api-helpers';
 import { decideRoute } from '@/lib/finance/routing';
+import type { Route } from '@/lib/finance/routing';
 import { getPayerCreditLevel, getCarrierWantsQuickPay } from '@/lib/finance/credit-lookup';
 import { getFloatExposure, isFloatCapacityAvailable } from '@/lib/finance/float-governor';
 import { computeCapitalDays, computeYieldPer1000CapitalDays } from '@/lib/finance/capital-days';
@@ -39,7 +40,13 @@ export async function POST(req: NextRequest) {
     // table (T27_Finance_Orchestration.md) — NOT part of the missing Pilot 1
     // document. Only the exact resulting dollar yield is unverified (criteria
     // 1/6, still OPEN). DECLINE has no days-held concept.
-    const DAYS_HELD_BY_ROUTE: Record<string, number> = { T1: 10, T2: 39, T3: 1, T4: -29 };
+    //
+    // Keyed on Exclude<Route, 'DECLINE'> rather than `string` so that adding a
+    // new member to the Route union is a compile error here instead of a
+    // silent `undefined` day-count — which would make computeCapitalDays()
+    // return NaN, and Postgres `numeric` accepts the literal NaN without
+    // complaint, persisting it straight into financing_decisions.
+    const DAYS_HELD_BY_ROUTE: Record<Exclude<Route, 'DECLINE'>, number> = { T1: 10, T2: 39, T3: 1, T4: -29 };
     let capitalDaysProjected: number | null = null;
     let yieldProjected: number | null = null;
     if (decision.route !== 'DECLINE') {
