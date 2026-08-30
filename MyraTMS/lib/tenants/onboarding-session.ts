@@ -3,6 +3,7 @@ import { createTenantRow } from './provision';
 import { evaluatePolicy } from '@/lib/governance/evaluate-policy-db';
 import { resolveDispatchRouting } from '@/lib/dispatch/routing';
 import { quotePricing } from '@/lib/pricing/pricing-engine';
+import { bridgeToExceptions } from '@/lib/exceptions/bridge';
 
 export type OnboardingStep =
   | 'sign_up' | 'company_created' | 'users_created' | 'billing_captured'
@@ -126,4 +127,61 @@ export async function runDryRun(sessionId: number): Promise<{ policyOk: boolean;
   await advanceSession(sessionId, 'tested', summary);
 
   return summary;
+}
+
+/**
+ * Bridges a completed onboarding session into T-24's existing exceptions
+ * table for human go-live review (design doc §3.2).
+ *
+ * Before calling bridgeToExceptions, this idempotently ensures a per-tenant
+ * exception_classification_rules row exists for source_module=
+ * 'tenant_onboarding'. matchClassificationRule() (lib/exceptions/
+ * classification-rules.ts) filters by an EXACT tenant_id match, and
+ * migration 058 only seeded that row for tenant_id=2 (Myra) — matching
+ * T-24/T-25's own precedent of scoping their exception types to Myra.
+ * But go_live_requested is the one exception type in this system whose
+ * entire purpose is firing for a brand-new, non-Myra tenant. Without its
+ * own per-tenant row, matchClassificationRule finds zero rows for any real
+ * onboarding customer and bridgeToExceptions silently returns false —
+ * reproducing the "silently vanishes" failure mode (design doc finding #5)
+ * for every tenant except Myra. This insert (mirroring migration 058's
+ * Myra seed row's exact values) closes that gap for every tenant.
+ */
+export async function requestGoLive(sessionId: number): Promise<{ bridged: boolean }> {
+  const { rows } = await db.query<{ tenant_id: number | null; step_data: Record<string, any> }>(
+    `SELECT tenant_id, step_data FROM tenant_onboarding_sessions WHERE id = $1`,
+    [sessionId],
+  );
+  if (rows.length === 0) throw new Error(`No tenant_onboarding_sessions row with id=${sessionId}`);
+  if (rows[0].tenant_id === null) {
+    throw new Error(`requestGoLive: session ${sessionId} has no provisioned tenant yet`);
+  }
+  // Neon returns this BIGINT column as a JS string at runtime despite the
+  // declared `number` type above -- same documented quirk as
+  // lib/tenants/get-myra-tenant-id.ts. withTenant()'s Number.isInteger()
+  // guard (called via bridgeToExceptions below) requires an actual number.
+  const tenantId = Number(rows[0].tenant_id);
+  const companyName = rows[0].step_data.company_created?.companyName ?? `tenant ${tenantId}`;
+
+  await db.query(
+    `INSERT INTO exception_classification_rules (tenant_id, source_module, condition, severity, sla_minutes, suggested_action, version)
+     VALUES ($1, 'tenant_onboarding', '{}'::jsonb, 'medium', 1440, 'Review onboarding session and approve or reject go-live', 1)
+     ON CONFLICT (tenant_id, source_module, version) DO NOTHING`,
+    [tenantId],
+  );
+
+  const bridged = await bridgeToExceptions({
+    tenantId,
+    sourceModule: 'tenant_onboarding',
+    exceptionType: 'go_live_requested',
+    title: `${companyName} has completed onboarding and is requesting go-live`,
+    description: `Onboarding session ${sessionId} has completed all steps and is ready for the go-live human review (T-28 spec §3.2).`,
+    context: { sessionId },
+    pipelineLoadId: null,
+    loadId: null,
+    carrierId: null,
+  });
+
+  await advanceSession(sessionId, 'go_live_requested', { requestedAt: new Date().toISOString() });
+  return { bridged };
 }

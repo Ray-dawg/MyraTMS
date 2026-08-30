@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
-import { startSession, advanceSession, provisionTenantFromSession, runDryRun } from '../onboarding-session';
+import { startSession, advanceSession, provisionTenantFromSession, runDryRun, requestGoLive } from '../onboarding-session';
 import { applyTenantTypePolicyTemplate } from '../provision';
 
 const createdTenantIds: number[] = [];
@@ -11,6 +11,15 @@ afterEach(async () => {
     await db.query(`DELETE FROM tenant_onboarding_sessions WHERE id = $1`, [id]);
   }
   for (const id of createdTenantIds.splice(0)) {
+    // requestGoLive's test (Task 6) writes into `exceptions` via
+    // bridgeToExceptions -- exceptions.tenant_id is ON DELETE RESTRICT
+    // (migration 028), so it must be cleaned up before the tenants row
+    // can be deleted, same as tenant_users/tenant_config below.
+    await db.query(`DELETE FROM exceptions WHERE tenant_id = $1`, [id]);
+    // Not FK-constrained (exception_classification_rules.tenant_id is a
+    // plain INTEGER, no REFERENCES tenants(id)), but cleaned up anyway so
+    // repeated test runs don't accumulate orphan rows for throwaway tenants.
+    await db.query(`DELETE FROM exception_classification_rules WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenant_users WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenant_config WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenants WHERE id = $1`, [id]);
@@ -84,4 +93,25 @@ describe('lib/tenants/onboarding-session', () => {
     const { rows: afterCount } = await db.query<{ count: string }>(`SELECT COUNT(*) FROM pipeline_loads`);
     expect(afterCount[0].count).toBe(beforeCount[0].count);
   }, 90000);
+
+  it('requestGoLive bridges into the existing exceptions table with source_module=tenant_onboarding', async () => {
+    const { sessionId } = await startSession();
+    createdSessionIds.push(sessionId);
+    const slug = `t28-golive-${Date.now()}`;
+    await advanceSession(sessionId, 'company_created', {
+      companyName: 'Go Live Co', slug, tenantType: 'saas_customer', freightBusinessType: 'broker',
+    });
+    const { tenantId } = await provisionTenantFromSession(sessionId);
+    createdTenantIds.push(tenantId);
+
+    const result = await requestGoLive(sessionId);
+    expect(result.bridged).toBe(true);
+
+    const { rows } = await db.query<{ type: string; source_module: string; tenant_id: number }>(
+      `SELECT type, source_module, tenant_id FROM exceptions WHERE source_module = 'tenant_onboarding' AND tenant_id = $1`,
+      [tenantId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].type).toBe('go_live_requested');
+  });
 });

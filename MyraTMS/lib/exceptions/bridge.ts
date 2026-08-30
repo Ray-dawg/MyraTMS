@@ -18,7 +18,8 @@ export interface SourceSignal {
   tenantId: number;
   sourceModule: 'authority_shadow' | 'lifecycle_late' | 'carrier_risk' | 'stage_escalated' | 'dead_letter'
     | 'payer_risk' | 'transaction_halt' // T-25 extension
-    | 'document_terms_mismatch'; // T-26 extension — no other line in this file changes
+    | 'document_terms_mismatch' // T-26 extension
+    | 'tenant_onboarding'; // T-28 extension — no other line in this file changes
   exceptionType: string;
   title: string;
   description: string;
