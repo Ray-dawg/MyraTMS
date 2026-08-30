@@ -7,6 +7,7 @@ import {
   assertValidTenantSlug,
   RESERVED_TENANT_SLUGS,
 } from "@/lib/tenants/validators"
+import { createTenantRow } from "@/lib/tenants/provision"
 
 /**
  * GET /api/admin/tenants
@@ -107,31 +108,29 @@ export async function POST(req: NextRequest) {
   const result = await asServiceAdmin(
     `Create tenant '${slug}' by super-admin ${user.userId}`,
     async (client) => {
-      // Slug uniqueness check before insert so the API returns a clean 409
-      // instead of a Postgres unique-constraint error string.
-      const { rows: existing } = await client.query(
-        `SELECT id FROM tenants WHERE slug = $1 LIMIT 1`,
-        [slug],
-      )
-      if (existing.length > 0) {
-        return { conflict: true as const }
-      }
-
-      const { rows } = await client.query<{ id: number; created_at: string }>(
-        `INSERT INTO tenants (slug, name, type, parent_tenant_id, billing_email, status)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, created_at`,
-        [
+      // Slug uniqueness check + INSERT now live in createTenantRow() so this
+      // route and T-28's self-serve flow share the same code path. It throws
+      // a plain Error containing "already exists" on slug conflict, which we
+      // catch here to preserve the existing 409 response.
+      let tenantId: number
+      let createdAt: string
+      try {
+        const result = await createTenantRow(client, {
           slug,
-          body.name,
-          body.type,
-          body.parentTenantId ?? null,
-          body.billingEmail ?? null,
-          body.status,
-        ],
-      )
-
-      const tenantId = rows[0].id
+          name: body.name,
+          type: body.type,
+          parentTenantId: body.parentTenantId ?? null,
+          billingEmail: body.billingEmail ?? null,
+          status: body.status,
+        })
+        tenantId = result.tenantId
+        createdAt = result.createdAt
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("already exists")) {
+          return { conflict: true as const }
+        }
+        throw err
+      }
 
       // Audit the creation against the new tenant's id so it appears in
       // both per-tenant audit views and the platform-wide super-admin log.
@@ -150,7 +149,7 @@ export async function POST(req: NextRequest) {
         ],
       )
 
-      return { tenantId, createdAt: rows[0].created_at }
+      return { tenantId, createdAt }
     },
   )
 

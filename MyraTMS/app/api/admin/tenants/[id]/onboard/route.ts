@@ -3,7 +3,7 @@ import { z } from "zod"
 import { asServiceAdmin } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireSuperAdmin } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
-import { DEFAULT_TENANT_CONFIG } from "@/lib/tenants/defaults"
+import { cloneDefaultTenantConfig, seatTenantOwner } from "@/lib/tenants/provision"
 
 const ONBOARD_BODY = z.object({
   // The user that will own this tenant. Must already exist in `users`.
@@ -99,28 +99,9 @@ export async function POST(
 
       // 3. Clone DEFAULT_TENANT_CONFIG into tenant_config — but skip any
       //    keys already present (preserves wizard-set values on re-runs).
-      const { rows: existingConfig } = await client.query<{ key: string }>(
-        `SELECT key FROM tenant_config WHERE tenant_id = $1`,
-        [tenantId],
-      )
-      const existingKeys = new Set(existingConfig.map((r) => r.key))
-
-      let configRowsAdded = 0
-      for (const def of DEFAULT_TENANT_CONFIG) {
-        if (existingKeys.has(def.key)) continue
-        await client.query(
-          `INSERT INTO tenant_config (tenant_id, key, value, encrypted, updated_at, updated_by)
-           VALUES ($1, $2, $3, $4, NOW(), $5)`,
-          [
-            tenantId,
-            def.key,
-            JSON.stringify(def.value),
-            def.encrypted,
-            `system:onboard:${user.userId}`,
-          ],
-        )
-        configRowsAdded++
-      }
+      //    Delegated to lib/tenants/provision.ts so this route and T-28's
+      //    self-serve flow share the same code path.
+      const { configRowsAdded } = await cloneDefaultTenantConfig(client, tenantId)
 
       // 4. Apply optional configOverrides — these win even on re-runs
       if (body.configOverrides) {
@@ -137,26 +118,10 @@ export async function POST(
         }
       }
 
-      // 5. Seat the owner if not already in tenant_users
-      const { rows: existingMembership } = await client.query(
-        `SELECT user_id FROM tenant_users WHERE tenant_id = $1 AND user_id = $2 LIMIT 1`,
-        [tenantId, body.ownerUserId],
-      )
-      let ownerSeated = false
-      if (existingMembership.length === 0) {
-        // Clear is_primary=true on any other tenant for this user — the
-        // partial unique index in 027 enforces one-primary-per-user.
-        await client.query(
-          `UPDATE tenant_users SET is_primary = false WHERE user_id = $1 AND is_primary = true`,
-          [body.ownerUserId],
-        )
-        await client.query(
-          `INSERT INTO tenant_users (tenant_id, user_id, role, is_primary, joined_at)
-           VALUES ($1, $2, 'owner', true, NOW())`,
-          [tenantId, body.ownerUserId],
-        )
-        ownerSeated = true
-      }
+      // 5. Seat the owner if not already in tenant_users. Delegated to
+      //    lib/tenants/provision.ts so this route and T-28's self-serve
+      //    flow share the same code path.
+      const { ownerSeated } = await seatTenantOwner(client, tenantId, body.ownerUserId)
 
       // 6. Stamp primary_admin_user_id; flip 'trial' → 'active'
       let statusChangedTo: string | null = null
