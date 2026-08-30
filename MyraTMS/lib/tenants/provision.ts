@@ -47,7 +47,11 @@ export async function createTenantRow(
       input.parentTenantId ?? null, input.billingEmail ?? null, input.status ?? 'trial',
     ],
   );
-  return { tenantId: rows[0].id, createdAt: rows[0].created_at };
+  // Neon returns this BIGINT column as a JS string at runtime despite the
+  // declared `number` type on CreateTenantInput's return -- same documented
+  // quirk as lib/tenants/get-myra-tenant-id.ts. Coerce here so every caller
+  // of createTenantRow gets a real number, not a string masquerading as one.
+  return { tenantId: Number(rows[0].id), createdAt: rows[0].created_at };
 }
 
 export async function cloneDefaultTenantConfig(

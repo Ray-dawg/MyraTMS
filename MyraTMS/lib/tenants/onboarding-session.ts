@@ -100,10 +100,14 @@ export async function runDryRun(sessionId: number): Promise<{ policyOk: boolean;
     [sessionId],
   );
   if (rows.length === 0) throw new Error(`No tenant_onboarding_sessions row with id=${sessionId}`);
-  const tenantId = rows[0].tenant_id;
-  if (tenantId === null) {
+  const tenantIdRaw = rows[0].tenant_id;
+  if (tenantIdRaw === null) {
     throw new Error(`runDryRun: session ${sessionId} has no provisioned tenant yet — call provisionTenantFromSession first`);
   }
+  // Neon returns this BIGINT column as a JS string at runtime despite the
+  // declared `number` type above -- same documented quirk as
+  // lib/tenants/get-myra-tenant-id.ts and this file's requestGoLive.
+  const tenantId = Number(tenantIdRaw);
 
   const policyResult = await evaluatePolicy({
     tenantId,
