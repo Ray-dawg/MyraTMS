@@ -17,7 +17,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS tenant_onboarding_sessions (
     id                 SERIAL PRIMARY KEY,
-    tenant_id          INTEGER REFERENCES tenants(id),
+    tenant_id          BIGINT REFERENCES tenants(id),
 
     current_step       VARCHAR(30) NOT NULL DEFAULT 'sign_up'
                         CHECK (current_step IN (
