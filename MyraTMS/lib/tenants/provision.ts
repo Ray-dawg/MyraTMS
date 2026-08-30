@@ -101,7 +101,17 @@ export async function seatTenantOwner(
  *  boolean column. 'on' -> true, 'opt_in' -> false (off by default, tenant
  *  can enable later), 'inherit' has no defined resolution anywhere in this
  *  codebase (T-19 never built it either) -- rejected outright rather than
- *  guessed. */
+ *  guessed.
+ *
+ *  Idempotent: `tenant_policies` has UNIQUE (tenant_id, version), so a
+ *  second call deactivates the tenant's current active row and inserts the
+ *  next version rather than re-using version 1 (mirrors resolveDispatchRouting's
+ *  `ORDER BY version DESC LIMIT 1` read pattern in lib/dispatch/routing.ts —
+ *  versions accumulate, they don't collide). Also ensures the 'policy_engine'
+ *  authority_envelopes shell row this tenant needs exists, generalizing the
+ *  one-time Myra-only pairing migration 035 set up (tenant_policies row +
+ *  envelope shell together) off `tenantId` instead of `fn_myra_tenant_id()` —
+ *  evaluatePolicy() hard-throws without it. */
 export async function applyTenantTypePolicyTemplate(
   q: Queryable,
   tenantId: number,
@@ -127,12 +137,52 @@ export async function applyTenantTypePolicyTemplate(
 
   await q.query(`UPDATE tenants SET freight_business_type = $1 WHERE id = $2`, [freightBusinessType, tenantId]);
 
-  const { rows } = await q.query<{ id: number }>(
-    `INSERT INTO tenant_policies (tenant_id, version, load_source_policy, dispatch_agent_enabled, negotiation_directions, created_by)
-     VALUES ($1, 1, $2, $3, $4, 'system:t28-provision')
-     RETURNING id`,
-    [tenantId, template.load_source_policy, dispatchAgentEnabled, template.negotiation_directions],
+  // Deactivate any existing active row, then insert the next version —
+  // keeps at most one active row per tenant and never collides on
+  // UNIQUE (tenant_id, version).
+  await q.query(
+    `UPDATE tenant_policies SET is_active = false WHERE tenant_id = $1 AND is_active = true`,
+    [tenantId],
   );
+  const { rows: versionRows } = await q.query<{ next_version: number }>(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM tenant_policies WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const nextVersion = versionRows[0].next_version;
+
+  const { rows } = await q.query<{ id: number }>(
+    `INSERT INTO tenant_policies (tenant_id, version, load_source_policy, dispatch_agent_enabled, negotiation_directions, is_active, created_by)
+     VALUES ($1, $2, $3, $4, $5, true, 'system:t28-provision')
+     RETURNING id`,
+    [tenantId, nextVersion, template.load_source_policy, dispatchAgentEnabled, template.negotiation_directions],
+  );
+
+  // Ensure this tenant has a 'policy_engine' authority_envelopes shell row —
+  // same shape as migration 035's Myra-only seed, generalized off tenantId.
+  // Without it, evaluatePolicy() (lib/governance/evaluate-policy-db.ts)
+  // hard-throws "no active envelope for 'policy_engine' on tenant_id=X".
+  const { rows: agentRows } = await q.query<{ id: number }>(
+    `SELECT id FROM agents WHERE agent_key = 'policy_engine'`,
+  );
+  if (agentRows.length === 0) {
+    throw new Error("applyTenantTypePolicyTemplate: 'policy_engine' agent not seeded — run migration 035");
+  }
+  const policyEngineAgentId = agentRows[0].id;
+
+  await q.query(
+    `INSERT INTO authority_envelopes (
+       agent_id, tenant_id, version, envelope_name, permissions, tools, budget, policies,
+       confidence_threshold, autonomy_default, escalation_rules, created_by
+     )
+     SELECT $1, $2, 1, $3,
+            '{"can": ["evaluate_load_source_policy"], "cannot": []}'::jsonb,
+            '[]'::jsonb, '{}'::jsonb, '{}'::jsonb, 0.700, 'L2', '[]'::jsonb, 'system:t28-provision'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM authority_envelopes WHERE agent_id = $1 AND tenant_id = $2
+     )`,
+    [policyEngineAgentId, tenantId, `policy-engine-tenant-${tenantId}-default`],
+  );
+
   return { policyId: rows[0].id };
 }
 

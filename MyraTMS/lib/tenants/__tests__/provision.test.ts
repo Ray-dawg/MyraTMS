@@ -9,6 +9,7 @@ const createdTenantIds: number[] = [];
 
 afterEach(async () => {
   for (const id of createdTenantIds.splice(0)) {
+    await db.query(`DELETE FROM authority_envelopes WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenant_policies WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenant_subscriptions WHERE tenant_id = $1`, [id]);
     await db.query(`DELETE FROM tenant_config WHERE tenant_id = $1`, [id]);
@@ -92,5 +93,37 @@ describe('lib/tenants/provision', () => {
     );
     expect(primaryRows).toHaveLength(1);
     expect(primaryRows[0].tenant_id).toBe(tenantId);
+  });
+
+  it('applyTenantTypePolicyTemplate is idempotent -- second call does not throw and leaves exactly one active row at an incremented version', async () => {
+    const { tenantId } = await createTenantRow(db, {
+      slug: `t28-test-${Date.now()}`, name: 'T-28 Idempotent Co', type: 'saas_customer',
+    });
+    createdTenantIds.push(tenantId);
+    await applyTenantTypePolicyTemplate(db, tenantId, 'broker');
+    await expect(applyTenantTypePolicyTemplate(db, tenantId, 'broker')).resolves.not.toThrow();
+
+    const { rows: activeRows } = await db.query<{ version: number }>(
+      `SELECT version FROM tenant_policies WHERE tenant_id = $1 AND is_active = true`,
+      [tenantId],
+    );
+    expect(activeRows).toHaveLength(1);
+    expect(activeRows[0].version).toBe(2);
+  });
+
+  it('applyTenantTypePolicyTemplate ensures a policy_engine authority_envelopes row exists for the tenant', async () => {
+    const { tenantId } = await createTenantRow(db, {
+      slug: `t28-test-${Date.now()}`, name: 'T-28 Envelope Co', type: 'saas_customer',
+    });
+    createdTenantIds.push(tenantId);
+    await applyTenantTypePolicyTemplate(db, tenantId, 'dispatcher');
+
+    const { rows: envelopeRows } = await db.query<{ id: number }>(
+      `SELECT ae.id FROM authority_envelopes ae
+         JOIN agents a ON a.id = ae.agent_id
+        WHERE a.agent_key = 'policy_engine' AND ae.tenant_id = $1`,
+      [tenantId],
+    );
+    expect(envelopeRows.length).toBeGreaterThan(0);
   });
 });
