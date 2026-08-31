@@ -1,83 +1,53 @@
--- ============================================================================
--- 059: T-30 CONTRACT FREIGHT INTAKE
--- ============================================================================
--- Engine 3 Phase 4. Enables tenants' shippers to tender freight directly by email.
--- See Engine 3/T30_Contract_Freight_Intake.md for design rationale.
+-- scripts/059-t30-contract-freight-intake.sql
 --
--- Schema:
---   1. CREATE contract_shipper_authorizations — per-tenant whitelist of senders
---      authorized to tender freight via email. Sender must appear on this list
---      before any tender parsing / injection can occur.
---   2. ALTER inbound_emails — additive columns to track intake_type, sender
---      authorization check, created pipeline_load linkage, and intake_status.
---
--- Idempotent: yes. Rollback: 059-t30-contract-freight-intake_rollback.sql
--- ============================================================================
+-- T-30 — Contract Freight Intake. See Engine 3/T30_Contract_Freight_Intake.md
+-- and MyraTMS/docs/superpowers/specs/2026-08-31-t30-contract-freight-intake-design.md
+-- (§2/§2a/§3) for why every column here differs from the spec's own §4.
 
 BEGIN;
 
--- ============================================================================
--- TABLE: contract_shipper_authorizations
--- Per-tenant whitelist of email senders authorized to submit freight tenders.
--- Sender authorization is checked BEFORE extraction; unauthorized emails route
--- to T-24's console as a security-relevant exception, not parsed for injection.
--- ============================================================================
-
+-- §4.1 of the spec, unchanged shape, one column renamed (design §2.3/§2a):
+-- margin_floor_override_amount is a DOLLAR amount (same unit as
+-- resolveMargin()'s minMargin), not a percentage — the spec's own
+-- _pct name and NUMERIC(5,2) width would misrepresent that.
 CREATE TABLE IF NOT EXISTS contract_shipper_authorizations (
-    id                              SERIAL PRIMARY KEY,
-    tenant_id                       INTEGER NOT NULL REFERENCES tenants(id),
-
-    -- Sender email address or verified domain pattern (exact address or domain)
-    shipper_email                   VARCHAR(200) NOT NULL,
-
-    -- Optional metadata about the shipper
-    shipper_company_name            VARCHAR(200),
-
-    -- Optional per-shipper override of tenant's default margin floor (percentage)
-    margin_floor_override_pct       NUMERIC(5,2),
-
-    -- Active/inactive toggle for the authorization
-    is_active                       BOOLEAN DEFAULT true,
-
-    -- Who authorized this sender and when
-    authorized_by                   VARCHAR(100) NOT NULL,
-    authorized_at                   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    -- Unique constraint: one sender per tenant (can't authorize same email twice)
+    id                            SERIAL PRIMARY KEY,
+    tenant_id                     INTEGER NOT NULL REFERENCES tenants(id),
+    shipper_email                 VARCHAR(200) NOT NULL,
+    shipper_company_name          VARCHAR(200),
+    margin_floor_override_amount  NUMERIC(10,2),
+    is_active                     BOOLEAN NOT NULL DEFAULT true,
+    authorized_by                 VARCHAR(100) NOT NULL,
+    authorized_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (tenant_id, shipper_email)
 );
 
-CREATE INDEX IF NOT EXISTS idx_contract_shipper_auth_tenant
-    ON contract_shipper_authorizations(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_contract_shipper_auth_email
-    ON contract_shipper_authorizations(shipper_email);
-CREATE INDEX IF NOT EXISTS idx_contract_shipper_auth_active
-    ON contract_shipper_authorizations(tenant_id, is_active);
+    ON contract_shipper_authorizations(shipper_email)
+    WHERE is_active = true;
 
--- ============================================================================
--- ALTER: inbound_emails — Add T-30 intake tracking columns
--- Extends the existing T-26 inbound_emails table with columns to distinguish
--- between rate-confirmation matching (T-26) and freight-tender parsing (T-30),
--- and to track intake status and pipeline linkage.
--- ============================================================================
-
-ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS intake_type VARCHAR(30)
-    DEFAULT 'rate_con_confirmation'
-    CHECK (intake_type IN ('rate_con_confirmation', 'freight_tender'));
-
+-- Additive to the REAL inbound_emails table (scripts/046-e2-04-sellside-loop-schema.sql),
+-- not the spec's nonexistent inbound_document_intake (design §2.1).
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS intake_type VARCHAR(30);
+    -- NULL for pre-existing shipper_reply/carrier_reply rows and any row
+    -- this migration doesn't touch; 'freight_tender' for T-30 rows.
 ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS sender_authorized BOOLEAN;
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS created_pipeline_load_id INTEGER REFERENCES pipeline_loads(id);
+ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS intake_status VARCHAR(20);
+    -- 'pending_review' | 'approved' | 'rejected' | 'unauthorized_sender'
 
-ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS created_pipeline_load_id
-    INTEGER REFERENCES pipeline_loads(id);
+-- Genuinely new columns (design §2.5) — pipeline_loads has never had either;
+-- source_type/booked_via on the TMS `loads` table are a different vocabulary
+-- (manual|ai_agent|load_board_import / human|ai_auto|ai_escalated), no collision.
+ALTER TABLE pipeline_loads ADD COLUMN IF NOT EXISTS source_type VARCHAR(20) NOT NULL DEFAULT 'load_board';
+    -- 'load_board' (default, preserves every existing row's real meaning) | 'email_tender'
+ALTER TABLE pipeline_loads ADD COLUMN IF NOT EXISTS booked_via VARCHAR(20);
+    -- 'ai_call' | 'email_tender' -- NULL for rows not yet booked, matching booked_at nullability
 
-ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS intake_status VARCHAR(20)
-    DEFAULT 'pending_review'
-    CHECK (intake_status IN (
-        'pending_review', 'approved', 'rejected', 'unauthorized_sender'
-    ));
-
--- Index for T-30 workflow queries: find pending tenders for a given tenant
-CREATE INDEX IF NOT EXISTS idx_inbound_emails_intake_status
-    ON inbound_emails(intake_type, intake_status) WHERE intake_type = 'freight_tender';
+-- Links an exception back to the inbound_emails row that produced it
+-- (design §2a) — none of exceptions' existing load_id/pipeline_load_id/
+-- carrier_id link fields fit a freight-tender signal (no pipeline_loads row
+-- exists yet, and there's no TMS loads/carriers row either).
+ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS inbound_email_id INTEGER REFERENCES inbound_emails(id);
 
 COMMIT;
