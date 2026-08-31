@@ -39,7 +39,14 @@ export async function advanceSession(
     [sessionId, step, JSON.stringify(stepData)],
   );
   if (rows.length === 0) throw new Error(`No tenant_onboarding_sessions row with id=${sessionId}`);
-  return rows[0];
+  const row = rows[0];
+  // Neon returns this BIGINT column as a JS string at runtime despite the
+  // declared `number | null` type above -- same documented quirk as
+  // lib/tenants/get-myra-tenant-id.ts, requestGoLive, and runDryRun in this
+  // file. SessionRow is exported and consumed by future API routes that
+  // serialize it to JSON, where an uncoerced string would ship as a quoted
+  // value instead of a number.
+  return { ...row, tenant_id: row.tenant_id === null ? null : Number(row.tenant_id) };
 }
 
 export async function provisionTenantFromSession(sessionId: number): Promise<{ tenantId: number }> {
