@@ -33,6 +33,7 @@ describe('T-28 boundary — zero writes to shippers/carriers or Myra CRM tables'
     if (sessionId) await db.query(`DELETE FROM tenant_onboarding_sessions WHERE id = $1`, [sessionId]);
     if (tenantId) {
       await db.query(`DELETE FROM exceptions WHERE tenant_id = $1`, [tenantId]);
+      await db.query(`DELETE FROM exception_classification_rules WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_policies WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_subscriptions WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_config WHERE tenant_id = $1`, [tenantId]);

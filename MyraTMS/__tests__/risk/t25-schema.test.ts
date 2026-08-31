@@ -22,7 +22,7 @@ describe('T-25 schema (055)', () => {
     const { rows } = await db.query<{ source_module: string }>(
       `SELECT source_module FROM exception_classification_rules WHERE tenant_id = 2 ORDER BY source_module, version`,
     );
-    expect(rows.length).toBe(7);
+    expect(rows.length).toBe(8);
     expect(rows.map((r) => r.source_module)).toContain('payer_risk');
     expect(rows.map((r) => r.source_module)).toContain('transaction_halt');
   });
