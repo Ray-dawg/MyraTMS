@@ -92,7 +92,7 @@ describe('lib/tenants/provision', () => {
       `SELECT tenant_id FROM tenant_users WHERE user_id = $1 AND is_primary = true`, [userId],
     );
     expect(primaryRows).toHaveLength(1);
-    expect(primaryRows[0].tenant_id).toBe(tenantId);
+    expect(Number(primaryRows[0].tenant_id)).toBe(tenantId);
   });
 
   it('applyTenantTypePolicyTemplate is idempotent -- second call does not throw and leaves exactly one active row at an incremented version', async () => {

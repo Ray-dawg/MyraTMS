@@ -54,7 +54,7 @@ describe('lib/tenants/onboarding-session', () => {
     const { tenantId } = await provisionTenantFromSession(sessionId);
     createdTenantIds.push(tenantId);
     const { rows } = await db.query<{ tenant_id: number }>(`SELECT tenant_id FROM tenant_onboarding_sessions WHERE id = $1`, [sessionId]);
-    expect(rows[0].tenant_id).toBe(tenantId);
+    expect(Number(rows[0].tenant_id)).toBe(tenantId);
   });
 
   it('provisionTenantFromSession throws if company_created step data is missing', async () => {
