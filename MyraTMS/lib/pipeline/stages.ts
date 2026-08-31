@@ -71,7 +71,7 @@ export const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
   [PipelineStage.QUALIFIED]: [PipelineStage.RESEARCHED, PipelineStage.MATCHED, PipelineStage.DISQUALIFIED, PipelineStage.ESCALATED],
   [PipelineStage.DISQUALIFIED]: [],
   [PipelineStage.RESEARCHED]: [PipelineStage.MATCHED, PipelineStage.ESCALATED],
-  [PipelineStage.MATCHED]: [PipelineStage.BRIEFED, PipelineStage.ESCALATED],
+  [PipelineStage.MATCHED]: [PipelineStage.BRIEFED, PipelineStage.ESCALATED, PipelineStage.BOOKED], // T-30: email-tender loads skip briefed/calling
   [PipelineStage.BRIEFED]: [PipelineStage.CALLING, PipelineStage.ESCALATED],
   [PipelineStage.CALLING]: [PipelineStage.BOOKED, PipelineStage.DECLINED, PipelineStage.CALLBACK, PipelineStage.ESCALATED, PipelineStage.EXPIRED],
   [PipelineStage.BOOKED]: [PipelineStage.AWAITING_SHIPPER_CONFIRMATION, PipelineStage.DISPATCHED, PipelineStage.ESCALATED],
