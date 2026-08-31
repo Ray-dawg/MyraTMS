@@ -41,6 +41,10 @@ describe('tenant-onboarding API — full flow (fixture: broker)', () => {
     }
   });
 
+  // Extended timeout: /test invokes runDryRun -> quotePricing, whose rate
+  // cascade calls the real Claude API and retries ~60s before falling back
+  // to the benchmark rate for a synthetic tenant with no historical data
+  // (same pre-existing, unrelated behavior documented in Task 5/6's tests).
   it('walks a fixture broker tenant from sign_up to go_live_requested', async () => {
     const startRes = await startRoute(authedRequest('http://localhost/api/tenant-onboarding/start', { method: 'POST' }));
     const startBody = await startRes.json();
@@ -89,5 +93,5 @@ describe('tenant-onboarding API — full flow (fixture: broker)', () => {
       `SELECT current_step FROM tenant_onboarding_sessions WHERE id = $1`, [sessionId],
     );
     expect(rows[0].current_step).toBe('go_live_requested');
-  });
+  }, 150000);
 });
