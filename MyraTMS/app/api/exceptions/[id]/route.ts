@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { withTenant } from "@/lib/db/tenant-context"
+import { withTenant, asServiceAdmin } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { db } from "@/lib/pipeline/db-adapter"
 
@@ -29,6 +29,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     if (action === "resolve") {
+      // T-28 — a resolved tenant_onboarding/go_live_requested exception
+      // activates a tenant (a privileged trust decision, spec §4.4).
+      // Gate BEFORE the resolve itself runs, so a non-super-admin request
+      // for exactly this exception type is rejected outright rather than
+      // silently resolved-without-activating.
+      const { rows: peekRows } = await db.query<{ source_module: string; type: string }>(
+        `SELECT source_module, type FROM exceptions WHERE id = $1`,
+        [id],
+      );
+      const isGoLiveRequest = peekRows[0]?.source_module === 'tenant_onboarding' && peekRows[0]?.type === 'go_live_requested';
+      if (isGoLiveRequest && !user.isSuperAdmin) {
+        return NextResponse.json({ error: "Only a super-admin may approve a tenant go-live request" }, { status: 403 });
+      }
+
       const exc = await withTenant(ctx.tenantId, async (client) => {
         const { rows } = await client.query(
           `UPDATE exceptions
@@ -84,13 +98,23 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       // no new approval table or UI). Never blocks or alters the response
       // above, same discipline as the T-17 event-logging block just above.
       if (exc.source_module === 'tenant_onboarding' && exc.type === 'go_live_requested') {
+        // Runs via asServiceAdmin, not withTenant(ctx.tenantId, ...) — this
+        // activates a DIFFERENT tenant than the approving super-admin's own
+        // request context, and must work correctly regardless of RLS
+        // enablement state (migration 029). asServiceAdmin wraps both
+        // UPDATEs in one transaction and writes its own audit log entry.
         try {
-          await db.query(`UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1`, [exc.tenant_id])
-          await db.query(
-            `UPDATE tenant_onboarding_sessions
-                SET current_step = 'live', status = 'completed', completed_at = NOW()
-              WHERE tenant_id = $1`,
-            [exc.tenant_id],
+          await asServiceAdmin(
+            `T-28 go-live approval for tenant ${exc.tenant_id} by super-admin ${user.userId}`,
+            async (adminClient) => {
+              await adminClient.query(`UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1`, [exc.tenant_id])
+              await adminClient.query(
+                `UPDATE tenant_onboarding_sessions
+                    SET current_step = 'live', status = 'completed', completed_at = NOW()
+                  WHERE tenant_id = $1 AND current_step = 'go_live_requested'`,
+                [exc.tenant_id],
+              )
+            },
           )
         } catch (err) {
           console.error("[PATCH /api/exceptions/:id] tenant go-live activation failed (non-blocking):", err)

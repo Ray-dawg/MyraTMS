@@ -34,6 +34,14 @@ describe('tenant-onboarding API — full flow (fixture: broker)', () => {
     if (tenantId) {
       await db.query(`DELETE FROM exceptions WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM exception_classification_rules WHERE tenant_id = $1`, [tenantId]);
+      // Not FK-constrained to tenants (plain INTEGER/BIGINT columns with
+      // defaults) -- runDryRun's evaluatePolicy/quotePricing (invoked via
+      // the /test route below) write into these, and without an explicit
+      // delete here the rows survive DELETE FROM tenants permanently
+      // (final-review "3 more test-row leaks" finding).
+      await db.query(`DELETE FROM authority_evaluations WHERE tenant_id = $1`, [tenantId]);
+      await db.query(`DELETE FROM authority_envelopes WHERE tenant_id = $1`, [tenantId]);
+      await db.query(`DELETE FROM pricing_engine_requests WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_policies WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_subscriptions WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_config WHERE tenant_id = $1`, [tenantId]);
@@ -77,6 +85,27 @@ describe('tenant-onboarding API — full flow (fixture: broker)', () => {
       { params: Promise.resolve({ sessionId: String(sessionId) }) },
     );
     expect(policyRes.status).toBe(200);
+
+    // Acceptance criterion 1 names tenants/tenant_policies/tenant_users as
+    // the three tables a full onboarding flow should produce rows in --
+    // tenant_users was never exercised by any test in this plan until now
+    // (final-review finding 5). Real users row: the test DB branch is
+    // forked from real production data, so `users` always has rows -- same
+    // pattern as lib/tenants/__tests__/provision.ts's seatTenantOwner test.
+    const { rows: usersRows } = await db.query<{ id: string }>(`SELECT id FROM users LIMIT 1`);
+    const ownerUserId = usersRows[0].id;
+    const ownerRes = await advanceRoute(
+      authedRequest(`http://localhost/api/tenant-onboarding/${sessionId}`, {
+        method: 'PATCH',
+        body: { step: 'users_created', stepData: { ownerUserId } },
+      }),
+      { params: Promise.resolve({ sessionId: String(sessionId) }) },
+    );
+    expect(ownerRes.status).toBe(200);
+    const { rows: tuRows } = await db.query<{ user_id: string }>(
+      `SELECT user_id FROM tenant_users WHERE tenant_id = $1 AND user_id = $2`, [tenantId, ownerUserId],
+    );
+    expect(tuRows).toHaveLength(1);
 
     const testRes = await testRoute(
       authedRequest(`http://localhost/api/tenant-onboarding/${sessionId}/test`, { method: 'POST' }),

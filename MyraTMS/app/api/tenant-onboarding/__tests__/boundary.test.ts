@@ -34,6 +34,14 @@ describe('T-28 boundary — zero writes to shippers/carriers or Myra CRM tables'
     if (tenantId) {
       await db.query(`DELETE FROM exceptions WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM exception_classification_rules WHERE tenant_id = $1`, [tenantId]);
+      // Not FK-constrained to tenants (plain INTEGER/BIGINT columns with
+      // defaults) -- runDryRun's evaluatePolicy/quotePricing (invoked via
+      // the /test route below) write into these, and without an explicit
+      // delete here the rows survive DELETE FROM tenants permanently
+      // (final-review "3 more test-row leaks" finding).
+      await db.query(`DELETE FROM authority_evaluations WHERE tenant_id = $1`, [tenantId]);
+      await db.query(`DELETE FROM authority_envelopes WHERE tenant_id = $1`, [tenantId]);
+      await db.query(`DELETE FROM pricing_engine_requests WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_policies WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_subscriptions WHERE tenant_id = $1`, [tenantId]);
       await db.query(`DELETE FROM tenant_config WHERE tenant_id = $1`, [tenantId]);

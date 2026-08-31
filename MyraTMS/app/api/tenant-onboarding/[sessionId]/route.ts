@@ -44,15 +44,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ se
   if (body.step === 'company_created') {
     const result = await provisionTenantFromSession(sessionId);
     tenantId = result.tenantId;
-  } else if (body.step === 'users_created' && tenantId !== null) {
+  } else if (body.step === 'users_created') {
+    if (tenantId === null) return apiError("Cannot set 'users_created' before 'company_created' has provisioned a tenant", 409);
     const ownerUserId = body.stepData.ownerUserId as string | undefined;
     if (!ownerUserId) return apiError("stepData.ownerUserId is required for the 'users_created' step", 400);
     await seatTenantOwner(db, tenantId, ownerUserId);
-  } else if (body.step === 'billing_captured' && tenantId !== null) {
+  } else if (body.step === 'billing_captured') {
+    if (tenantId === null) return apiError("Cannot set 'billing_captured' before 'company_created' has provisioned a tenant", 409);
     const tier = body.stepData.tier as 'starter' | 'pro' | 'enterprise' | undefined;
     if (!tier) return apiError("stepData.tier is required for the 'billing_captured' step", 400);
     await captureBillingIntent(db, tenantId, tier);
-  } else if (body.step === 'policy_confirmed' && tenantId !== null) {
+  } else if (body.step === 'policy_confirmed') {
+    if (tenantId === null) return apiError("Cannot set 'policy_confirmed' before 'company_created' has provisioned a tenant", 409);
     const freightBusinessType = body.stepData.freightBusinessType as 'broker' | 'dispatcher' | 'carrier' | undefined;
     if (!freightBusinessType) return apiError("stepData.freightBusinessType is required for the 'policy_confirmed' step", 400);
     await applyTenantTypePolicyTemplate(db, tenantId, freightBusinessType);

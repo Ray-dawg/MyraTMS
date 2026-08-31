@@ -50,11 +50,19 @@ export async function advanceSession(
 }
 
 export async function provisionTenantFromSession(sessionId: number): Promise<{ tenantId: number }> {
-  const { rows } = await db.query<{ step_data: Record<string, any> }>(
-    `SELECT step_data FROM tenant_onboarding_sessions WHERE id = $1`,
+  const { rows } = await db.query<{ tenant_id: number | null; step_data: Record<string, any> }>(
+    `SELECT tenant_id, step_data FROM tenant_onboarding_sessions WHERE id = $1`,
     [sessionId],
   );
   if (rows.length === 0) throw new Error(`No tenant_onboarding_sessions row with id=${sessionId}`);
+  // Idempotency guard (final-review finding 3): a repeated company_created
+  // PATCH (UI double-submit, back-button) must not provision a second,
+  // orphaned tenant and silently repoint the session's tenant_id pointer at
+  // it. Neon returns this BIGINT column as a JS string at runtime despite
+  // the declared type -- same documented quirk as elsewhere in this file.
+  if (rows[0].tenant_id !== null) {
+    return { tenantId: Number(rows[0].tenant_id) };
+  }
   const companyData = rows[0].step_data.company_created;
   if (!companyData) {
     throw new Error(`provisionTenantFromSession: session ${sessionId} has no 'company_created' step data yet`);
