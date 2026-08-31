@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-30 (T-27 Finance Orchestration built via subagent-driven development, 5/7 acceptance criteria pass — criteria 1/6 explicitly OPEN, the source document they depend on does not exist in this repo; production apply/push pending explicit confirmation)
-**Status:** Phase 1 (Instrument) complete. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate. Phase 3: T-27 built, 5/7 criteria pass, 2 held open pending a missing source document — see below for what's satisfied vs. explicitly held open per module.
+**Last updated:** 2026-08-31 (T-28 Customer OS & Onboarding — 17 commits complete, applied to production with explicit confirmation, 19/19 module tests green directly against production, 840/850 full regression on `t28-verify` with only known pre-existing failures)
+**Status:** Phase 1 (Instrument) complete. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate. Phase 3: T-27 built, 5/7 criteria pass, 2 held open pending a missing source document. Phase 4: T-28 built, verified, and applied to production; all 5 acceptance criteria pass — see below for what's satisfied vs. explicitly held open per module.
 
 ## How to use this file
 
@@ -425,7 +425,36 @@ Redesigned against the real production schema rather than the base spec's assump
 
 ## Phase 4 — Commercialize (T-28, T-30)
 
-Not started.
+### T-28 — Customer OS & Onboarding
+
+**Spec:** [T28_Customer_OS_Onboarding.md](../../../T28_Customer_OS_Onboarding.md)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-30-t28-customer-os-onboarding.md`, design doc `MyraTMS/docs/superpowers/specs/2026-08-30-t28-customer-os-onboarding-design.md`
+**Status:** All 10 plan tasks (17 commits, `85ef492`..`9847fc4`) built and committed to local `master`. Migration `058-t28-customer-os-onboarding.sql` verified on disposable branch `t28-verify` (`br-aged-cloud-ai88nyky`), then **applied to production** (`br-rough-forest-aif4a3vf`) 2026-08-31 with Patrice's explicit confirmation — both new objects (`tenant_onboarding_sessions`, 1 seeded `exception_classification_rules` row) verified live by direct query, and all 19 T-28 tests re-run directly against production for a second confirmation (T-17–T-27 precedent): 19/19 passing. 19/19 also passed against `t28-verify` before the apply; full regression suite 840/850 (10 pre-existing failures, none in T-28 code — see below); `tsc --noEmit` clean aside from the one pre-existing, unrelated error already documented in T-27's entry. **Commits are on local `master` only — not yet pushed to `origin/master`** (same "commit vs. deploy are two different questions" caveat T-19/T-22/T-23 already document); not actioned without an explicit push request.
+
+**What was built** (reuses the existing super-admin tenant-provisioning system instead of duplicating it — see design doc §1):
+- `lib/tenants/provision.ts` — `createTenantRow`/`cloneDefaultTenantConfig`/`seatTenantOwner`/`applyTenantTypePolicyTemplate`/`captureBillingIntent`, extracted out of the two existing `app/api/admin/tenants/**` routes (refactored to call it, behavior-preserving, confirmed by a pre/post baseline test)
+- `lib/tenants/onboarding-session.ts` — `startSession`/`advanceSession`/`provisionTenantFromSession` (idempotent as of the fix wave)/`runDryRun` (exercises T-19/T-21/T-23 against a synthetic load, zero `pipeline_loads` writes)/`requestGoLive` (bridges into T-24's existing exception console — no new approval UI, per spec §4.4)
+- 5 API routes under `app/api/tenant-onboarding/` + `app/api/tenants/[id]/onboarding-status/`, all `requireSuperAdmin`-gated
+- One additive branch in `PATCH /api/exceptions/[id]`: resolving a `tenant_onboarding`/`go_live_requested` exception flips `tenants.status = 'active'` — gated behind `isSuperAdmin` and run via `asServiceAdmin` (final-review fix, see below)
+- Migration `058` — `tenant_onboarding_sessions` + one `exception_classification_rules` seed row for `source_module='tenant_onboarding'`
+
+**Final-review fix wave (commit `9847fc4`, this session):** a super-admin gate (403 otherwise) on the go-live activation branch, run via `asServiceAdmin` so it correctly acts on a tenant other than the approving admin's own JWT tenant regardless of RLS enablement state; `provisionTenantFromSession` made idempotent (a repeated `company_created` PATCH — UI double-submit, back-button — no longer provisions an orphaned second tenant); test-fixture cleanup extended to `authority_evaluations`/`authority_envelopes`/`pricing_engine_requests` (none FK-cascade from `tenants(id)`, and `runDryRun`'s `evaluatePolicy()`/`quotePricing()` calls write into all three — a real test-row leak, same class as prior modules'); `flow.test.ts` now exercises the `users_created` step end-to-end, pinning a real `tenant_users` row as acceptance criterion 1 requires.
+
+**Root cause of this session's "regression" (systematic-debugging Phase 1 finding — not a code defect):** two independent environmental issues, not a code bug:
+1. The dev/test `DATABASE_URL` in `.env.local` points at **production**, which correctly has no migration `058` (by the plan's own design — no in-plan production apply). Every T-28 DB-touching test therefore failed with `relation "tenant_onboarding_sessions" does not exist` when run against the default environment, exactly reproducing what "a regression in passing the test" would look like from the outside.
+2. Pointing tests at `t28-verify` requires overriding `DATABASE_URL` for the shell session (`db-adapter.ts`/`vitest.config.ts` only fall back to `.env.local` when the var isn't already set) — the connection string itself contains an unquoted `&` (`...?channel_binding=require&sslmode=require`), which a shell interprets as a background-job separator unless quoted. An unquoted assignment silently exported nothing usable, so a naive re-point attempt still hit production. Fixed by quoting the value in the sourced env file; not a `.env.local` change, and nothing in application code changed for this.
+Once both were corrected, all 19 T-28 tests passed against `t28-verify` on the first real run — zero code changes were needed to fix "the regression" itself, only the fix-wave changes already staged from before (see above), which fix separate, real, already-caught findings.
+
+**Also encountered, unrelated to T-28 code, worth flagging for future sessions in this environment:** this session's Chrome/Firebase/Playwright/Pinecone/etc. MCP plugin connections were retrying every ~4 minutes without ever succeeding, accumulating dozens of lingering `node.exe` processes over the session. Combined with `vitest`'s default fork-per-file parallelism, this produced intermittent `spawn UNKNOWN`/`Resource temporarily unavailable` failures and one full V8 out-of-memory crash when running multiple T-28 test files in parallel. Worked around by running affected files with `--no-file-parallelism` and retrying transient spawn failures (which cleared within one or two retries each time) — not a T-28 or MyraTMS code issue.
+
+**Acceptance criteria status (spec §6):**
+- [x] 1 PASS — full flow (sign_up → ... → go_live_requested → live via exception resolve) produces rows in `tenants`/`tenant_policies`/`tenant_users`, verified end-to-end by `flow.test.ts` (extended this session to cover `tenant_users`)
+- [x] 2 PASS — `boundary.test.ts` pins zero writes to `shippers`/`carriers` across a full onboarding flow
+- [x] 3 PASS — `runDryRun` exercises `evaluatePolicy`/`resolveDispatchRouting`/`quotePricing` against a synthetic load with zero `pipeline_loads` writes, confirmed by count-before/count-after assertion
+- [x] 4 PASS — go-live routes through T-24's existing exception console only; approval is `isSuperAdmin`-gated and activates the tenant via `asServiceAdmin` (final-review fix); a non-super-admin rejection case is now covered by test
+- [x] 5 PASS — full regression suite run on `t28-verify` (840/850, only the known pre-existing rotating failures — `cost-calculator.test.ts`, `carrier-brief-compiler-worker.test.ts`, `ranker.test.ts`, `researcher.test.ts`, and `t25-reconcile-payer.test.ts` joining that same rotating pool this run — confirmed via `git log` none touched by any T-28 commit); this module's own 19 tests additionally re-run directly against production post-apply, 19/19 passing
+
+**T-28 exit gate:** Met. Migration `058` applied to production 2026-08-31, both new objects verified live, all 19 T-28 tests green directly against production. Commits remain on local `master`, unpushed to `origin/master` pending an explicit push request.
 
 ## Phase 5 — Platformize (T-29 core)
 
