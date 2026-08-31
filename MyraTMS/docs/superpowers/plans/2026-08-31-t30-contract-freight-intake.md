@@ -48,7 +48,7 @@ BEGIN;
 -- _pct name and NUMERIC(5,2) width would misrepresent that.
 CREATE TABLE IF NOT EXISTS contract_shipper_authorizations (
     id                            SERIAL PRIMARY KEY,
-    tenant_id                     INTEGER NOT NULL REFERENCES tenants(id),
+    tenant_id                     BIGINT NOT NULL REFERENCES tenants(id), -- BIGINT to match tenants.id and every other tenant-scoped table (T-19/T-27 already document this exact INTEGER-vs-BIGINT bug class)
     shipper_email                 VARCHAR(200) NOT NULL,
     shipper_company_name          VARCHAR(200),
     margin_floor_override_amount  NUMERIC(10,2),
