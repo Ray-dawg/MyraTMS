@@ -6,13 +6,18 @@
 
 BEGIN;
 
--- §4.1 of the spec, unchanged shape, one column renamed (design §2.3/§2a):
+-- §4.1 of the spec, unchanged shape, two columns corrected (design §2.3/§2a):
 -- margin_floor_override_amount is a DOLLAR amount (same unit as
 -- resolveMargin()'s minMargin), not a percentage — the spec's own
 -- _pct name and NUMERIC(5,2) width would misrepresent that.
+-- tenant_id is BIGINT, not INTEGER — tenants.id is BIGINT and every other
+-- tenant-scoped table in this schema (37+, including exceptions) agrees;
+-- INTEGER here was a defect the brief copied verbatim from the spec without
+-- cross-checking the live tenants.id type (same bug class T-19/T-27 already
+-- document and fixed elsewhere).
 CREATE TABLE IF NOT EXISTS contract_shipper_authorizations (
     id                            SERIAL PRIMARY KEY,
-    tenant_id                     INTEGER NOT NULL REFERENCES tenants(id),
+    tenant_id                     BIGINT NOT NULL REFERENCES tenants(id),
     shipper_email                 VARCHAR(200) NOT NULL,
     shipper_company_name          VARCHAR(200),
     margin_floor_override_amount  NUMERIC(10,2),
