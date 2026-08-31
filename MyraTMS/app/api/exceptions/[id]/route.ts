@@ -79,6 +79,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         console.error("[PATCH /api/exceptions/:id] resolution-event logging failed (non-blocking):", err)
       }
 
+      // T-28 — additive: a resolved tenant_onboarding/go_live_requested
+      // exception is this module's only approval mechanism (spec §4.4 —
+      // no new approval table or UI). Never blocks or alters the response
+      // above, same discipline as the T-17 event-logging block just above.
+      if (exc.source_module === 'tenant_onboarding' && exc.type === 'go_live_requested') {
+        try {
+          await db.query(`UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1`, [exc.tenant_id])
+          await db.query(
+            `UPDATE tenant_onboarding_sessions
+                SET current_step = 'live', status = 'completed', completed_at = NOW()
+              WHERE tenant_id = $1`,
+            [exc.tenant_id],
+          )
+        } catch (err) {
+          console.error("[PATCH /api/exceptions/:id] tenant go-live activation failed (non-blocking):", err)
+        }
+      }
+
       return NextResponse.json(exc)
     }
 
