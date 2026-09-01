@@ -1,12 +1,12 @@
 // lib/finance/capital-days.ts
 //
-// PLACEHOLDER FORMULA — NOT verified against Pilot 1's real Financial
-// Architecture document (§6), which does not exist anywhere in this
-// repository (searched Engine 2/, Engine 3/, and all root-level .docx
-// files). Do not claim these numbers reproduce Pilot 1's worked example
-// ($12.00 / $3.81 / $91.28 / self-funding). T-27 acceptance criteria 1 and
-// 6 are OPEN pending that document — see the T-27 completion tracker entry.
-// Tested only for internal consistency (sign handling, zero handling).
+// capitalDays = amount x daysHeld; yield = margin / (capitalDays / 1000).
+// Verified against Pilot 1's own worked example (Patrice-supplied inputs,
+// hand-derived from Pilot 1's Financial Architecture §6, which is not
+// itself in this repository): all four T1-T4 rows ($12.00 / $3.81 / $91.28
+// per 1,000 capital-days / self-funding) reproduce within rounding
+// tolerance — see __tests__/finance/capital-days.test.ts. T-27 acceptance
+// criteria 1 and 6 PASS.
 export interface CapitalDaysResult {
   capitalDays: number;
   selfFunding: boolean;

@@ -13,7 +13,7 @@ MyraTMS is a freight brokerage Transportation Management System (TMS) built as a
 - **Driver_App/** — Legacy driver app prototype (superseded by DApp). Port 3001. Not actively maintained.
 - **scraper/** — Standalone TypeScript/Playwright headless scraper (DAT, Truckstop, 123LB, Loadlink). Not a Next.js app. Deploys to Railway, writes load-board rows into the shared Neon DB. See dedicated section below and `scraper/README.md`.
 - **`Engine 2/`** — **Not a project.** Spec material for the 7-agent AI pipeline whose source was copied into `MyraTMS/` during Sprint 0. Has its own `CLAUDE.md` explaining the layout. Don't run anything from inside it.
-- **`Engine 3/`** — **Not a project.** Spec material for "Autonomous Brokerage Operating System," the roadmap phase wrapping Engine 2 as a service. T-17/T-18/T-19 (event layer, agent governance, tenant policy) shipped to production 2026-08-25 — the code lives in `MyraTMS/lib/governance/`, `MyraTMS/lib/tenants/`, migrations 033–035, not here. Has its own `CLAUDE.md` and `wave1.md` (outcomes doc for T-18/T-19). Don't run anything from inside it.
+- **`Engine 3/`** — **Not a project.** Spec material for "Autonomous Brokerage Operating System," the roadmap phase wrapping Engine 2 as a service. Phase 1 (T-17/T-18/T-19 — event layer, agent governance, tenant policy) shipped to production 2026-08-25. Phase 2 (T-20 Carrier Intelligence, T-21 Pricing Engine, T-22 Negotiation Service, T-23 Dispatch & Load Lifecycle Monitor) was built and applied to production in shadow mode ahead of the formal Engine 2→3 handoff gate, at explicit direction — see `Engine 3/CLAUDE.md` §9 and `Engine 3/docs/superpowers/plans/completion.md` for what's satisfied vs. held open per module. The code lives in `MyraTMS/lib/{governance,tenants,pricing,carriers,negotiation,dispatch}/`, migrations 033–035/044/045/052/053, not here. Has its own `CLAUDE.md` and `wave1.md` (outcomes doc for T-18/T-19). Don't run anything from inside it.
 
 ## Tech Stack
 
@@ -113,6 +113,10 @@ Schema defined across migration scripts in `MyraTMS/scripts/`:
 | `033-event-data-layer.sql` | Engine 3 T-17: `events` table + 5 exception-safe triggers deriving from Engine 2's existing tables (never a call-path code change), 4 metric views |
 | `034-agent-runtime-governance.sql` | Engine 3 T-18: `agents`, `authority_envelopes`, `authority_evaluations`, `escalations` — shadow-mode-only agent authority envelopes |
 | `035-t19-tenant-policy-model.sql` | Engine 3 T-19: `fn_myra_tenant_id()` slug resolver (fixes a real production tenant-id mislabeling bug in 033/034 — see Known Issues), `tenants.freight_business_type`, `tenant_type_policy_templates`, `tenant_policies`, `co_broker_agreements`, margin-floor threshold consolidation |
+| `044-t20-carrier-intelligence.sql` | Engine 3 T-20 (Phase 2, shadow mode): `carrier_registry`, `carrier_outcome_events`, `carrier_risk_signals`, `myra_carrier_scores`, `carriers.carrier_registry_id` |
+| `045-t21-pricing-engine.sql` | Engine 3 T-21 (Phase 2, shadow mode): `pricing_engine_requests` audit table backing `lib/pricing/` |
+| `052-t22-objection-playbook.sql` | Engine 3 T-22 (Phase 2, shadow mode): `objection_playbook` — shared shipper/carrier objection knowledge base backing `lib/negotiation/` |
+| `053-t23-dispatch-lifecycle-monitor.sql` | Engine 3 T-23 (Phase 2, shadow mode): `carrier_acceptance_state`, `dispatch_routing_rules`, `v_lifecycle_late_loads`, 2 triggers extending T-17's `events` taxonomy from `loads`/`location_pings` |
 | `pipeline_migrations.sql` | Engine 2 baseline: `pipeline_loads`, `pipeline_calls`, `pipeline_briefs`, `pipeline_research`, `pipeline_carrier_matches`, `pipeline_feedback`, `pipeline_personas` (superseded in places by 023–026 corrections) |
 
 Each multi-tenant migration has a paired `*_rollback.sql`. Multi-tenant migrations are numbered with underscores (`027_...`), pre-multi-tenant ones with hyphens (`027-...` style).
@@ -237,17 +241,23 @@ Crons run on Vercel. Engine 2 *workers* do not — they run on a separate Railwa
 - Workers run on **Railway**, not Vercel. Vercel hosts the Next.js app (API routes + cron triggers); Railway hosts the long-running BullMQ consumers. They share the same Upstash Redis and same Neon DB.
 - `lib/pipeline/redis-bullmq.ts` (ioredis TCP connection) and `lib/redis.ts` (Upstash REST client) must coexist — BullMQ needs a real socket; the TMS app reads cached values over REST. See Known Issues.
 
-### Engine 3 Autonomous Ops Layer (T-17/T-18/T-19 — shipped 2026-08-25)
+### Engine 3 Autonomous Ops Layer (Phase 1 shipped 2026-08-25; Phase 2 T-20–T-23 shipped in shadow mode)
 
-The roadmap phase after Engine 2: an event layer, agent-governance envelopes, and a tenant/policy model, all wrapping Engine 2 as a service rather than modifying it. Phase 1 (T-17–T-19) is done and live in production; Phase 2+ (carrier intelligence, pricing, negotiation, dispatch monitoring, etc.) is blocked on the Engine 2 → Engine 3 handoff gate (Pilot 1 must be green — see `Engine 3/CLAUDE.md` §"handoff gate").
+The roadmap phase after Engine 2: an event layer, agent-governance envelopes, and a tenant/policy model, all wrapping Engine 2 as a service rather than modifying it. Phase 1 (T-17–T-19) is done and live in production. Phase 2 (T-20 Carrier Intelligence, T-21 Pricing Engine, T-22 Negotiation Service, T-23 Dispatch & Load Lifecycle Monitor) was built and applied to production **in shadow mode**, ahead of the Engine 2 → Engine 3 handoff gate (Pilot 1 must be green — see `Engine 3/CLAUDE.md` §"handoff gate") — an explicit, informed exception at Patrice's direction, not a sign the gate no longer applies to T-24 onward. Every Phase 2 module has open acceptance criteria deferred pending real dispatch/call volume (see each module's entry in `Engine 3/docs/superpowers/plans/completion.md`).
 
 **Where the code lives (in `MyraTMS/`, not in `Engine 3/`):**
 - `lib/governance/` — T-18's `applyEnvelope()`/`evaluateAuthority()` (pure-core + DB-wrapper split) and T-19's `applyPolicy()`/`evaluatePolicy()` (same split, decides load-source policy against `tenant_policies`).
 - `lib/tenants/margin-floor.ts` — `getMarginFloor(currency)`, the single source of truth for the $270 CAD / $200 USD auto-book threshold, replacing three independent hardcoded copies in `compiler-worker.ts`/`qualifier-worker.ts`/`researcher-worker.ts`.
+- `lib/carriers/` (T-20) — `carrier-score.ts` (pure `computeScoreFromStats()` + DB wrapper), `shadow-ranking.ts`.
+- `lib/pricing/` (T-21) — `rate-cascade.ts`, `sell-envelope.ts`, `buy-envelope.ts`, `resolve-margin.ts`, `pricing-engine.ts` (`quotePricing()` orchestrator).
+- `lib/negotiation/` (T-22) — `compileEnvelope()` orchestrator unifying sell-side (shipper) and buy-side (carrier) negotiation briefs over one DB-backed objection playbook.
+- `lib/dispatch/routing.ts` (T-23) — `resolveDispatchRouting()`/`setDispatchRoutingOverride()`, tenant-scoped `myra_managed` vs `in_house_notify` resolution.
 - `app/api/{agents,evaluations,escalations}/` — T-18's 5 governance API routes.
-- `scripts/033-event-data-layer.sql`, `034-agent-runtime-governance.sql`, `035-t19-tenant-policy-model.sql` — see Database & Schema above.
+- `app/api/carriers/registry/`, `app/api/pricing/`, `app/api/negotiation/` — T-20/T-21/T-22's read/compile APIs.
+- `app/api/lifecycle/`, `app/api/dispatch/routing/` — T-23's lifecycle-timeline/late-load/acceptance-gap-report and dispatch-routing APIs.
+- `scripts/033-event-data-layer.sql`, `034-agent-runtime-governance.sql`, `035-t19-tenant-policy-model.sql`, `044-t20-carrier-intelligence.sql`, `045-t21-pricing-engine.sql`, `052-t22-objection-playbook.sql`, `053-t23-dispatch-lifecycle-monitor.sql` — see Database & Schema above.
 
-**Critical:** `Engine 3/wave1.md` documents exactly what T-18/T-19 built, every real bug found while verifying them, and what's still deferred (T-19 has no API endpoints yet; `evaluatePolicy()` has no caller yet — it's built and tested but not wired into Qualifier/Compiler/Dispatcher). Read it before touching `lib/governance/`, `lib/tenants/`, or migrations 034/035. `Engine 3/docs/superpowers/plans/completion.md` is the living task tracker — keep it in sync as new modules land, don't batch.
+**Critical:** `Engine 3/wave1.md` documents exactly what T-18/T-19 built, every real bug found while verifying them, and what's still deferred (T-19 has no API endpoints yet; `evaluatePolicy()` has no caller yet — it's built and tested but not wired into Qualifier/Compiler/Dispatcher). Read it before touching `lib/governance/`, `lib/tenants/`, or migrations 034/035. Each Phase 2 module's own entry in `Engine 3/docs/superpowers/plans/completion.md` documents the same class of finding for T-20–T-23 (schema-reality corrections, real bugs caught during verification, a tenant-isolation IDOR fixed in T-23) — read the relevant entry before touching `lib/carriers/`, `lib/pricing/`, `lib/negotiation/`, or `lib/dispatch/`. `completion.md` is the living task tracker — keep it in sync as new modules land, don't batch.
 
 ### Headless Scraper (`scraper/`)
 

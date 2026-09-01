@@ -10,16 +10,20 @@ This directory holds the master PRD and 14 child specs for "Myra Engine 3 — Au
 
 **Known stray copies:** untracked duplicates of these same spec files also sit loose at the `MyraTMS/` project root — not wired into the app, just accidental copies. `T22_Negotiation_Service.md` and `T22_Negotiation_Service (1).md` in this directory are also byte-identical duplicates of each other.
 
-## Current status (Phase 1 exit reached 2026-08-25)
+## Current status (Phase 1 exit reached 2026-08-25; Phase 2 T-20–T-23 built ahead of the formal handoff gate, in shadow mode, at Patrice's explicit direction — see §9 and `docs/superpowers/plans/completion.md`)
 
 | Module | Status | Notes |
 |---|---|---|
 | T-17 Event & Data Layer | ✅ Shipped to production | `events` table, 5 exception-safe triggers deriving from Engine 2's existing tables, 4 metric views |
 | T-18 Agent Runtime & Governance | ✅ Shipped to production | `agents`/`authority_envelopes`/`authority_evaluations`/`escalations`; shadow mode only |
 | T-19 Tenant & Policy Model | ✅ Shipped to production | Redesigned against the real (already-shipped) multi-tenant schema rather than the base spec's assumptions; fixed a real tenant-id mislabeling bug across T-17/T-18 |
-| T-20 onward | Not started | Blocked on the Phase 2 handoff gate (§9 below) |
+| T-20 Carrier Intelligence | ✅ Built + applied to production, shadow mode | `carrier_registry`/`myra_carrier_scores`; 5/7 criteria pass, 2 held open pending real Pilot 1 volume |
+| T-21 Pricing Engine | ✅ Built + applied to production, shadow mode | `lib/pricing/`; 5/5 criteria pass |
+| T-22 Negotiation Service | ✅ Built + applied to production, shadow mode | `lib/negotiation/`; 5/7 criteria pass, 2 held open pending real-world conditions |
+| T-23 Dispatch & Load Lifecycle Monitor | ✅ Built + applied to production, shadow mode | `carrier_acceptance_state`/`dispatch_routing_rules`/`v_lifecycle_late_loads`; 5/6 criteria pass, criterion 4 held open pending real dispatch volume |
+| T-24 onward | Not started | Still gated on the Phase 2 handoff gate (§9 below) — T-20–T-23 are a deliberate, explicitly-authorized exception, not a precedent that the gate no longer applies |
 
-**Read `wave1.md` (this directory) before touching T-17/T-18/T-19 code.** It has the outcomes, the real bugs found during verification, and the traps a future session will otherwise re-hit — that's not repeated here. `docs/superpowers/plans/completion.md` is the living, task-by-task tracker; update it as new modules land, don't batch.
+**Read `wave1.md` (this directory) before touching T-17/T-18/T-19 code**, and each shipped module's own completion-tracker entry (`docs/superpowers/plans/completion.md`) before touching T-20–T-23 — every one of them documents a real schema-reality correction vs. its base spec (tenant_id types, TEXT-vs-INTEGER PK mismatches, a `timestamptz`/`timestamp` cast bug in T-23, a tenant-isolation IDOR also in T-23) that a future session would otherwise re-hit. `docs/superpowers/plans/completion.md` is the living, task-by-task tracker; update it as new modules land, don't batch.
 
 ## The Authoritative Document
 
