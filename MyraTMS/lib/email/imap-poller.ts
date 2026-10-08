@@ -138,6 +138,7 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
   let tenderExceptionType: string | null = null;
   let tenderExceptionTitle: string | null = null;
   let tenderExceptionDescription: string | null = null;
+  let tenderSuffixEmailId = false;
 
   if (classification.type === 'shipper_reply') {
     replyType = 'shipper_confirmation_reply';
@@ -304,38 +305,64 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
     // runs (spec §10 step 2 — never spend a token on a sender that was never
     // going to be accepted).
     verificationNote = 'subject did not match any known pattern';
-    const authorization = await checkSenderAuthorization(fromAddress);
+    let authorized = false;
+    let authTenantId: number | null = null;
+    try {
+      const authorization = await checkSenderAuthorization(fromAddress);
 
-    if (!authorization) {
-      intakeStatus = 'unauthorized_sender';
-      tenderTenantId = await getMyraTenantId(); // no authorization row to source a tenant from — same "effectively Myra-only mailbox" reality T-19/T-25/T-27 document
-      tenderExceptionType = 'unauthorized_tender_sender';
-      tenderExceptionTitle = `Unauthorized freight-tender sender: ${fromAddress}`;
-      tenderExceptionDescription = `An email from ${fromAddress} did not match any known reply pattern and is not on any tenant's contract_shipper_authorizations whitelist.`;
-    } else {
-      intakeType = 'freight_tender';
-      senderAuthorized = true;
-      if (attachments.length > 0) {
-        const first = attachments[0];
-        const extracted = await extractTenderTerms(first.content);
-        const authTenantId = Number(authorization.tenantId); // Neon BIGINT -> string
-        tenderTenantId = authTenantId;
+      if (!authorization) {
+        intakeStatus = 'unauthorized_sender';
+        tenderTenantId = await getMyraTenantId(); // no authorization row to source a tenant from — same "effectively Myra-only mailbox" reality T-19/T-25/T-27 document
+        tenderExceptionType = 'unauthorized_tender_sender';
+        // No email-id suffix here: the title is unique per sender, so the
+        // bridge's type+title dedup collapses repeats while one is open.
+        // (A separate severity rule for this case is deferred to T-30b.)
+        tenderExceptionTitle = `Unauthorized freight-tender sender: ${fromAddress}`;
+        tenderExceptionDescription = `An email from ${fromAddress} did not match any known reply pattern and is not on any tenant's contract_shipper_authorizations whitelist.`;
+      } else {
+        authorized = true;
+        authTenantId = Number(authorization.tenantId); // Neon BIGINT -> string
+        intakeType = 'freight_tender';
+        senderAuthorized = true;
+        // First PDF only (by content type or .pdf filename); no PDF is treated
+        // exactly like no attachment.
+        const pdf = attachments.find(
+          (a) => a.contentType === 'application/pdf' || (a.filename ?? '').toLowerCase().endsWith('.pdf'),
+        );
+        if (pdf) {
+          tenderTenantId = authTenantId;
+          tenderExceptionType = 'tender_pending_approval';
+          intakeStatus = 'pending_review';
+          tenderSuffixEmailId = true;
+          const extracted = await extractTenderTerms(pdf.content);
+          if (extracted) {
+            const validation = await validateTenderedRate(authTenantId!, extracted, authorization.marginFloorOverrideAmount);
+            tenderExceptionTitle = validation.acceptable
+              ? `New tender ready — approve to inject (from ${fromAddress})`
+              : `Tender below margin floor — accept anyway or decline (from ${fromAddress})`;
+            tenderExceptionDescription = `Parsed tender: ${JSON.stringify(extracted)}. ${validation.reason}`;
+          } else {
+            tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
+            tenderExceptionDescription = 'Claude-based extraction failed or returned no usable fields.';
+          }
+        }
+        // Authorized sender, no PDF: nothing to review yet — intake_status
+        // stays null, no exception is raised. A follow-up email with the actual
+        // tender PDF will be processed on its own next poll.
+      }
+    } catch (err) {
+      // The message is already flagged \Seen, so a throw here must not lose
+      // the tender: fall through to the shared INSERT and route to manual review.
+      logger.error(`[imap-poller] tender processing failed for ${fromAddress}`, err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (authorized) {
         tenderExceptionType = 'tender_pending_approval';
         intakeStatus = 'pending_review';
-        if (extracted) {
-          const validation = await validateTenderedRate(authTenantId, extracted, authorization.marginFloorOverrideAmount);
-          tenderExceptionTitle = validation.acceptable
-            ? `New tender ready — approve to inject (from ${fromAddress})`
-            : `Tender below margin floor — accept anyway or decline (from ${fromAddress})`;
-          tenderExceptionDescription = `Parsed tender: ${JSON.stringify(extracted)}. ${validation.reason}`;
-        } else {
-          tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
-          tenderExceptionDescription = 'Claude-based extraction failed or returned no usable fields.';
-        }
+        tenderSuffixEmailId = true;
+        tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
+        tenderExceptionDescription = `Tender processing failed: ${msg}`;
+        tenderTenantId = authTenantId;
       }
-      // Authorized sender, no attachment: nothing to review yet — intake_status
-      // stays null, no exception is raised. A follow-up email with the actual
-      // tender PDF will be processed on its own next poll.
     }
   }
 
@@ -359,19 +386,35 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
 
   if (tenderExceptionType && tenderTenantId !== null) {
     const emailId = inserted.rows[0].id;
-    await bridgeToExceptions({
-      tenantId: tenderTenantId,
-      sourceModule: 'contract_intake',
-      exceptionType: tenderExceptionType,
-      // bridge dedups null-link signals on type+title; the email id keeps
-      // distinct tenders from the same sender from collapsing into one.
-      title: `${tenderExceptionTitle} [email #${emailId}]`,
-      description: tenderExceptionDescription!,
-      context: {},
-      pipelineLoadId: null,
-      loadId: null,
-      carrierId: null,
-      inboundEmailId: emailId,
-    });
+    let bridged = false;
+    try {
+      bridged = await bridgeToExceptions({
+        tenantId: tenderTenantId,
+        sourceModule: 'contract_intake',
+        exceptionType: tenderExceptionType,
+        // Authorized tenders get the email id so distinct tenders from one
+        // sender don't collapse under the bridge's type+title dedup.
+        title: tenderSuffixEmailId ? `${tenderExceptionTitle} [email #${emailId}]` : tenderExceptionTitle!,
+        description: tenderExceptionDescription!,
+        context: {},
+        pipelineLoadId: null,
+        loadId: null,
+        carrierId: null,
+        inboundEmailId: emailId,
+      });
+    } catch (err) {
+      logger.error(`[imap-poller] bridgeToExceptions threw for inbound email ${emailId}`, err);
+    }
+    if (!bridged) {
+      // A false return is also the bridge's normal dedup path (an identical
+      // exception is already open) -- only flag the row when none exists.
+      const open = await db.query(
+        `SELECT 1 FROM exceptions WHERE type = $1 AND title LIKE $2 AND status = 'active' LIMIT 1`,
+        [tenderExceptionType, `${tenderExceptionTitle}%`],
+      );
+      if (open.rows.length > 0) return;
+      logger.warn(`[imap-poller] tender exception not created for inbound email ${emailId} (no classification rule, dedup, or error)`);
+      await db.query(`UPDATE inbound_emails SET intake_status = 'bridge_failed' WHERE id = $1`, [emailId]);
+    }
   }
 }

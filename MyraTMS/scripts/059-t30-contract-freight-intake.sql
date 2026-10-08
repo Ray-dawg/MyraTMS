@@ -60,8 +60,9 @@ ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS inbound_email_id INTEGER REFEREN
 -- tender signal is silently lost. '{}' matches every context (same as
 -- tenant_onboarding in 058). Tenant resolved via fn_myra_tenant_id(), never
 -- a literal; exception_classification_rules.tenant_id is INTEGER.
+-- NOTE: a separate (higher-severity) rule for unauthorized senders is deferred to T-30b.
 INSERT INTO exception_classification_rules (tenant_id, source_module, condition, severity, sla_minutes, suggested_action, version)
-VALUES (fn_myra_tenant_id()::integer, 'contract_intake', '{}'::jsonb, 'medium', 1440, 'Review the parsed freight tender and approve (inject into pipeline) or reject', 1)
+VALUES (fn_myra_tenant_id()::integer, 'contract_intake', '{}'::jsonb, 'medium', 1440, 'Review the contract-intake item: approve or reject a parsed tender, or confirm an unauthorized sender is not an expected shipper', 1)
 ON CONFLICT (tenant_id, source_module, version) DO NOTHING;
 
 COMMIT;
