@@ -7,6 +7,17 @@
 > complete on the master branch. Code is multi-tenant-ready end-to-end.
 > **Migrations 027–031 are NOT yet applied to the production Neon
 > branch.** That apply is the next operational gate.
+>
+> **UPDATE 2026-10-07:** that gate was passed. Migrations 027 → 028 → 029 → 031
+> were applied to the production Neon branch on **2026-05-04** and master was
+> promoted the same day — see [PRODUCTION_MIGRATION_LOG.md](./PRODUCTION_MIGRATION_LOG.md)
+> Entry 1 for LSNs and the Vercel deployment pin. Still true as of 2026-10-07
+> (verified by direct query): **RLS is OFF** on every table (M3 not started),
+> `pipeline_loads.tenant_id` does not exist (M5 / migration 030 not started),
+> and 029's policies are created-but-disabled. Engine 3 T-28 has since made
+> `lib/tenants/provision.ts` + `app/api/tenant-onboarding/*` the shared tenant
+> provisioning path (the admin routes call the same code). Next step for this
+> stream: `docs/next-steps/MYRATMS.md`.
 
 ## §1 — TL;DR
 
@@ -100,17 +111,17 @@ Pick the situation that matches:
 ## §3 — Migration phase status
 
 Per [ADR-004](./ADR-004-migration-strategy.md), the rollout has 5
-operational phases. Today (2026-05-07):
+operational phases. As of 2026-10-07 (table originally written 2026-05-07, M1/M2 rows updated):
 
 | Phase | What | Status |
 |---|---|---|
-| M1 | Foundation tables (027) + tenant_id column with DEFAULT (028) | 🔵 STAGING ONLY |
-| M2 | App code uses withTenant + JWT carries tenantId | ✅ CODE COMPLETE on master |
+| M1 | Foundation tables (027) + tenant_id column with DEFAULT (028) | ✅ APPLIED TO PRODUCTION 2026-05-04 (PRODUCTION_MIGRATION_LOG Entry 1) |
+| M2 | App code uses withTenant + JWT carries tenantId | ✅ DEPLOYED TO PRODUCTION 2026-05-04 |
 | M3 | RLS ENABLE per batch | ⬜ NOT STARTED |
 | M4 | Drop DEFAULT, reject JWTs without claim, Tenant 2 7-day soak | ⬜ NOT STARTED |
 | M5 | Engine 2 tenanting (migration 030, rename + apply) | ⬜ NOT STARTED |
 
-The handoff state: code-complete, staging-validated, production-not-yet-deployed.
+The handoff state was code-complete / staging-validated / production-not-yet-deployed; since 2026-05-04 it is **M1+M2 live in production, M3–M5 not started**.
 
 ## §4 — Open items (the things to decide / build next)
 

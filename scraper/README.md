@@ -4,6 +4,8 @@ A **bridge layer** — headless browser load-board scanner used while official D
 
 **Shelf life:** ~60 days. Audit on **2026-05-30** to determine which boards can be retired.
 
+> **Status 2026-10-07:** the 2026-05-30 audit was never recorded. A Railway deployment of this service is not recorded in the Engine 2 tracker (Production Ship Roadmap item A.3.3 still open); `loadboard_sources` still has `dat='scrape'` and the other three boards `disabled`; every official-API client in `MyraTMS/lib/loadboards/` is still a stub. Open decision: deploy this for a DAT shadow drain, or retire it when DAT API credentials land. See `docs/next-steps/ENGINE2.md`.
+
 ---
 
 ## What it does

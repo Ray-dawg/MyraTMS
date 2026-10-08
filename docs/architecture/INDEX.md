@@ -1,12 +1,13 @@
 # Multi-Tenant Architecture — Document Index
 
 > Lookup registry for the multi-tenant SaaS retrofit. One line per artifact.
-> **Last update:** 2026-05-07 (Session 8 final wrap — code-complete; production migration pending)
+> **Last update:** 2026-10-07 (migrations 027–031 applied to production 2026-05-04 — see PRODUCTION_MIGRATION_LOG.md; RLS still OFF; M3/M4/M5 not started; T-28 onboarding now shares `lib/tenants/provision.ts`)
 
 ## Start here
 
 - **[HANDOFF.md](./HANDOFF.md)** — Single-page entry point. Read first when picking the rollout back up.
-- **[PRODUCTION_MIGRATION.md](./PRODUCTION_MIGRATION.md)** — Runbook for applying migrations 027–031 to production. **The next operational gate.**
+- **[PRODUCTION_MIGRATION.md](./PRODUCTION_MIGRATION.md)** — Runbook for applying migrations 027–031 to production. Executed 2026-05-04.
+- **[PRODUCTION_MIGRATION_LOG.md](./PRODUCTION_MIGRATION_LOG.md)** — Append-only record of what was actually applied to production and when (Entry 1: 2026-05-04 M1+M2 cutover, LSNs + Vercel deployment pin). Engine 3 migrations 033–058 were applied outside this log — their apply records live in `Engine 3/docs/superpowers/plans/completion.md`.
 - **[CODE_REVIEW_CHECKLIST.md](./CODE_REVIEW_CHECKLIST.md)** — Rules every PR must follow during the M3 → M4 soak.
 
 ## ADRs (decision records — change rarely)

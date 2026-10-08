@@ -1,7 +1,7 @@
 # RLS_ROLLOUT.md
 
 > **Cadence:** Updated daily during Phase M3 rollout.
-> **Last update:** 2026-05-01 (Session 1, Phase 0 — initial schedule)
+> **Last update:** 2026-10-07 — **Phase M3 still NOT STARTED.** Prerequisites (027–031) have been in production since 2026-05-04; `loads` rowsecurity verified OFF by direct query 2026-10-07. The schedule below is unchanged and unexecuted. Engine 2 tables remain deferred to M5 (migration 030 still `.PENDING`).
 > **Related:** [ADR-001](./ADR-001-tenant-isolation.md), [ADR-004](./ADR-004-migration-strategy.md), [SECURITY.md](./SECURITY.md)
 
 This document is the live schedule and status log for Phase M3 — per-table Row-Level Security enablement. Default cadence: 1 table/day starting from lowest-traffic and progressing to hot-path tables. Patrice arbitrates acceleration.

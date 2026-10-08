@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Directory Is
 
-This directory holds the master PRD and 14 child specs for "Myra Engine 3 — Autonomous Brokerage Operating System," the roadmap phase that follows [[Engine 2]] (the 7-agent load-acquisition pipeline, code-complete and mid-deployment in `MyraTMS/`). **The spec files here are reference material — none of them are compiled or imported.** The actual code for shipped modules lives in `MyraTMS/lib/governance/`, `MyraTMS/lib/tenants/`, and the migrations under `MyraTMS/scripts/`; see the status table below for what's actually built. Don't run anything from inside this directory.
+This directory holds the master PRD and 14 child specs for "Myra Engine 3 — Autonomous Brokerage Operating System," the roadmap phase that follows [[Engine 2]] (the load-acquisition + sell-side pipeline, deployed in shadow-drain mode from `MyraTMS/`). **The spec files here are reference material — none of them are compiled or imported.** The actual code for shipped modules lives in `MyraTMS/lib/{governance,tenants,carriers,pricing,negotiation,dispatch,exceptions,risk,documents,finance,contract-intake}/`, the matching `MyraTMS/app/api/**` routes, and migrations 033–035, 044–045, 052–059 under `MyraTMS/scripts/`; see the status table below for what's actually built. Don't run anything from inside this directory.
+
+> **Docs ↔ code sync:** reconciled against `master` @ `41afeb6` on 2026-10-07. When a module lands, update `docs/superpowers/plans/completion.md` **and** the status table below (and the root `CLAUDE.md`) in the same commit. Next step for this engine: `../docs/next-steps/ENGINE3.md`.
 
 **One-sentence definition (from the master PRD):** Engine 2 autonomously executes profitable freight transactions; Engine 3 autonomously operates the brokerage around those transactions, for any tenant, under explicit human authority boundaries. Engine 2 does not disappear — it becomes the Freight Acquisition & Booking service inside Engine 3 (see §6.1 of the master PRD).
 
-**Known stray copies:** untracked duplicates of these same spec files also sit loose at the `MyraTMS/` project root — not wired into the app, just accidental copies. `T22_Negotiation_Service.md` and `T22_Negotiation_Service (1).md` in this directory are also byte-identical duplicates of each other.
+**Spec copies:** this directory is the only canonical location for T-17..T-30 and the master PRD. On 2026-10-07 the untracked duplicates that had accumulated in `MyraTMS/` root and `Engine 2/` were removed, after first porting the one thing they had that these files lacked — the "Reconciliation note (E2-03, 2026-08-25)" sections in T22/T23/T25, which point at the E2-03 modules that actually built what those specs describe. `T22_Negotiation_Service (1).md` (a byte-identical duplicate) was also removed. Don't let a new copy appear elsewhere; edit here.
 
-## Current status (Phase 1 exit reached 2026-08-25; Phase 2 T-20–T-23 built ahead of the formal handoff gate, in shadow mode, at Patrice's explicit direction — see §9 and `docs/superpowers/plans/completion.md`)
+## Current status (as of 2026-10-07 — Phases 1–3 and T-28 built and applied to production; T-30 in progress; T-29 not started; everything from T-20 on is shadow mode and was built ahead of the formal handoff gate at Patrice's explicit direction — see §9 and `docs/superpowers/plans/completion.md`)
 
 | Module | Status | Notes |
 |---|---|---|
@@ -21,9 +23,17 @@ This directory holds the master PRD and 14 child specs for "Myra Engine 3 — Au
 | T-21 Pricing Engine | ✅ Built + applied to production, shadow mode | `lib/pricing/`; 5/5 criteria pass |
 | T-22 Negotiation Service | ✅ Built + applied to production, shadow mode | `lib/negotiation/`; 5/7 criteria pass, 2 held open pending real-world conditions |
 | T-23 Dispatch & Load Lifecycle Monitor | ✅ Built + applied to production, shadow mode | `carrier_acceptance_state`/`dispatch_routing_rules`/`v_lifecycle_late_loads`; 5/6 criteria pass, criterion 4 held open pending real dispatch volume |
-| T-24 onward | Not started | Still gated on the Phase 2 handoff gate (§9 below) — T-20–T-23 are a deliberate, explicitly-authorized exception, not a precedent that the gate no longer applies |
+| T-24 Exception Engine + Console | ✅ Built + applied to production 2026-08-29, shadow mode | No new UI — existing Exception Detection Engine + Alert Center is the console; `lib/exceptions/bridge.ts`, `exception_classification_rules`, `exception-bridge` cron; 7/9 criteria pass, 2 held open pending real incidents |
+| T-25 Risk & Fraud Scoring | ✅ Built + applied to production 2026-08-29, shadow mode | `lib/risk/`, `payer_registry`/`transaction_halts`/`carrier_banking_details`; 7/7 criteria pass (criterion 1 on seeded signals per spec allowance) |
+| T-26 Document Automation | ✅ Built + applied to production 2026-08-29, shadow mode | `lib/documents/rate-con-terms.ts`, document lifecycle triggers; 7/7 pass. **Phase 2 module set complete, but Phase 2's exit gate (100 consecutive ≥80% zero-touch loads) is NOT met** |
+| T-27 Finance Orchestration | ✅ Built + applied to production, shadow mode | `lib/finance/`, migration 057, sandbox-only eCapital/Stripe/Persona adapters; 7/7 pass as of 2026-08-31 |
+| T-28 Customer OS & Onboarding | ✅ Built + applied to production 2026-08-31, shadow mode | `lib/tenants/provision.ts` + `onboarding-session.ts`, `app/api/tenant-onboarding/*`, migration 058; 5/5 pass; pushed to `origin/master` |
+| T-30 Contract Freight Intake | 🟡 **In progress — 3 of 12 plan tasks** | Migration 059 + `lib/contract-intake/authorization.ts` + `matched → booked` stage transition committed 2026-08-31. **Migration 059 NOT applied to production** (verified 2026-10-07). Tasks 3–12 (extraction, validation, bridge, IMAP wiring, finalize-booking watcher + cron, approve/reject, API, e2e, apply) not started. Depends on the E2-04 IMAP poller, which has never run for real. |
+| T-29 Enterprise Control Plane & White-label | Not started | Phases 5–6; gated on Phase 4 exit + counsel review. The only module with no code at all. |
 
-**Read `wave1.md` (this directory) before touching T-17/T-18/T-19 code**, and each shipped module's own completion-tracker entry (`docs/superpowers/plans/completion.md`) before touching T-20–T-23 — every one of them documents a real schema-reality correction vs. its base spec (tenant_id types, TEXT-vs-INTEGER PK mismatches, a `timestamptz`/`timestamp` cast bug in T-23, a tenant-isolation IDOR also in T-23) that a future session would otherwise re-hit. `docs/superpowers/plans/completion.md` is the living, task-by-task tracker; update it as new modules land, don't batch.
+**The gates are still unmet.** Master PRD §9's Engine 2 → Engine 3 handoff gate (Pilot 1 green, real call volume, Retell webhook verified on real calls, one official load-board API off stubs) has not been met; neither has Phase 2's own exit gate. T-20–T-28 exist in production as shadow-mode observers whose "held open" acceptance criteria all wait on real dispatch/call volume. Building T-29 before those gates clear would be a further exception that needs the same explicit authorization T-20–T-28 had.
+
+**Read `wave1.md` (this directory) before touching T-17/T-18/T-19 code**, and each shipped module's own completion-tracker entry (`docs/superpowers/plans/completion.md`) before touching T-20–T-30 — every one of them documents a real schema-reality correction vs. its base spec (tenant_id BIGINT vs INTEGER, TEXT-vs-INTEGER PK mismatches, a `timestamptz`/`timestamp` cast bug in T-23, tenant-isolation IDORs in T-22/T-23/T-26/T-27, test-row leaks in T-28) that a future session would otherwise re-hit. The implementation plans under `MyraTMS/docs/superpowers/plans/` are sequencing documents — their checkboxes are never ticked; the tracker is the truth. `docs/superpowers/plans/completion.md` is the living, task-by-task tracker; update it as new modules land, don't batch. **T-19's `evaluatePolicy()` still has no caller** — the three-point policy enforcement (Qualifier/Compiler/Dispatcher) the master PRD requires is unbuilt.
 
 ## The Authoritative Document
 
@@ -44,7 +54,7 @@ This directory holds the master PRD and 14 child specs for "Myra Engine 3 — Au
 
 Phase 2 (T-20 through T-26) does not start until ALL of: Pilot 1 complete with all gates reported · real loads scored end-to-end against a real counterparty · Retell webhook verifier/ordering confirmed on real calls · cost-per-call/connect-rate/book-rate/gross-margin on the operator screen · concurrency-ramp green-light criteria signed off · at least one official load-board API client off stubs.
 
-**Phase 1 (T-17/T-18/T-19) was explicitly exempt from this gate** and ran in parallel with Pilot 1 — see T-17's "derive, don't instrument" decision below for the mechanism that made that safe.
+**Phase 1 (T-17/T-18/T-19) was explicitly exempt from this gate** and ran in parallel with Pilot 1 — see T-17's "derive, don't instrument" decision below for the mechanism that made that safe. **T-20 through T-28 were then built ahead of the gate anyway**, each at Patrice's explicit direction, each strictly shadow-mode and read-only against the live call path (the only live-path edit in all of Engine 3 is T-30's one-line additive `stages.ts` transition). The gate itself remains unmet as of 2026-10-07 — Engine 2 is still in shadow drain with one live call ever placed.
 
 ### T-17 design decision worth preserving: derive, don't instrument
 
@@ -58,24 +68,24 @@ T-19 shipped this against the **real** `tenants` table (which already existed fr
 
 ## Module & child-spec index (master PRD §7, §12)
 
-| ID | Title | Phase | Depends on |
-|---|---|---|---|
-| T-17 | Event & Data Layer | 1 | ✅ shipped |
-| T-18 | Agent Runtime & Governance | 1 | ✅ shipped |
-| T-19 | Tenant & Policy Model | 1 | ✅ shipped |
-| T-20 | Carrier Intelligence & Myra Carrier Score | 2 | handoff gate |
-| T-21 | Pricing Engine | 2 | handoff gate |
-| T-22 | Negotiation Service (bidirectional) | 2 | T-20, T-21 |
-| T-23 | Dispatch & Load Lifecycle Monitor | 2 | T-22 |
-| T-24 | Exception Engine + Human Escalation Console | 2 | T-23 |
-| T-25 | Risk & Fraud Scoring | 2 | T-24 |
-| T-26 | Document Automation | 2 | T-25 |
-| T-27 | Finance Orchestration | 3 | Phase 2 exit |
-| T-28 | Customer OS & Onboarding | 4 | Phase 3 exit |
-| T-29 | Enterprise Control Plane & White-label | 5–6 | Phase 4 exit, counsel review |
-| T-30 | Contract Freight Intake | 4 | Phase 3 exit |
+| ID | Title | Phase | Spec says depends on | Actual (2026-10-07) |
+|---|---|---|---|---|
+| T-17 | Event & Data Layer | 1 | — | ✅ production |
+| T-18 | Agent Runtime & Governance | 1 | T-17 | ✅ production |
+| T-19 | Tenant & Policy Model | 1 | T-18 | ✅ production (`evaluatePolicy()` unwired) |
+| T-20 | Carrier Intelligence & Myra Carrier Score | 2 | handoff gate | ✅ production, shadow |
+| T-21 | Pricing Engine | 2 | handoff gate | ✅ production, shadow |
+| T-22 | Negotiation Service (bidirectional) | 2 | T-20, T-21 | ✅ production, shadow |
+| T-23 | Dispatch & Load Lifecycle Monitor | 2 | T-22 | ✅ production, shadow |
+| T-24 | Exception Engine + Human Escalation Console | 2 | T-23 | ✅ production, shadow |
+| T-25 | Risk & Fraud Scoring | 2 | T-24 | ✅ production, shadow |
+| T-26 | Document Automation | 2 | T-25 | ✅ production, shadow |
+| T-27 | Finance Orchestration | 3 | Phase 2 exit | ✅ production, shadow (sandbox adapters) |
+| T-28 | Customer OS & Onboarding | 4 | Phase 3 exit | ✅ production, shadow |
+| T-30 | Contract Freight Intake | 4 | Phase 3 exit | 🟡 3/12 tasks; migration 059 unapplied |
+| T-29 | Enterprise Control Plane & White-label | 5–6 | Phase 4 exit, counsel review | ⬜ not started |
 
-Build order (§15): `T-17 → T-18 → T-19` (done) → handoff gate → `T-20 + T-21 (parallel) → T-22 → T-23 → T-24 → T-25 → T-26` → `T-27 → (T-28 + T-30) → T-29`.
+Build order (§15): `T-17 → T-18 → T-19` (done) → handoff gate (**not met, bypassed by explicit direction**) → `T-20 + T-21 → T-22 → T-23 → T-24 → T-25 → T-26` (done) → `T-27` (done) → `(T-28 + T-30)` (T-28 done, T-30 in progress) → `T-29`.
 
 Full architecture diagram, the L1/L2/L3 autonomy table, the phase-exit-gate table, and the metric → valuation-multiple map all live in the master PRD (§5, §6, §8, §10) — read them there rather than a copy here; they don't change often enough to justify duplicating and they're one file away.
 

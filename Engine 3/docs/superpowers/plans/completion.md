@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-08-31 (T-28 Customer OS & Onboarding — 17 commits complete, applied to production with explicit confirmation, 19/19 module tests green directly against production, 840/850 full regression on `t28-verify` with only known pre-existing failures)
-**Status:** Phase 1 (Instrument) complete — but see the T-18/T-19 corrections below; several criteria previously marked done were verified against zero/absent data and are now HELD-OPEN or UNDISCLOSED-OPEN, not PASS. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate; T-22 criterion 4 corrected below (FAIL-with-disclosed-substitution, not PASS). Phase 3: T-27 built, all 7 criteria now PASS (2026-08-31: criteria 1/6 closed using Patrice-supplied worked-example inputs — see below). Phase 4: T-28 built, verified, and applied to production; all 5 acceptance criteria pass — see below for what's satisfied vs. explicitly held open per module.
+**Last updated:** 2026-10-07 (docs ↔ code resync: added the missing T-30 entry — 3/12 tasks done, migration 059 verified NOT applied to production; recorded that T-28's commits have since been pushed; no code changes)
+**Status:** Phase 1 (Instrument) complete — but see the T-18/T-19 corrections below; several criteria previously marked done were verified against zero/absent data and are now HELD-OPEN or UNDISCLOSED-OPEN, not PASS. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate; T-22 criterion 4 corrected below (FAIL-with-disclosed-substitution, not PASS); **Phase 2's own exit gate (100 consecutive ≥80% zero-touch loads) is NOT met.** Phase 3: T-27 built, all 7 criteria PASS (2026-08-31). Phase 4: T-28 built, verified, applied to production, pushed; all 5 acceptance criteria pass. **T-30 is in progress (Tasks 1, 1b, 2 of 12) and its migration 059 is committed but not applied.** Phases 5–6 (T-29): not started. The master PRD §9 handoff gate remains unmet — Engine 2 is in shadow drain with one live call ever placed (2026-06-06).
 
 ## How to use this file
 
@@ -456,7 +456,34 @@ Once both were corrected, all 19 T-28 tests passed against `t28-verify` on the f
 - [x] 4 PASS — go-live routes through T-24's existing exception console only; approval is `isSuperAdmin`-gated and activates the tenant via `asServiceAdmin` (final-review fix); a non-super-admin rejection case is now covered by test
 - [x] 5 PASS — full regression suite run on `t28-verify` (840/850, only the known pre-existing rotating failures — `cost-calculator.test.ts`, `carrier-brief-compiler-worker.test.ts`, `ranker.test.ts`, `researcher.test.ts`, and `t25-reconcile-payer.test.ts` joining that same rotating pool this run — confirmed via `git log` none touched by any T-28 commit); this module's own 19 tests additionally re-run directly against production post-apply, 19/19 passing
 
-**T-28 exit gate:** Met. Migration `058` applied to production 2026-08-31, both new objects verified live, all 19 T-28 tests green directly against production. Commits remain on local `master`, unpushed to `origin/master` pending an explicit push request.
+**T-28 exit gate:** Met. Migration `058` applied to production 2026-08-31, both new objects verified live, all 19 T-28 tests green directly against production. Commits were on local `master` only at the time of writing; **since pushed — verified 2026-10-07 (`git log origin/master..master` empty).**
+
+### T-30 — Contract Freight Intake
+
+**Spec:** [T30_Contract_Freight_Intake.md](../../../T30_Contract_Freight_Intake.md)
+**Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-31-t30-contract-freight-intake.md`, design doc `MyraTMS/docs/superpowers/specs/2026-08-31-t30-contract-freight-intake-design.md` (§2/§2a: schema-reality corrections vs. the spec's §4 — every column in 059 differs from the spec for a documented reason; `POST /api/contract-intake/webhook` dropped because the E2-04 IMAP poller is the real intake path)
+**Status:** 🟡 **IN PROGRESS — 3 of 12 plan tasks done** (Tasks 1, 1b, 2), built in a worktree and merged to `master` 2026-08-31 (`01e79f4` … `87bc938`, pushed). **Migration `059` is committed but NOT applied to production** — verified 2026-10-07 by direct query against `br-rough-forest-aif4a3vf`: `contract_shipper_authorizations` absent. No tracker entry existed for this module until 2026-10-07 even though commit `41afeb6` ("refresh Engine 3 status docs") claimed to cover T-30; this entry was reconstructed from the commits, the plan, and the code.
+
+**Done:**
+- [x] Task 1: migration `059-t30-contract-freight-intake.sql` + `_rollback.sql` — `contract_shipper_authorizations` (`tenant_id BIGINT`, corrected twice: `5126c93` to match the task brief, `6cd18e8` INTEGER→BIGINT); schema test `__tests__/schema/059-t30-contract-freight-intake.test.ts` (done 2026-08-31)
+- [x] Task 1b: `lib/pipeline/stages.ts` — `MATCHED → BOOKED` transition for email-tender loads, one additive line + test (`642ec1d`). **The first Engine 3 change to an Engine 2 pipeline file** — recorded here and in `Engine 2/CLAUDE.md` so it isn't mistaken for drift (done 2026-08-31)
+- [x] Task 2: `lib/contract-intake/authorization.ts` — sender authorization against `contract_shipper_authorizations` + `__tests__/authorization.test.ts` (`f19ce1d`) (done 2026-08-31)
+
+**Remaining (plan Tasks 3–12, none started):**
+- [ ] Task 3: `lib/documents/tender-terms.ts` — tender extraction (Claude PDF input, mirrors T-26's `rate-con-terms.ts`)
+- [ ] Task 4: `requestSource` addition + `lib/contract-intake/validate-rate.ts` — margin validation via T-21
+- [ ] Task 5: extend `lib/exceptions/bridge.ts` `SourceSignal.sourceModule` for `contract_intake` (same one-line widening T-25/T-26 did)
+- [ ] Task 6: wire sender-auth / extraction / validation into `lib/email/imap-poller.ts`
+- [ ] Task 7: `lib/contract-intake/finalize-booking.ts` — the matched→booked watcher
+- [ ] Task 8: cron wiring for `finalize-booking.ts`
+- [ ] Task 9: `PATCH /api/exceptions/[id]` approve/reject branch (acceptance criterion 5, non-negotiable per spec)
+- [ ] Task 10: pending-list + authorization CRUD API
+- [ ] Task 11: end-to-end fixture (criterion 6)
+- [ ] Task 12: full regression pass + production migration apply — separate, explicitly-confirmed steps
+
+**Acceptance criteria status (spec §7):** none evaluated — the module is not functionally complete.
+
+**T-30 exit gate:** NOT met. **Dependency:** Tasks 6 and 7 ride on the E2-04 IMAP poller (`scripts/run-imap-poller.ts`), which has never run against a real mailbox — IMAP credentials were never provisioned (see `Engine 2/docs/superpowers/plans/completion.md`, 2026-08-26 M4 entry). T-30 cannot be exercised end-to-end in production until that is resolved, independent of its own remaining build work.
 
 ## Phase 5 — Platformize (T-29 core)
 
