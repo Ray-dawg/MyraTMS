@@ -355,13 +355,17 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
       // the tender: fall through to the shared INSERT and route to manual review.
       logger.error(`[imap-poller] tender processing failed for ${fromAddress}`, err);
       const msg = err instanceof Error ? err.message : String(err);
-      if (authorized) {
-        tenderExceptionType = 'tender_pending_approval';
-        intakeStatus = 'pending_review';
-        tenderSuffixEmailId = true;
-        tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
-        tenderExceptionDescription = `Tender processing failed: ${msg}`;
-        tenderTenantId = authTenantId;
+      // Authorization may not have completed (the lookup itself threw); the
+      // email must still be visible in the console, so fall back to Myra.
+      tenderExceptionType = 'tender_pending_approval';
+      intakeStatus = 'pending_review';
+      tenderSuffixEmailId = true;
+      tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
+      tenderExceptionDescription = `Tender processing failed: ${msg}`;
+      try {
+        tenderTenantId = authorized ? authTenantId : await getMyraTenantId();
+      } catch (tenantErr) {
+        logger.error('[imap-poller] could not resolve tenant for failed tender', tenantErr);
       }
     }
   }
@@ -386,15 +390,15 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
 
   if (tenderExceptionType && tenderTenantId !== null) {
     const emailId = inserted.rows[0].id;
-    let bridged = false;
+    const fullTitle = tenderSuffixEmailId ? `${tenderExceptionTitle} [email #${emailId}]` : tenderExceptionTitle!;
     try {
-      bridged = await bridgeToExceptions({
+      const bridged = await bridgeToExceptions({
         tenantId: tenderTenantId,
         sourceModule: 'contract_intake',
         exceptionType: tenderExceptionType,
         // Authorized tenders get the email id so distinct tenders from one
         // sender don't collapse under the bridge's type+title dedup.
-        title: tenderSuffixEmailId ? `${tenderExceptionTitle} [email #${emailId}]` : tenderExceptionTitle!,
+        title: fullTitle,
         description: tenderExceptionDescription!,
         context: {},
         pipelineLoadId: null,
@@ -402,19 +406,22 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
         carrierId: null,
         inboundEmailId: emailId,
       });
+      if (!bridged) {
+        // False is also the bridge's normal dedup path (an identical exception
+        // is already open) -- only flag the row when none exists.
+        const open = await db.query(
+          `SELECT 1 FROM exceptions WHERE tenant_id = $1 AND type = $2 AND title = $3 AND status = 'active' LIMIT 1`,
+          [tenderTenantId, tenderExceptionType, fullTitle],
+        );
+        if (open.rows.length === 0) throw new Error('bridgeToExceptions created no exception (no classification rule?)');
+      }
     } catch (err) {
-      logger.error(`[imap-poller] bridgeToExceptions threw for inbound email ${emailId}`, err);
-    }
-    if (!bridged) {
-      // A false return is also the bridge's normal dedup path (an identical
-      // exception is already open) -- only flag the row when none exists.
-      const open = await db.query(
-        `SELECT 1 FROM exceptions WHERE type = $1 AND title LIKE $2 AND status = 'active' LIMIT 1`,
-        [tenderExceptionType, `${tenderExceptionTitle}%`],
-      );
-      if (open.rows.length > 0) return;
-      logger.warn(`[imap-poller] tender exception not created for inbound email ${emailId} (no classification rule, dedup, or error)`);
-      await db.query(`UPDATE inbound_emails SET intake_status = 'bridge_failed' WHERE id = $1`, [emailId]);
+      logger.warn(`[imap-poller] tender exception not created for inbound email ${emailId}: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        await db.query(`UPDATE inbound_emails SET intake_status = 'bridge_failed' WHERE id = $1`, [emailId]);
+      } catch (updErr) {
+        logger.error(`[imap-poller] could not mark inbound email ${emailId} bridge_failed`, updErr);
+      }
     }
   }
 }
