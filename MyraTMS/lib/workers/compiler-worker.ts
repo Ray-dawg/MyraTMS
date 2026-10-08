@@ -76,8 +76,9 @@ interface PipelineLoadRow {
   recommended_strategy: string | null;
   carrier_match_count: number | null;
   top_carrier_id: string | null;
-  // E2-01 M2 — read by assertLoadSource(); SELECT * already returns them.
+  // E2-01 M2 — read by assertLoadSource() and assembleBrief(); SELECT * already returns them.
   load_source_class: string | null;
+  poster_company_raw: string | null;
   created_at: Date | string | null;
 }
 
@@ -292,6 +293,11 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
         isHazmat: false,
         temperatureControlled: equipmentNormalized === 'reefer',
         temperatureRange: null,
+        // E2-01 M2 — whose freight it is (Task 8)
+        sourceClass: load.load_source_class ?? null,
+        posterLegalName: load.poster_company_raw ?? null,
+        coBrokerCounterparty:
+          load.load_source_class === 'co_brokered' ? (load.poster_company_raw ?? null) : null,
       },
       shipper: {
         companyName: load.shipper_company,

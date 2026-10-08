@@ -61,6 +61,11 @@ export interface NegotiationBrief {
     isHazmat: boolean;
     temperatureControlled: boolean;
     temperatureRange: string | null;    // "35-38°F" for reefer
+    // E2-01 M2 — whose freight this is. Populated from pipeline_loads.load_source_class /
+    // poster_company_raw by the Compiler so the agent can speak truthfully about the counterparty.
+    sourceClass: string | null;         // 'shipper_direct' | 'co_brokered' | 'broker_posted' | ... | null (gate not run)
+    posterLegalName: string | null;     // Company name as it appeared on the posting
+    coBrokerCounterparty: string | null; // Set only when sourceClass === 'co_brokered'
   };
 
   // ── SECTION 3: SHIPPER CONTACT ─────────────────────────────────────────
@@ -318,6 +323,10 @@ export interface RetellDynamicVariables {
   distance: string;                     // "250 miles" or "400 kilometres"
   commodity: string;                    // "grinding media" or "general freight"
   weight: string;                       // "42,000 lbs" or "not specified"
+  // E2-01 M2 — load source (all strings; declare these on the Retell agents)
+  load_source_class: string;            // "shipper_direct" | "co_brokered" | ... | "unknown"
+  poster_legal_name: string;            // Posting company, falls back to shipper_company
+  co_broker_counterparty: string;       // "" unless co_brokered
 
   // ── Shipper context ──
   shipper_company: string;              // "Northern Mine Supply Co" or "the shipper"
@@ -533,6 +542,11 @@ export function compileRetellPayload(
     commodity: brief.load.commodity || 'general freight',
     weight: formatWeight(brief.load.weightLbs),
 
+    // Load source (E2-01 M2)
+    load_source_class: brief.load.sourceClass ?? 'unknown',
+    poster_legal_name: brief.load.posterLegalName ?? (brief.shipper.companyName || 'the shipper'),
+    co_broker_counterparty: brief.load.coBrokerCounterparty ?? '',
+
     // Shipper context
     shipper_company: brief.shipper.companyName || 'the shipper',
     shipper_first_name: brief.shipper.contactFirstName || '',
@@ -741,6 +755,9 @@ export function validateBrief(
   if (brief.shipper.previousCallCount > 3) {
     warnings.push(`Shipper has been called ${brief.shipper.previousCallCount} times. Consider manual outreach.`);
   }
+  if (brief.load.sourceClass == null) {
+    warnings.push('load_source_class missing — gate not enforced for this row');
+  }
 
   return {
     valid: errors.length === 0,
@@ -786,6 +803,9 @@ export const EXAMPLE_BRIEF: NegotiationBrief = {
     isHazmat: false,
     temperatureControlled: false,
     temperatureRange: null,
+    sourceClass: "shipper_direct",
+    posterLegalName: "Northern Mine Supply Co",
+    coBrokerCounterparty: null,
   },
   shipper: {
     companyName: "Northern Mine Supply Co",

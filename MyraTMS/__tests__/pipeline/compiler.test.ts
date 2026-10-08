@@ -14,7 +14,7 @@ import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
 import { redisConnection } from '@/lib/pipeline/redis-bullmq';
 import { CompilerWorker, type BriefJobPayload } from '@/lib/workers/compiler-worker';
-import { validateBrief } from '@/lib/pipeline/negotiation-brief';
+import { validateBrief, compileRetellPayload, EXAMPLE_BRIEF } from '@/lib/pipeline/negotiation-brief';
 
 const TEST_LOAD_ID = `TEST-CMP-${Date.now()}`;
 const TEST_PHONE = `+15551${Math.floor(Math.random() * 1_000_000).toString().padStart(6, '0')}`;
@@ -157,4 +157,51 @@ describe('CompilerWorker', () => {
       vi.useRealTimers();
     }
   }, 30_000);
+});
+
+// E2-01 M2 — Task 8: the brief carries whose freight it is so the voice agent
+// can speak truthfully about the counterparty. Pure unit tests (no DB).
+describe('compileRetellPayload load-source fields (E2-01 M2)', () => {
+  it('carries load source fields into the Retell payload as strings', () => {
+    const brief = {
+      ...EXAMPLE_BRIEF,
+      load: {
+        ...EXAMPLE_BRIEF.load,
+        sourceClass: 'co_brokered',
+        posterLegalName: 'Acme Logistics Inc.',
+        coBrokerCounterparty: 'Acme Logistics Inc.',
+      },
+    };
+    const payload = compileRetellPayload(brief);
+    const vars = payload.retell_llm_dynamic_variables;
+    expect(vars.load_source_class).toBe('co_brokered');
+    expect(vars.poster_legal_name).toBe('Acme Logistics Inc.');
+    expect(vars.co_broker_counterparty).toBe('Acme Logistics Inc.');
+    expect(Object.values(vars).every((v) => typeof v === 'string')).toBe(true);
+  });
+
+  it('defaults the three fields to strings and warns when sourceClass is null', () => {
+    const brief = {
+      ...EXAMPLE_BRIEF,
+      load: {
+        ...EXAMPLE_BRIEF.load,
+        sourceClass: null,
+        posterLegalName: null,
+        coBrokerCounterparty: null,
+      },
+    };
+    const vars = compileRetellPayload(brief).retell_llm_dynamic_variables;
+    expect(vars.load_source_class).toBe('unknown');
+    expect(vars.poster_legal_name).toBe(EXAMPLE_BRIEF.shipper.companyName);
+    expect(vars.co_broker_counterparty).toBe('');
+
+    const noon = new Date(); noon.setHours(14, 0, 0, 0);
+    vi.useFakeTimers(); vi.setSystemTime(noon);
+    try {
+      const v = validateBrief({ ...brief, load: { ...brief.load, pickupDate: new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10) } });
+      expect(v.warnings).toContain('load_source_class missing — gate not enforced for this row');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
