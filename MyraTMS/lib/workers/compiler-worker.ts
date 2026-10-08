@@ -39,6 +39,7 @@ import {
   type NegotiationBrief,
   type RetellCreatePhoneCallPayload,
 } from '@/lib/pipeline/negotiation-brief';
+import { assertLoadSource, escalateSourceAssertion } from '@/lib/pipeline/load-source-assert';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 export interface BriefJobPayload extends BaseJobPayload {
@@ -75,6 +76,9 @@ interface PipelineLoadRow {
   recommended_strategy: string | null;
   carrier_match_count: number | null;
   top_carrier_id: string | null;
+  // E2-01 M2 — read by assertLoadSource(); SELECT * already returns them.
+  load_source_class: string | null;
+  created_at: Date | string | null;
 }
 
 const RETELL_WEBHOOK_URL =
@@ -105,6 +109,20 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
 
     const load = await this.fetchPipelineLoad(pipelineLoadId);
     if (!load) throw new Error(`pipeline_load ${pipelineLoadId} not found`);
+
+    // E2-01 M2 — assert, never decide: under enforce mode a load that is not
+    // shipper_direct/co_brokered must never get a brief. Fail closed, critical.
+    const sourceAssertion = assertLoadSource(load, 'compiler');
+    if (!sourceAssertion.ok) {
+      await escalateSourceAssertion(pipelineLoadId, sourceAssertion);
+      return {
+        success: true,
+        pipelineLoadId,
+        stage: 'escalated',
+        duration: 0,
+        details: { escalated: true, reason: sourceAssertion.reasonCode },
+      };
+    }
 
     const carriers = await this.fetchCarrierStack(load.load_id);
     if (carriers.length === 0) {
@@ -679,6 +697,9 @@ export class CompilerWorker extends BaseWorker<BriefJobPayload> {
   }
 
   protected async updatePipelineLoad(pipelineLoadId: number, result: ProcessResult): Promise<void> {
+    // E2-01 M2 — an escalated assertion already wrote stage='escalated';
+    // BaseWorker's auto-advance to 'briefed' must not overwrite it.
+    if (result.details?.escalated) return;
     await super.updatePipelineLoad(pipelineLoadId, result);
 
     const briefId = result.details?.briefId;

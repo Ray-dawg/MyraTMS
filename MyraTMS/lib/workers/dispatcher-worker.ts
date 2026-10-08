@@ -25,6 +25,7 @@ import { db } from '@/lib/pipeline/db-adapter';
 import { logger } from '@/lib/logger';
 import Redis from 'ioredis';
 import { signServiceToken } from '@/lib/pipeline/service-token';
+import { assertLoadSource, escalateSourceAssertion } from '@/lib/pipeline/load-source-assert';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
@@ -64,6 +65,9 @@ interface PipelineLoadRow {
   carrier_agreed_rate: string | null;
   carrier_agreed_currency: string | null;
   carrier_profit: string | null;
+  // E2-01 M2 — read by assertLoadSource().
+  load_source_class: string | null;
+  created_at: Date | string | null;
 }
 
 interface CreatedLoad {
@@ -146,6 +150,20 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
 
     const load = await this.fetchPipelineLoad(pipelineLoadId);
     if (!load) throw new Error(`pipeline_load ${pipelineLoadId} not found`);
+
+    // E2-01 M2 — assert, never decide: under enforce mode a load that is not
+    // shipper_direct/co_brokered must never get a TMS load. Fail closed, critical.
+    const sourceAssertion = assertLoadSource(load, 'dispatcher');
+    if (!sourceAssertion.ok) {
+      await escalateSourceAssertion(pipelineLoadId, sourceAssertion);
+      return {
+        success: true,
+        pipelineLoadId,
+        stage: 'escalated',
+        duration: 0,
+        details: { escalated: true, reason: sourceAssertion.reasonCode },
+      };
+    }
 
     // E2-03 M3 / PRD §11 (spec reconciliation, T-10 §4): once M2's cascade
     // has actually secured a real carrier (accept, within the negotiation
@@ -299,7 +317,8 @@ export class DispatcherWorker extends BaseWorker<DispatchJobPayload> {
               pickup_date, delivery_date, equipment_type, commodity, weight_lbs,
               shipper_company, shipper_email, shipper_phone, top_carrier_id, tms_load_id,
               carrier_call_outcome, carrier_id_secured, carrier_agreed_rate,
-              carrier_agreed_currency, carrier_profit
+              carrier_agreed_currency, carrier_profit,
+              load_source_class, created_at
        FROM pipeline_loads WHERE id = $1`,
       [id],
     );
