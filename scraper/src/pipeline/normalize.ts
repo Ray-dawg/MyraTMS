@@ -13,6 +13,7 @@
 
 import type { ParsedRow } from '../adapters/base.js';
 import type { DATParsedFields } from '../adapters/dat/parse.js';
+import { posterFromRawLoad } from './poster-identity.js';
 
 export interface RawLoad {
   loadId: string;
@@ -43,6 +44,11 @@ export interface RawLoad {
   shipperContactName: string | null;
   shipperPhone: string | null;
   shipperEmail: string | null;
+  // E2-01 §4.2 — poster identity + the raw row for the audit trail.
+  posterCompanyRaw: string | null;
+  posterMcNumber: string | null;
+  posterDotNumber: string | null;
+  rawHtml: string | null;
   postedAt: string;
   expiresAt: string | null;
   scannedAt: string;
@@ -88,6 +94,12 @@ export function normalizeDATRow(row: ParsedRow): RawLoad | null {
     shipperContactName: null,
     shipperPhone: normalizePhone(typeof dat.phone === 'string' ? dat.phone : null),
     shipperEmail: null,
+    ...posterFromRawLoad({
+      shipperCompany: typeof dat.broker === 'string' ? dat.broker : null,
+      posterMcNumber: typeof dat.mcNumber === 'string' ? dat.mcNumber : null,
+      posterDotNumber: typeof dat.dotNumber === 'string' ? dat.dotNumber : null,
+    }),
+    rawHtml: typeof dat.rowHTML === 'string' ? dat.rowHTML : null,
     postedAt: new Date().toISOString(),
     expiresAt: null,
     scannedAt: row.__scrapedAt,

@@ -34,6 +34,8 @@ export interface DATParsedFields {
   rate: string | null;
   broker: string | null;
   phone: string | null;
+  mcNumber: string | null;
+  dotNumber: string | null;
   rowHTML: string;
 }
 
@@ -67,6 +69,8 @@ function extractRow(row: HTMLElement, sel: typeof DAT_SELECTORS): DATParsedField
     rate: text(sel.cellRate),
     broker: text(sel.cellBroker),
     phone: text(sel.cellPhone),
+    mcNumber: text(sel.cellMc),
+    dotNumber: text(sel.cellDot),
     rowHTML: row.outerHTML.slice(0, 4000), // bounded for forensic re-parse
   };
 }
@@ -107,6 +111,8 @@ export async function parseDATResults(page: Page): Promise<ParsedRow[]> {
             rate: text(sel.cellRate),
             broker: text(sel.cellBroker),
             phone: text(sel.cellPhone),
+            mcNumber: text(sel.cellMc),
+            dotNumber: text(sel.cellDot),
             rowHTML: el.outerHTML.slice(0, 4000),
           };
         });

@@ -24,6 +24,11 @@ export interface QualifyJobPayload {
   distanceMiles: number;
   pickupDate: string;
   shipperPhone: string | null;
+  // E2-01 §4.2 — poster identity for the Qualifier's F1 gate.
+  posterCompanyRaw: string | null;
+  posterMcNumber: string | null;
+  posterDotNumber: string | null;
+  isManualImport: false;
 }
 
 export function buildQualifyPayload(load: RawLoad, pipelineLoadId: number): QualifyJobPayload {
@@ -50,6 +55,10 @@ export function buildQualifyPayload(load: RawLoad, pipelineLoadId: number): Qual
     distanceMiles: load.distanceMiles ?? 0,
     pickupDate: load.pickupDate,
     shipperPhone: load.shipperPhone,
+    posterCompanyRaw: load.posterCompanyRaw,
+    posterMcNumber: load.posterMcNumber,
+    posterDotNumber: load.posterDotNumber,
+    isManualImport: false,
   };
 }
 

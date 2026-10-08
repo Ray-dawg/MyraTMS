@@ -72,4 +72,7 @@ export const DAT_SELECTORS = {
   cellRate:        process.env.DAT_SEL_CELL_RATE       || '[data-field="rate"]',
   cellBroker:      process.env.DAT_SEL_CELL_BROKER     || '[data-field="broker"]',
   cellPhone:       process.env.DAT_SEL_CELL_PHONE      || '[data-field="phone"]',
+  // E2-01 §4.2 — poster identity from the results grid when DAT exposes it.
+  cellMc:          process.env.DAT_SEL_CELL_MC         || '[data-field="mcNumber"]',
+  cellDot:         process.env.DAT_SEL_CELL_DOT        || '[data-field="dotNumber"]',
 } as const;

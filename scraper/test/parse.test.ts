@@ -36,8 +36,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FIXTURE_PATH = join(__dirname, 'fixtures', 'dat-results.html');
 
-function loadFixture(): Document {
-  const html = readFileSync(FIXTURE_PATH, 'utf8');
+function loadFixture(name = 'dat-results.html'): Document {
+  const html = readFileSync(join(__dirname, 'fixtures', name), 'utf8');
   const dom = new JSDOM(html);
   return dom.window.document;
 }
@@ -61,6 +61,14 @@ describe('parseDATResultsFromDocument', () => {
     expect(first.broker).toBe('Northern Mine Supply Co');
     expect(first.phone).toBe('(705) 555-1861');
     expect(first.weight).toBe('42,000');
+  });
+
+  it('captures MC and DOT cells when present and nulls when absent', () => {
+    const doc = loadFixture('dat-results-with-mc.html');
+    const rows = parseDATResultsFromDocument(doc, DAT_SELECTORS);
+    expect(rows[0].mcNumber).toBe('MC-123456');
+    expect(rows[0].dotNumber).toBe('USDOT 7890');
+    expect(rows[1].mcNumber).toBeNull();
   });
 
   it('preserves rowHTML for forensic re-parsing (bounded to 4kb)', () => {

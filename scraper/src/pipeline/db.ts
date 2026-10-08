@@ -12,6 +12,7 @@
 
 import type { Pool } from 'pg';
 import type { RawLoad } from './normalize.js';
+import { normalizeCompanyName } from './poster-identity.js';
 
 export interface InsertResult {
   id: number;
@@ -28,10 +29,12 @@ export async function writePipelineLoad(db: Pool, load: RawLoad): Promise<Insert
        equipment_type, commodity, weight_lbs, distance_miles,
        shipper_company, shipper_contact_name, shipper_phone, shipper_email,
        posted_rate, posted_rate_currency, rate_type,
+       poster_company_raw, poster_company_normalized, poster_mc_number, poster_dot_number, poster_raw_html,
        stage, stage_updated_at, created_by
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
        $15, $16, $17, $18, $19, $20, $21,
+       $22, $23, $24, $25, $26,
        'scanned', NOW(), 'scraper-v1'
      )
      ON CONFLICT (load_id, load_board_source) DO NOTHING
@@ -58,6 +61,11 @@ export async function writePipelineLoad(db: Pool, load: RawLoad): Promise<Insert
       load.postedRate,
       load.postedRateCurrency,
       load.rateType,
+      load.posterCompanyRaw,
+      load.posterCompanyRaw ? normalizeCompanyName(load.posterCompanyRaw) : null,
+      load.posterMcNumber,
+      load.posterDotNumber,
+      load.rawHtml,
     ],
   );
 
