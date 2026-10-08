@@ -1,5 +1,6 @@
 "use client"
 
+import { FeatureGate } from "@/components/feature-gate"
 import { useState, useCallback, useMemo } from "react"
 import { Plus, BarChart3, Download, Trash2, Eye, FileText, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -84,7 +85,7 @@ const prebuiltReports: CustomReport[] = [
   { id: "R-003", name: "Carrier Performance Scorecard", dataSource: "carriers", columns: ["Company", "Performance", "On-time %", "Insurance", "Risk Flag"], dateRange: "90d", createdAt: "2026-02-05" },
 ]
 
-export default function ReportsPage() {
+function ReportsPageContent() {
   const { data: rawLoads = [], isLoading: loadsLoading } = useLoads()
   const { data: rawInvoices = [], isLoading: invoicesLoading } = useInvoices()
   const { data: rawShippers = [], isLoading: shippersLoading } = useShippers()
@@ -403,5 +404,18 @@ export default function ReportsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+// Server-side note: Reports has no dedicated API — it aggregates the core
+// loads/invoices/shippers/carriers endpoints (tms_basic), so there is no
+// reports-only route to gate with enforceFeature(). This page gate is the
+// only tms_advanced check for Reports; the underlying data is already
+// visible to the tenant through the core pages.
+export default function ReportsPage() {
+  return (
+    <FeatureGate feature="tms_advanced" title="Reports">
+      <ReportsPageContent />
+    </FeatureGate>
   )
 }

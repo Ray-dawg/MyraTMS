@@ -1,5 +1,6 @@
 "use client"
 
+import { FeatureGate } from "@/components/feature-gate"
 import { useState, useCallback } from "react"
 import { Plus, Play, Pause, Trash2, ClipboardList, Zap, Clock, CheckCircle, AlertTriangle, ArrowRight, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -64,7 +65,7 @@ function parseJsonSafe(val: string | string[] | null | undefined): string[] {
   try { return JSON.parse(val) } catch { return [] }
 }
 
-export default function WorkflowsPage() {
+function WorkflowsPageContent() {
   const { data: rawWorkflows, isLoading, error } = useWorkflows()
   const workflows: Workflow[] = rawWorkflows || []
 
@@ -247,5 +248,13 @@ export default function WorkflowsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+export default function WorkflowsPage() {
+  return (
+    <FeatureGate feature="tms_advanced" title="Workflows">
+      <WorkflowsPageContent />
+    </FeatureGate>
   )
 }

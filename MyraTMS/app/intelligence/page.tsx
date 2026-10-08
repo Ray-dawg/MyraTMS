@@ -1,5 +1,6 @@
 "use client"
 
+import { FeatureGate } from "@/components/feature-gate"
 import { useState, useEffect, useMemo, useCallback } from "react"
 import {
   Brain,
@@ -64,7 +65,7 @@ interface RiskAlert {
   affectedEntity: string | null
 }
 
-export default function IntelligencePage() {
+function IntelligencePageContent() {
   const { data: rawLoads = [], isLoading: loadsLoading } = useLoads()
   const { data: rawCarriers = [], isLoading: carriersLoading } = useCarriers()
   const { data: rawInvoices = [], isLoading: invoicesLoading } = useInvoices()
@@ -644,5 +645,13 @@ export default function IntelligencePage() {
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+export default function IntelligencePage() {
+  return (
+    <FeatureGate feature="data_lane_intelligence" title="Intelligence">
+      <IntelligencePageContent />
+    </FeatureGate>
   )
 }

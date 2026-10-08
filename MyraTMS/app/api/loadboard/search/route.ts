@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
+import { enforceFeature } from "@/lib/features/route-gate"
 import { getCached, setCache } from "@/lib/redis"
 
 interface LoadboardResult {
@@ -125,6 +126,8 @@ export async function POST(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "autobroker_pro")
+  if (denied) return denied
 
   let body: { origin?: string; destination?: string; equipment?: string; maxAge?: number }
   try {
