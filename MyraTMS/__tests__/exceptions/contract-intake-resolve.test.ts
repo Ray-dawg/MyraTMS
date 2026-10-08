@@ -256,23 +256,41 @@ describe('PATCH /api/exceptions/:id — T-30 contract_intake tender approve/reje
     inboundEmailId = await seedInboundEmail();
     exceptionId = await seedTenderException(tenantId, inboundEmailId);
 
-    // Each of these reached Postgres as a cast/width/type error before the
+    // Each of these reached Postgres as a cast/width/range error before the
     // validation was tightened: origin_country is VARCHAR(2),
-    // posted_rate_currency is VARCHAR(3), weight_lbs is INTEGER, and
-    // pickup_date is TIMESTAMP NOT NULL.
-    const bad: Array<Record<string, unknown>> = [
-      { ...COMPLETE_TENDER, originCountry: 'USA' },
-      { ...COMPLETE_TENDER, destinationCountry: 'MX' },
-      { ...COMPLETE_TENDER, rateCurrency: 'DOLLARS' },
-      { ...COMPLETE_TENDER, weightLbs: 20000.5 },
-      { ...COMPLETE_TENDER, pickupDate: '2026-13-45' },
-      { ...COMPLETE_TENDER, equipmentType: 'x'.repeat(51) },
-      { ...COMPLETE_TENDER, originState: 'x'.repeat(11) },
-      { ...COMPLETE_TENDER, rate: -1 },
+    // posted_rate_currency is VARCHAR(3), weight_lbs is INTEGER,
+    // posted_rate is NUMERIC(10,2), and pickup_date is TIMESTAMP NOT NULL.
+    //
+    // The three date cases are the ones Date.parse() alone let through:
+    // '2026-02-30' parses in V8 and silently rolls to 2026-03-02, '1' parses
+    // as the year 2001, and '2026-9-5' is not the shape the extractor emits.
+    // Every rejection must also NAME the field — an operator who gets a bare
+    // 'invalid tender' has to open a ticket to find out which of twelve
+    // fields to fix.
+    const bad: Array<{ field: string; tender: Record<string, unknown> }> = [
+      { field: 'originCountry', tender: { ...COMPLETE_TENDER, originCountry: 'USA' } },
+      { field: 'destinationCountry', tender: { ...COMPLETE_TENDER, destinationCountry: 'MX' } },
+      { field: 'rateCurrency', tender: { ...COMPLETE_TENDER, rateCurrency: 'DOLLARS' } },
+      { field: 'weightLbs', tender: { ...COMPLETE_TENDER, weightLbs: 20000.5 } },
+      { field: 'weightLbs', tender: { ...COMPLETE_TENDER, weightLbs: 3000000000 } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '2026-13-45' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '2026-02-30' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '1' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '2026-9-5' } },
+      { field: 'equipmentType', tender: { ...COMPLETE_TENDER, equipmentType: 'x'.repeat(51) } },
+      { field: 'originState', tender: { ...COMPLETE_TENDER, originState: 'x'.repeat(11) } },
+      { field: 'originCity', tender: { ...COMPLETE_TENDER, originCity: '   ' } },
+      { field: 'commodity', tender: { ...COMPLETE_TENDER, commodity: 'x'.repeat(201) } },
+      { field: 'rate', tender: { ...COMPLETE_TENDER, rate: -1 } },
+      { field: 'rate', tender: { ...COMPLETE_TENDER, rate: 1e8 } },
+      { field: 'rate', tender: { ...COMPLETE_TENDER, rate: 1e-7 } },
+      { field: 'rate', tender: { ...COMPLETE_TENDER, rate: '3000' } },
     ];
-    for (const tender of bad) {
+    for (const { field, tender } of bad) {
       const res = await patch(exceptionId, tenantId, { action: 'resolve', decision: 'approve', tender });
-      expect(res.status, JSON.stringify(tender)).toBe(400);
+      const label = JSON.stringify(tender[field] ?? null);
+      expect(res.status, `${field}=${label}`).toBe(400);
+      expect((await res.json()).error, `${field}=${label}`).toContain(field);
     }
 
     expect(await exceptionStatus(exceptionId)).toBe('active');
@@ -335,6 +353,42 @@ describe('PATCH /api/exceptions/:id — T-30 contract_intake tender approve/reje
       action: 'resolve', decision: 'approve', tender: COMPLETE_TENDER,
     });
     expect(third.status).toBe(409);
+  });
+
+  it('recovers a wedge on an ACKNOWLEDGED exception too — the disqualifying state is only resolved', async () => {
+    tenantId = await getMyraTenantId();
+    inboundEmailId = await seedInboundEmail();
+    exceptionId = await seedTenderException(tenantId, inboundEmailId);
+
+    // acknowledge is supported on every exception type, including this one,
+    // and the base resolve UPDATE has no status predicate — so an operator
+    // can legitimately acknowledge a tender and approve it afterwards.
+    const ack = await patch(exceptionId, tenantId, { action: 'acknowledge' });
+    expect(ack.status).toBe(200);
+    expect(await exceptionStatus(exceptionId)).toBe('acknowledged');
+
+    const first = await patch(exceptionId, tenantId, {
+      action: 'resolve', decision: 'approve', tender: COMPLETE_TENDER,
+    });
+    expect(first.status).toBe(200);
+    const originalLoadId = Number((await first.json()).createdPipelineLoadId);
+
+    // Rewind to the acknowledged-and-wedged state: claim + INSERT committed,
+    // the resolve transaction did not. An earlier revision of the recovery
+    // allowlisted status='active' and returned 409 here, leaving the
+    // exception permanently unresolvable.
+    await db.query(
+      `UPDATE exceptions SET status = 'acknowledged', resolved_at = NULL WHERE id = $1`,
+      [exceptionId],
+    );
+
+    const retry = await patch(exceptionId, tenantId, {
+      action: 'resolve', decision: 'approve', tender: COMPLETE_TENDER,
+    });
+    expect(retry.status).toBe(200);
+    expect(Number((await retry.json()).createdPipelineLoadId)).toBe(originalLoadId);
+    expect(await tenderLoadCount(inboundEmailId)).toBe(1);
+    expect(await exceptionStatus(exceptionId)).toBe('resolved');
   });
 
   it('does not treat a decision flip as a wedge: reject after an unresolved approve stays a 409', async () => {

@@ -27,8 +27,8 @@ interface TenderInput {
 
 // Exactly the vocabularies extractTenderTerms() normalizes to, and exactly
 // what pipeline_loads' VARCHAR(2)/VARCHAR(3) columns can hold.
-const TENDER_COUNTRIES = new Set(["US", "CA"])
-const TENDER_CURRENCIES = new Set(["USD", "CAD"])
+const TENDER_COUNTRIES = ["US", "CA"]
+const TENDER_CURRENCIES = ["USD", "CAD"]
 
 // Target column widths on pipeline_loads, so plausible operator input is a
 // 400 rather than an opaque 500 from a value-too-long error mid-transaction.
@@ -40,40 +40,111 @@ const TENDER_STRING_WIDTHS: Record<string, number> = {
   equipmentType: 50,
 }
 
+/** posted_rate is NUMERIC(10,2): 8 integer digits, and 0.01 is its smallest
+ * non-zero value — 1e-7 passes a naive `> 0` check and then stores as 0.00. */
+const MIN_POSTED_RATE = 0.01
+const MAX_POSTED_RATE = 99999999.99
+/** weight_lbs is INTEGER. */
+const MAX_WEIGHT_LBS = 2147483647
+/** commodity is VARCHAR(200). */
+const MAX_COMMODITY_LENGTH = 200
+
+/**
+ * pickup_date is TIMESTAMP NOT NULL, and Postgres is stricter than V8 about
+ * what a date string may be. `Date.parse()` alone accepts both '1' (year 2001)
+ * and '2026-02-30' (which it silently rolls forward to 2026-03-02); Postgres
+ * rejects both, i.e. they reach the DB as the opaque 500 this validation
+ * exists to replace. So: require the YYYY-MM-DD shape extractTenderTerms()
+ * emits, then round-trip it to catch an impossible calendar date.
+ */
+function isStorableDate(raw: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false
+  const parsed = new Date(`${raw}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime())) return false
+  return parsed.toISOString().slice(0, 10) === raw
+}
+
+type TenderValidation =
+  | { ok: true; value: TenderInput }
+  | { ok: false; error: string }
+
 /**
  * T-30 — validates a tender BEFORE anything is claimed or inserted, so an
  * incomplete or unstorable tender is a 400 that leaves both the exception and
  * the inbound_emails row untouched rather than a 500 from a NOT NULL, enum,
- * width or type violation mid-transaction.
+ * width, range or cast violation mid-transaction.
+ *
+ * Every rejection names the offending field: this is a human-in-the-loop
+ * endpoint, and an operator who gets "invalid tender" has to open a support
+ * ticket to find out which of twelve fields to fix. Shape follows
+ * validateOverrideAmount() in app/api/tenants/[id]/contract-shippers/route.ts.
  *
  * `commodity` and `weightLbs` are deliberately NOT required: both columns are
  * nullable on pipeline_loads and extractTenderTerms() routinely returns null
  * for them on a terse tender PDF. Requiring them would make a perfectly
- * injectable tender un-approvable. They are still type-checked when present
- * (`weight_lbs` is INTEGER, `commodity` is VARCHAR(200)).
+ * injectable tender un-approvable. They are still range- and type-checked
+ * when present.
  */
-function isCompleteTender(t: unknown): t is TenderInput {
-  if (!t || typeof t !== "object") return false
-  const v = t as Record<string, unknown>
+function validateTender(raw: unknown): TenderValidation {
+  if (!raw || typeof raw !== "object") {
+    return { ok: false, error: "approve requires a tender object" }
+  }
+  const v = raw as Record<string, unknown>
 
-  for (const [key, maxLength] of Object.entries(TENDER_STRING_WIDTHS)) {
-    const field = v[key]
-    if (typeof field !== "string" || field.trim() === "" || field.length > maxLength) return false
+  for (const [field, maxLength] of Object.entries(TENDER_STRING_WIDTHS)) {
+    const value = v[field]
+    if (typeof value !== "string" || value.trim() === "") {
+      return { ok: false, error: `tender.${field} is required and must be a non-empty string` }
+    }
+    if (value.length > maxLength) {
+      return { ok: false, error: `tender.${field} must be at most ${maxLength} characters` }
+    }
   }
-  if (typeof v.originCountry !== "string" || !TENDER_COUNTRIES.has(v.originCountry)) return false
-  if (typeof v.destinationCountry !== "string" || !TENDER_COUNTRIES.has(v.destinationCountry)) return false
-  if (typeof v.rateCurrency !== "string" || !TENDER_CURRENCIES.has(v.rateCurrency)) return false
-  // pickup_date is TIMESTAMP NOT NULL — an unparseable date string reaches
-  // Postgres as a cast error, i.e. a 500, unless it is rejected here.
-  if (typeof v.pickupDate !== "string" || Number.isNaN(Date.parse(v.pickupDate))) return false
-  if (typeof v.rate !== "number" || !Number.isFinite(v.rate) || v.rate <= 0) return false
+
+  for (const field of ["originCountry", "destinationCountry"]) {
+    const value = v[field]
+    if (typeof value !== "string" || !TENDER_COUNTRIES.includes(value)) {
+      return { ok: false, error: `tender.${field} must be one of ${TENDER_COUNTRIES.join(", ")}` }
+    }
+  }
+
+  if (typeof v.rateCurrency !== "string" || !TENDER_CURRENCIES.includes(v.rateCurrency)) {
+    return { ok: false, error: `tender.rateCurrency must be one of ${TENDER_CURRENCIES.join(", ")}` }
+  }
+
+  if (typeof v.pickupDate !== "string" || !isStorableDate(v.pickupDate)) {
+    return { ok: false, error: "tender.pickupDate must be a real calendar date in YYYY-MM-DD form" }
+  }
+
+  if (typeof v.rate !== "number" || !Number.isFinite(v.rate)) {
+    return { ok: false, error: "tender.rate must be a number (an all-in dollar amount)" }
+  }
+  if (v.rate < MIN_POSTED_RATE || v.rate > MAX_POSTED_RATE) {
+    return { ok: false, error: `tender.rate must be between ${MIN_POSTED_RATE} and ${MAX_POSTED_RATE}` }
+  }
+
   if (v.weightLbs !== undefined && v.weightLbs !== null) {
-    if (typeof v.weightLbs !== "number" || !Number.isInteger(v.weightLbs)) return false
+    if (typeof v.weightLbs !== "number" || !Number.isInteger(v.weightLbs)) {
+      return {
+        ok: false,
+        error: "tender.weightLbs must be a whole number of pounds — round it if the extraction was fractional",
+      }
+    }
+    if (v.weightLbs < 0 || v.weightLbs > MAX_WEIGHT_LBS) {
+      return { ok: false, error: `tender.weightLbs must be between 0 and ${MAX_WEIGHT_LBS}` }
+    }
   }
+
   if (v.commodity !== undefined && v.commodity !== null) {
-    if (typeof v.commodity !== "string" || v.commodity.length > 200) return false
+    if (typeof v.commodity !== "string") {
+      return { ok: false, error: "tender.commodity must be a string or null" }
+    }
+    if (v.commodity.length > MAX_COMMODITY_LENGTH) {
+      return { ok: false, error: `tender.commodity must be at most ${MAX_COMMODITY_LENGTH} characters` }
+    }
   }
-  return true
+
+  return { ok: true, value: v as unknown as TenderInput }
 }
 
 /**
@@ -175,17 +246,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             { status: 400 },
           )
         }
-        if (decision === 'approve' && !isCompleteTender(tender)) {
-          return NextResponse.json(
-            { error: "approve requires a complete tender (origin, destination, equipment type, rate, currency, pickup date)" },
-            { status: 400 },
-          )
+
+        let approvedTender: TenderInput | null = null
+        if (decision === 'approve') {
+          const validated = validateTender(tender)
+          if (!validated.ok) {
+            return NextResponse.json({ error: validated.error }, { status: 400 })
+          }
+          approvedTender = validated.value
         }
 
         const emailId = peek.inbound_email_id
         const claimedStatus = decision === 'approve' ? 'approved' : 'rejected'
-        const approvedTender: TenderInput | null =
-          decision === 'approve' && isCompleteTender(tender) ? tender : null
 
         try {
           createdPipelineLoadId = await asServiceAdmin(
@@ -254,19 +326,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           // below runs in a second one. If that second transaction fails
           // (pool exhaustion, a dropped connection — both plausible on
           // Vercel) the tender is claimed and, on approve, the
-          // pipeline_loads row exists, yet the exception is still active.
+          // pipeline_loads row exists, yet the exception is unresolved.
           // Without the recovery below, every retry would hit
           // `WHERE intake_status = 'pending_review'`, claim nothing, and 409
           // forever: the exception would be permanently unresolvable through
           // this route.
           //
-          // Distinguishing a resumed wedge from a genuine double-submit is
-          // possible because the base resolve UPDATE carries no status
-          // predicate, so re-resolving is naturally idempotent. The only
-          // state that means "wedged" is a stored intake_status matching
-          // THIS request's decision while the exception is still active —
-          // after a completed resolve the exception is 'resolved', so a real
-          // double-submit still gets its 409.
+          // The disqualifying state is a DENYLIST of exactly one value —
+          // 'resolved' — not an allowlist of the states we expect. A genuine
+          // double-submit always has status='resolved', because the first
+          // submit's resolve completed; anything else (active, acknowledged,
+          // or any status added later) is by definition an unfinished
+          // resolve, i.e. a wedge, and must be allowed to finish. An earlier
+          // revision allowlisted 'active' and so left an acknowledged-then-
+          // wedged exception permanently stuck — the very bug this recovery
+          // exists to remove, surviving in an unenumerated state.
+          //
+          // The stored intake_status must still match THIS request's
+          // decision, so a decision flip (stored 'approved', request
+          // 'reject') remains a 409 rather than silently overwriting it.
           const { rows: wedgeRows } = await db.query<{
             intake_status: string | null
             created_pipeline_load_id: number | null
@@ -279,7 +357,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             [id],
           )
           const wedge = wedgeRows[0]
-          if (!wedge || wedge.intake_status !== claimedStatus || wedge.status !== 'active') {
+          if (!wedge || wedge.intake_status !== claimedStatus || wedge.status === 'resolved') {
             return NextResponse.json({ error: "Tender already processed" }, { status: 409 })
           }
           createdPipelineLoadId =
