@@ -1,11 +1,12 @@
 // lib/contract-intake/__tests__/validate-rate.test.ts
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { getMyraTenantId } from '@/lib/tenants/get-myra-tenant-id';
+import { quotePricing } from '@/lib/pricing/pricing-engine';
+import { resolveMargin } from '@/lib/pricing/resolve-margin';
 import { validateTenderedRate } from '@/lib/contract-intake/validate-rate';
 import type { ExtractedTenderTerms } from '@/lib/documents/tender-terms';
 
-// Fixed Chicago->Dallas distance: avoids live Mapbox calls and the pre-existing
-// distance_cache `route_geometry` insert bug in lib/quoting/geo/distance-service.ts.
+// Fixed Chicago->Dallas distance: keeps the test free of live Mapbox calls.
 vi.mock('@/lib/quoting/geo/distance-service', () => ({
   resolveAddressToDistance: vi.fn(async () => ({
     distanceMiles: 925, distanceKm: 1489, driveTimeHours: 14,
@@ -48,5 +49,21 @@ describe('validateTenderedRate (acceptance criterion 4)', () => {
     const result = await validateTenderedRate(tenantId, incomplete, 0);
     expect(result.acceptable).toBe(false);
     expect(result.reason).toContain('could not be fully parsed');
+  });
+
+  it('uses the tenant default floor when no override is given, and reports the real dollar margin', async () => {
+    const result = await validateTenderedRate(tenantId, BASE_TENDER);
+    const expectedFloor = (await resolveMargin(tenantId, 'USD')).margin.minMargin;
+    const quote = await quotePricing({
+      tenantId, direction: 'sell', requestSource: 'contract_intake_validation',
+      load: {
+        originCity: 'Chicago', originState: 'IL', originCountry: 'US',
+        destinationCity: 'Dallas', destinationState: 'TX', destinationCountry: 'US',
+        equipmentType: 'Dry Van', postedRate: 3000,
+      },
+    });
+    expect(result.marginFloor).toBe(expectedFloor);
+    expect(result.dollarMargin).toBeCloseTo(3000 - quote.cost.total, 2);
+    expect(result.acceptable).toBe(result.dollarMargin >= expectedFloor);
   });
 });
