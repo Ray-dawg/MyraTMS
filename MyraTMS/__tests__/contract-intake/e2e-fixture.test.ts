@@ -51,9 +51,19 @@ describe('T-30 end-to-end fixture (acceptance criterion 6)', () => {
 
   it('approved email-tender load reaches booked via real Ranker + finalize-booking, with zero agent_calls and no downstream error', async () => {
     // Carrier that clears the hard filter (Active authority, unexpired insurance,
-    // Dry Van equipment) and scores above F with no load history: proximity 0.3
-    // + rate 0.5 + reliability 0.5 + relationship 0.1, weighted => ~0.26 (D).
-    // So the Ranker MATCHES rather than disqualifies.
+    // Dry Van equipment) and scores above F with NO load history. The Ranker's
+    // request carries no originLat/originLng, so proximity returns its 0.5
+    // neutral default rather than a distance-derived value: lane 0 (x0.30)
+    // + proximity 0.5 (x0.25) + rate 0.5 (x0.20) + reliability 0.5 (x0.15, NEW)
+    // + relationship 0.1 (x0.10) => ~0.31, grade D. Above F, so the Ranker
+    // MATCHES rather than disqualifies.
+    //
+    // This seeding is what makes the test independent of ambient DB state: on a
+    // freshly-cut verification branch with no other eligible carriers, this row
+    // alone keeps the load viable. On t30-verify other carriers already exist
+    // and maxResults is 3, so the top pick is usually one of those -- the
+    // assertions below hold either way, but do not read a passing run as proof
+    // that THIS carrier was selected.
     carrierIds.push(TEST_CARRIER_ID);
     await db.query(
       `INSERT INTO carriers (id, tenant_id, company, mc_number, dot_number,
@@ -141,7 +151,15 @@ describe('T-30 end-to-end fixture (acceptance criterion 6)', () => {
     expect(afterBooked.rows[0].booked_via).toBe('email_tender');
     expect(Number(afterBooked.rows[0].agreed_rate)).toBe(3000);
 
-    // Step 4 -- no voice call ever happened.
+    // Step 4 -- sanity check, NOT the proof of "zero voice calls".
+    // Nothing in this test could create an agent_calls row: the only writers are
+    // voice-worker, carrier-voice-worker, retell-webhook and sprint5-checkpoint,
+    // none of which run here, and the test's brief queue has no consumer. So
+    // this assertion would pass for almost any implementation; it only fires if
+    // the Ranker or finalize path were changed to insert into agent_calls.
+    // What STRUCTURALLY proves no call occurred is the stage path asserted
+    // above -- matched -> booked, skipping 'briefed' and 'calling' entirely,
+    // which are the only stages from which a voice call is ever placed.
     const calls = await db.query<{ c: number }>(
       `SELECT COUNT(*)::int AS c FROM agent_calls WHERE pipeline_load_id = $1`,
       [pipelineLoadId],
