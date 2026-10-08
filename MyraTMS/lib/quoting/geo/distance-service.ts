@@ -125,15 +125,14 @@ export async function getDrivingDistance(
     await client.query(
       `INSERT INTO distance_cache (
          origin_hash, dest_hash, origin_address, dest_address,
-         distance_km, distance_miles, drive_time_hours, route_geometry
+         distance_km, distance_miles, drive_time_hours
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8
+         $1, $2, $3, $4, $5, $6, $7
        )
        ON CONFLICT DO NOTHING`,
       [
         originHash, destHash, originAddress, destAddress,
         distanceKm, distanceMiles, driveTimeHours,
-        JSON.stringify(route.geometry),
       ],
     )
   })
