@@ -2,6 +2,7 @@
 
 import { FeatureGate } from "@/components/feature-gate"
 import { useState, useEffect, useMemo, useCallback } from "react"
+import { useRouter } from "next/navigation"
 import {
   Brain,
   AlertTriangle,
@@ -40,10 +41,17 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { useLoads, useCarriers, useInvoices, useShippers, analyzeRisk } from "@/lib/api"
 import { toast } from "sonner"
+import { resolveAlertTarget, alertKey, getActionNotice } from "@/lib/intelligence/alert-target"
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(value)
 }
+
+// Verified against app/workflows/page.tsx (human-label triggers, string actions),
+// app/api/workflows/route.ts (stores trigger_type verbatim) and lib/workflow-engine.ts
+// (matches only "status_change" | "load_created" | "invoice_created"; actions need a `type`).
+const WORKFLOWS_NOT_WIRED =
+  "Not available yet: the Workflows builder's triggers and actions are not yet wired to the workflow engine, so a workflow created there cannot run."
 
 function SeverityIndicator({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
@@ -66,6 +74,7 @@ interface RiskAlert {
 }
 
 function IntelligencePageContent() {
+  const router = useRouter()
   const { data: rawLoads = [], isLoading: loadsLoading } = useLoads()
   const { data: rawCarriers = [], isLoading: carriersLoading } = useCarriers()
   const { data: rawInvoices = [], isLoading: invoicesLoading } = useInvoices()
@@ -73,6 +82,11 @@ function IntelligencePageContent() {
 
   const [riskData, setRiskData] = useState<{ riskAlerts: RiskAlert[]; overallRiskScore: number; summary: string } | null>(null)
   const [riskLoading, setRiskLoading] = useState(false)
+  // Alerts are generated per request and not persisted, so dismissal is purely
+  // client-side, keyed on content (not index) so a re-fetch that reorders the
+  // list keeps the right alerts dismissed.
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => new Set())
+  const [expandedAutomations, setExpandedAutomations] = useState<Set<string>>(() => new Set())
 
   const isLoading = loadsLoading || carriersLoading || invoicesLoading || shippersLoading
 
@@ -110,6 +124,7 @@ function IntelligencePageContent() {
   })), [rawInvoices])
 
   const shippers = useMemo(() => rawShippers.map((s: Record<string, unknown>) => ({
+    id: s.id as string,
     company: (s.company || "") as string,
     contractStatus: (s.contract_status || "") as string,
     annualRevenue: Number(s.annual_revenue) || 0,
@@ -187,6 +202,7 @@ function IntelligencePageContent() {
       .filter((s: any) => s.contractStatus === "Contracted" || s.conversionProbability > 50)
       .slice(0, 4)
       .map((s: any) => ({
+        id: s.id as string,
         company: s.company,
         insight: s.contractStatus === "Contracted"
           ? `Active contract with ${formatCurrency(s.annualRevenue)} annual revenue. Pipeline stage: ${s.pipelineStage}.`
@@ -217,8 +233,52 @@ function IntelligencePageContent() {
   }, [isLoading, loads.length, fetchRiskAnalysis])
 
   const riskAlerts = riskData?.riskAlerts || []
+  const visibleAlerts = useMemo(() => {
+    const seen = new Set<string>()
+    return riskAlerts
+      .map((alert) => ({ alert, key: alertKey(alert) }))
+      .filter(({ key }) => {
+        if (dismissedKeys.has(key) || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+  }, [riskAlerts, dismissedKeys])
+  const dismissedCount = riskAlerts.length > 0 ? new Set(riskAlerts.map(alertKey).filter((k) => dismissedKeys.has(k))).size : 0
+
+  const handleTakeAction = useCallback((alert: RiskAlert) => {
+    const target = resolveAlertTarget(alert, {
+      carriers: carriers.map((c: any) => ({ id: c.id, company: c.company })),
+      shippers: shippers.map((s: any) => ({ id: s.id, company: s.company })),
+    })
+    const notice = getActionNotice(target, loads.map((l: any) => l.id))
+    if (notice) toast[notice.level](notice.message)
+    router.push(target.href)
+  }, [carriers, shippers, loads, router])
+
+  const dismissAlert = useCallback((key: string) => {
+    setDismissedKeys((prev) => new Set(prev).add(key))
+  }, [])
+
+  const restoreDismissed = useCallback(() => setDismissedKeys(new Set()), [])
+
+  const toggleAutomationDetails = useCallback((id: string) => {
+    setExpandedAutomations((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const bestCarrier = useMemo(
+    () => (carriers.length > 0 ? [...carriers].sort((a: any, b: any) => b.performanceScore - a.performanceScore)[0] : null),
+    [carriers],
+  )
+  const deliveredCount = loads.filter((l: any) => l.status === "Delivered").length
+  const oldestOverdueDays = overdueInvoices.reduce((max: number, i: any) => Math.max(max, i.daysOutstanding), 0)
+
   const riskScore = riskData?.overallRiskScore ?? (atRiskLoads.length > 0 ? 65 : 25)
-  const highSeverityCount = riskAlerts.filter((a) => a.severity === "high" || a.severity === "critical").length
+  const highSeverityCount = visibleAlerts.filter(({ alert: a }) => a.severity === "high" || a.severity === "critical").length
 
   if (isLoading) {
     return (
@@ -348,7 +408,7 @@ function IntelligencePageContent() {
                   <span className="text-xs text-muted-foreground">Active Alerts</span>
                   <AlertTriangle className="h-3.5 w-3.5 text-muted-foreground" />
                 </div>
-                <span className="text-2xl font-semibold text-card-foreground">{riskAlerts.length || atRiskLoads.length}</span>
+                <span className="text-2xl font-semibold text-card-foreground">{riskAlerts.length > 0 ? visibleAlerts.length : atRiskLoads.length}</span>
                 <p className="text-[11px] text-destructive mt-1">{highSeverityCount} high severity</p>
               </CardContent>
             </Card>
@@ -391,10 +451,10 @@ function IntelligencePageContent() {
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground mr-2" />
               <span className="text-sm text-muted-foreground">Running AI analysis...</span>
             </div>
-          ) : riskAlerts.length > 0 ? (
+          ) : visibleAlerts.length > 0 ? (
             <div className="space-y-3">
-              {riskAlerts.map((alert, idx) => (
-                <Card key={idx} className="border-border bg-card">
+              {visibleAlerts.map(({ alert, key }) => (
+                <Card key={key} className="border-border bg-card">
                   <CardContent className="p-4">
                     <div className="flex items-start gap-3">
                       <SeverityIndicator severity={alert.severity} />
@@ -413,11 +473,11 @@ function IntelligencePageContent() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2 mt-2.5">
-                          <Button variant="outline" size="sm" className="h-7 text-xs">
+                          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleTakeAction(alert)}>
                             Take Action
                             <ArrowRight className="h-3 w-3 ml-1" />
                           </Button>
-                          <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground">
+                          <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => dismissAlert(key)}>
                             Dismiss
                           </Button>
                         </div>
@@ -430,8 +490,17 @@ function IntelligencePageContent() {
           ) : (
             <div className="text-center py-8">
               <CheckCircle2 className="h-8 w-8 text-success mx-auto mb-2" />
-              <p className="text-sm text-muted-foreground">No active risk alerts. Operations are running smoothly.</p>
+              <p className="text-sm text-muted-foreground">
+                {dismissedCount > 0 ? "All risk alerts have been dismissed." : "No active risk alerts. Operations are running smoothly."}
+              </p>
             </div>
+          )}
+
+          {dismissedCount > 0 && !riskLoading && (
+            <p className="text-center text-[11px] text-muted-foreground">
+              {dismissedCount} dismissed (until you leave this page).{" "}
+              <button type="button" className="underline hover:text-foreground" onClick={restoreDismissed}>Restore</button>
+            </p>
           )}
 
           {riskData?.summary && (
@@ -557,7 +626,7 @@ function IntelligencePageContent() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
-                          <Button variant="outline" size="sm" className="h-7 text-xs">
+                          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => router.push(`/shippers/${encodeURIComponent(item.id)}`)}>
                             {item.action}
                             <ArrowRight className="h-3 w-3 ml-1" />
                           </Button>
@@ -578,25 +647,58 @@ function IntelligencePageContent() {
           <div className="grid grid-cols-3 gap-4">
             {[
               {
+                id: "auto-assign",
                 title: "Auto-assign top carriers",
-                description: `${carriers.length > 0 ? carriers.sort((a: any, b: any) => b.performanceScore - a.performanceScore)[0]?.company : "Top carrier"} has the best on-time rate. Automate assignment for contracted loads on their lanes.`,
-                savings: `$420/mo in ops time`,
-                confidence: carriers.length > 0 ? Math.min(carriers.sort((a: any, b: any) => b.performanceScore - a.performanceScore)[0]?.performanceScore || 80, 98) : 80,
+                description: bestCarrier
+                  ? `${bestCarrier.company} has the highest performance score (${bestCarrier.performanceScore}).`
+                  : "No carrier performance data yet.",
+                savings: `Est. $420/mo in ops time`,
+                // Flat template constant, like the other two cards. Deriving this
+                // from performanceScore implied the score measured confidence in the
+                // automation, and showed the same number twice under two names.
+                confidence: 80,
+                basis: bestCarrier
+                  ? [
+                      { label: "Top carrier", value: bestCarrier.company },
+                      { label: "Performance score", value: String(bestCarrier.performanceScore) },
+                      { label: "On-time rate", value: `${bestCarrier.onTimePercent}%` },
+                      { label: "Carriers considered", value: String(carriers.length) },
+                    ]
+                  : [{ label: "Carriers considered", value: "0" }],
+                unavailableReason: WORKFLOWS_NOT_WIRED,
               },
               {
+                id: "pod-reminder",
                 title: "POD reminder automation",
-                description: `${loads.filter((l: any) => l.status === "Delivered").length} delivered loads may need POD verification. Auto-send reminders to carriers.`,
-                savings: "12 hrs/mo admin time",
+                description: `${deliveredCount} delivered loads may need POD verification. A reminder would be an in-app notification; it would not email carriers.`,
+                savings: "Est. 12 hrs/mo admin time",
                 confidence: 98,
+                basis: [
+                  { label: "Delivered loads", value: String(deliveredCount) },
+                  { label: "Total loads", value: String(loads.length) },
+                ],
+                unavailableReason: WORKFLOWS_NOT_WIRED,
               },
               {
+                id: "invoice-factoring",
                 title: "Invoice factoring trigger",
                 description: `${overdueInvoices.length} overdue invoices totaling ${formatCurrency(overdueTotal)}. Auto-submit to factoring when DPO exceeds 15 days.`,
-                savings: `${formatCurrency(overdueTotal > 0 ? Math.round(overdueTotal * 0.05) : 2100)}/mo in cash flow`,
+                savings:
+                  overdueTotal > 0
+                    ? `Est. ${formatCurrency(Math.round(overdueTotal * 0.05))}/mo in cash flow`
+                    : "No overdue invoices",
                 confidence: 87,
+                basis: [
+                  { label: "Overdue invoices", value: String(overdueInvoices.length) },
+                  { label: "Overdue total", value: formatCurrency(overdueTotal) },
+                  { label: "Oldest overdue", value: `${oldestOverdueDays} days` },
+                ],
+                unavailableReason: "Not available yet: workflows have no factoring action, so this cannot be automated. Review overdue invoices in Finance.",
               },
-            ].map((suggestion, i) => (
-              <Card key={i} className="border-border bg-card">
+            ].map((suggestion) => {
+              const expanded = expandedAutomations.has(suggestion.id)
+              return (
+              <Card key={suggestion.id} className="border-border bg-card">
                 <CardContent className="p-4 space-y-3">
                   <div>
                     <h3 className="text-sm font-medium text-card-foreground mb-1">{suggestion.title}</h3>
@@ -604,28 +706,46 @@ function IntelligencePageContent() {
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-success font-medium">{suggestion.savings}</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-muted-foreground">Confidence</span>
-                      <div className="h-1.5 w-16 rounded-full bg-secondary overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-accent"
-                          style={{ width: `${suggestion.confidence}%` }}
-                        />
-                      </div>
-                      <span className="text-[10px] font-medium text-card-foreground">{suggestion.confidence}%</span>
-                    </div>
                   </div>
+                  {expanded && (
+                    <div className="rounded-md bg-secondary/30 p-2.5 space-y-1.5">
+                      <p className="text-[11px] font-medium text-card-foreground">Based on your current data</p>
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-muted-foreground">Est. confidence</span>
+                        <span className="font-medium text-card-foreground">{suggestion.confidence}%</span>
+                      </div>
+                      {suggestion.basis.map((b) => (
+                        <div key={b.label} className="flex items-center justify-between text-[11px]">
+                          <span className="text-muted-foreground">{b.label}</span>
+                          <span className="font-medium text-card-foreground">{b.value}</span>
+                        </div>
+                      ))}
+                      <p className="text-[10px] text-muted-foreground leading-relaxed pt-1">
+                        Savings and confidence are template estimates, not measured results.
+                      </p>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    {suggestion.unavailableReason}
+                  </p>
                   <div className="flex gap-2">
-                    <Button variant="outline" size="sm" className="h-7 text-xs flex-1">
-                      Enable
+                    <Button variant="outline" size="sm" className="h-7 text-xs flex-1" disabled>
+                      Not available
                     </Button>
-                    <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground">
-                      Details
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-muted-foreground"
+                      aria-expanded={expanded}
+                      onClick={() => toggleAutomationDetails(suggestion.id)}
+                    >
+                      {expanded ? "Hide details" : "Details"}
                     </Button>
                   </div>
                 </CardContent>
               </Card>
-            ))}
+              )
+            })}
           </div>
 
           <Card className="border-border bg-card border-l-2 border-l-accent">
@@ -635,7 +755,7 @@ function IntelligencePageContent() {
                 <div>
                   <h3 className="text-sm font-medium text-card-foreground mb-1">Automation Impact Summary</h3>
                   <p className="text-xs text-muted-foreground leading-relaxed">
-                    Enabling all suggested automations could save approximately <span className="text-card-foreground font-medium">$2,520/mo</span> in operational costs and <span className="text-card-foreground font-medium">12+ hours</span> of admin time.
+                    None of these automations can be enabled yet — the workflow engine has no action wired for any of them. Each card above carries its own template estimate; they are in different units and are not summed here.
                     Currently managing {loads.length} loads across {carriers.length} carriers with {formatCurrency(totalRevenue)} in total revenue.
                   </p>
                 </div>

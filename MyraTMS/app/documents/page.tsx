@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef } from "react"
-import { Search, Upload, FileText, Eye, Tag } from "lucide-react"
+import { Search, Upload, FileText, Eye, EyeOff, Tag, ExternalLink } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -22,7 +22,10 @@ type Document = {
   uploadDate: string
   status: string
   uploadedBy: string
+  /** documents.blob_url ('' when no file is stored) */
+  blobUrl: string
 }
+import { getPreviewTarget } from "@/lib/documents/preview"
 import { useWorkspace } from "@/lib/workspace-context"
 import { useDocuments, uploadDocument } from "@/lib/api"
 
@@ -35,6 +38,7 @@ export default function DocumentsPage() {
   const [relatedFilter, setRelatedFilter] = useState<string>("all")
   const [uploadOpen, setUploadOpen] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [previewDoc, setPreviewDoc] = useState<Document | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { addNotification } = useWorkspace()
 
@@ -49,6 +53,7 @@ export default function DocumentsPage() {
     uploadDate: (d.upload_date || "") as string,
     status: (d.status || "Pending Review") as string,
     uploadedBy: (d.uploaded_by || "") as string,
+    blobUrl: (d.blob_url || "") as string,
   }))
 
   const [form, setForm] = useState({ name: "", type: "BOL" as Document["type"], relatedTo: "", relatedType: "Load" as Document["relatedType"] })
@@ -87,6 +92,14 @@ export default function DocumentsPage() {
     setUploadOpen(false)
     setForm({ name: "", type: "BOL", relatedTo: "", relatedType: "Load" })
   }, [form, uploadFile])
+
+  const handlePreview = useCallback((doc: Document) => {
+    if (getPreviewTarget(doc).kind === "none") {
+      toast.info(`No file is stored for ${doc.name}, so there is nothing to preview.`)
+      return
+    }
+    setPreviewDoc(doc)
+  }, [])
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
@@ -154,12 +167,44 @@ export default function DocumentsPage() {
                 <TableCell className="text-xs text-muted-foreground py-2.5">{new Date(doc.uploadDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</TableCell>
                 <TableCell className="py-2.5"><StatusBadge status={doc.status} /></TableCell>
                 <TableCell className="text-xs text-muted-foreground py-2.5">{doc.uploadedBy || "--"}</TableCell>
-                <TableCell className="py-2.5"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => toast.info(`Preview: ${doc.name}`)}><Eye className="h-3.5 w-3.5" /><span className="sr-only">Preview document</span></Button></TableCell>
+                <TableCell className="py-2.5">{getPreviewTarget(doc).kind === "none"
+                  ? <Button variant="ghost" size="icon" className="h-7 w-7 opacity-40" aria-disabled="true" title="No file stored for this document" onClick={() => handlePreview(doc)}><EyeOff className="h-3.5 w-3.5" /><span className="sr-only">No file to preview</span></Button>
+                  : <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handlePreview(doc)}><Eye className="h-3.5 w-3.5" /><span className="sr-only">Preview document</span></Button>}</TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
       </div>
+
+      <Dialog open={!!previewDoc} onOpenChange={(open) => { if (!open) setPreviewDoc(null) }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader><DialogTitle className="text-base truncate">{previewDoc?.name ?? "Preview"}</DialogTitle></DialogHeader>
+          {previewDoc && (() => {
+            const target = getPreviewTarget(previewDoc)
+            if (target.kind === "image" && target.url) {
+              return (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={target.url} alt={previewDoc.name} className="w-full max-h-[70vh] object-contain rounded-md" />
+              )
+            }
+            if (target.kind === "pdf" && target.url) {
+              return (
+                <object data={target.url} type="application/pdf" className="w-full h-[70vh] rounded-md border border-border">
+                  <p className="p-4 text-xs text-muted-foreground">This browser cannot display the PDF inline. Use the link below to open it.</p>
+                </object>
+              )
+            }
+            return <p className="text-xs text-muted-foreground py-6 text-center">This file type cannot be previewed in the browser. Open it in a new tab to view or download it.</p>
+          })()}
+          {previewDoc && getPreviewTarget(previewDoc).url && (
+            <DialogFooter>
+              <Button asChild variant="outline" size="sm" className="text-xs gap-1.5">
+                <a href={getPreviewTarget(previewDoc).url!} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3 w-3" />Open in new tab</a>
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
         <DialogContent className="max-w-md">
