@@ -48,6 +48,11 @@ export async function updateLoad(id: string, data: Record<string, unknown>) {
   return res.json()
 }
 
+// --- Users (tenant members) ---
+export function useUsers() {
+  return useSWR("/api/users", fetcher, swrDefaults)
+}
+
 // --- Shippers ---
 export function useShippers(params?: { search?: string }) {
   const query = new URLSearchParams()
