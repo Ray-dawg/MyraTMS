@@ -321,77 +321,67 @@ function makeFakeRequestWithHeaders(headers: Record<string, string>) {
   } as unknown as import("next/server").NextRequest
 }
 
+function makeFakeRequestWithCookie(token: string) {
+  return {
+    cookies: {
+      get: (name: string) => (name === "auth-token" ? { value: token } : undefined),
+    },
+    headers: { get: () => null },
+  } as unknown as import("next/server").NextRequest
+}
+
 describe("getTenantContext", () => {
-  it("reads tenant context from x-myra-tenant-* headers", () => {
+  // SECURITY: these used to assert that x-myra-tenant-* headers were trusted.
+  // They are not -- see __tests__/lib/auth-tenant-context-spoofing.test.ts for
+  // why (an anonymous request could forge them on production). Tenant context
+  // now comes from the signed JWT only.
+  it("ignores x-myra-tenant-* headers on an unauthenticated request", () => {
     const req = makeFakeRequestWithHeaders({
       "x-myra-tenant-id": "7",
       "x-myra-tenant-role": "admin",
       "x-myra-user-id": "usr-007",
       "x-myra-super-admin": "1",
     })
-    const ctx = getTenantContext(req)
+    expect(getTenantContext(req)).toBeNull()
+  })
+
+  it("returns null when there is no token at all", () => {
+    expect(getTenantContext(makeFakeRequestWithHeaders({}))).toBeNull()
+  })
+
+  it("resolves tenant, role, userId and super-admin from the JWT", () => {
+    const token = createToken({
+      ...samplePayload,
+      tenantId: 9,
+      tenantIds: [9],
+      isSuperAdmin: true,
+    })
+    const ctx = getTenantContext(makeFakeRequestWithCookie(token))
     expect(ctx).toEqual({
-      tenantId: 7,
-      role: "admin",
-      userId: "usr-007",
+      tenantId: 9,
+      role: samplePayload.role,
+      userId: samplePayload.userId,
       isSuperAdmin: true,
     })
   })
 
-  it("returns null when x-myra-tenant-id header is absent", () => {
-    const req = makeFakeRequestWithHeaders({})
-    expect(getTenantContext(req)).toBeNull()
-  })
-
-  it("returns null when x-myra-tenant-id is non-numeric", () => {
-    const req = makeFakeRequestWithHeaders({ "x-myra-tenant-id": "abc" })
-    expect(getTenantContext(req)).toBeNull()
-  })
-
-  it("returns null when x-myra-tenant-id is zero or negative", () => {
-    expect(getTenantContext(makeFakeRequestWithHeaders({ "x-myra-tenant-id": "0" }))).toBeNull()
-    expect(getTenantContext(makeFakeRequestWithHeaders({ "x-myra-tenant-id": "-3" }))).toBeNull()
-  })
-
-  it("treats x-myra-super-admin != '1' as not-super-admin", () => {
-    const req = makeFakeRequestWithHeaders({
-      "x-myra-tenant-id": "2",
-      "x-myra-super-admin": "true",
-    })
-    const ctx = getTenantContext(req)
+  it("reports isSuperAdmin false when the claim is absent", () => {
+    const token = createToken({ ...samplePayload, tenantId: 2, tenantIds: [2] })
+    const ctx = getTenantContext(makeFakeRequestWithCookie(token))
     expect(ctx!.isSuperAdmin).toBe(false)
   })
 })
 
 describe("requireTenantContext", () => {
-  it("prefers headers when present", () => {
-    const req = makeFakeRequestWithHeaders({
-      "x-myra-tenant-id": "7",
-      "x-myra-tenant-role": "broker",
-      "x-myra-user-id": "usr-7",
-    })
-    const ctx = requireTenantContext(req)
-    expect(ctx.tenantId).toBe(7)
-    expect(ctx.role).toBe("broker")
-  })
-
-  it("falls back to decoding the JWT cookie when headers are missing", () => {
+  it("resolves from the JWT cookie", () => {
     const token = createToken({ ...samplePayload, tenantId: 3, tenantIds: [3] })
-    const req = {
-      cookies: {
-        get(name: string) {
-          return name === "auth-token" ? { value: token } : undefined
-        },
-      },
-      headers: { get: () => null },
-    } as unknown as import("next/server").NextRequest
-    const ctx = requireTenantContext(req)
+    const ctx = requireTenantContext(makeFakeRequestWithCookie(token))
     expect(ctx.tenantId).toBe(3)
-    expect(ctx.userId).toBe("usr-001")
+    expect(ctx.userId).toBe(samplePayload.userId)
   })
 
-  it("throws when neither headers nor a valid JWT are present", () => {
-    const req = makeFakeRequestWithHeaders({})
-    expect(() => requireTenantContext(req)).toThrow(/no tenant header/i)
+  it("throws when no valid JWT is present, even with forged headers", () => {
+    const req = makeFakeRequestWithHeaders({ "x-myra-tenant-id": "7" })
+    expect(() => requireTenantContext(req)).toThrow(/no valid JWT/i)
   })
 })

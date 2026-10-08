@@ -127,13 +127,25 @@ export function getCurrentUser(request: NextRequest): JwtPayload | null {
 }
 
 /**
- * Tenant context resolved by middleware.ts (ADR-002) and forwarded via
- * x-myra-tenant-* headers. Route handlers MUST read tenant context through
- * this helper rather than re-decoding the JWT, so that the resolution order
- * (JWT > service header > tracking token > subdomain) stays in one place.
+ * Tenant context for a request (ADR-002). Route handlers MUST read tenant
+ * context through this helper so the resolution order stays in one place.
  *
- * Returns null if middleware did not inject headers — typically only the case
- * for public/tracking routes that bypass middleware tenant injection.
+ * SECURITY: resolved from the signed JWT, never from request headers.
+ *
+ * This used to read the x-myra-tenant-* headers that middleware.ts injects,
+ * trusting middleware to overwrite anything a client sent. On 2026-10-08 the
+ * middleware `matcher` was found to be malformed (an unbalanced paren made it
+ * match no path at all), so middleware had never run in production — and a
+ * plain `curl -H "x-myra-tenant-id: 2" /api/loads` returned another tenant's
+ * rows with no credentials at all.
+ *
+ * Trusting a header because a proxy is supposed to overwrite it fails open the
+ * moment the proxy stops running. Deriving from the JWT cannot: forging it
+ * requires JWT_SECRET. Nothing in app/, lib/, DApp/ or One_pager reads an
+ * x-myra-* header any more (verified by grep, 2026-10-09) -- middleware is
+ * still not routing, so nothing sets them either.
+ *
+ * Returns null when the request carries no valid token.
  */
 export interface TenantContext {
   tenantId: number
@@ -143,36 +155,26 @@ export interface TenantContext {
 }
 
 export function getTenantContext(request: NextRequest): TenantContext | null {
-  const tenantIdHeader = request.headers.get("x-myra-tenant-id")
-  if (!tenantIdHeader) return null
-  const tenantId = Number.parseInt(tenantIdHeader, 10)
+  const user = getCurrentUser(request)
+  if (!user) return null
+  const tenantId = Number(user.tenantId)
   if (!Number.isInteger(tenantId) || tenantId <= 0) return null
   return {
     tenantId,
-    role: request.headers.get("x-myra-tenant-role") || "",
-    userId: request.headers.get("x-myra-user-id") || "",
-    isSuperAdmin: request.headers.get("x-myra-super-admin") === "1",
-  }
-}
-
-/**
- * Convenience: get tenant context, or fall back to decoding the JWT directly
- * (for routes that may run without middleware tenant injection — e.g. legacy
- * test harnesses). New route code should prefer getTenantContext().
- */
-export function requireTenantContext(request: NextRequest): TenantContext {
-  const ctx = getTenantContext(request)
-  if (ctx) return ctx
-  const user = getCurrentUser(request)
-  if (!user) {
-    throw new Error("requireTenantContext: no tenant header and no valid JWT")
-  }
-  return {
-    tenantId: user.tenantId,
     role: user.role,
     userId: user.userId,
     isSuperAdmin: user.isSuperAdmin === true,
   }
+}
+
+/**
+ * Same as getTenantContext but throws when the request is unauthenticated.
+ * Callers that want to answer 401 should use getTenantContext and branch.
+ */
+export function requireTenantContext(request: NextRequest): TenantContext {
+  const ctx = getTenantContext(request)
+  if (ctx) return ctx
+  throw new Error("requireTenantContext: no valid JWT on request")
 }
 
 /**
