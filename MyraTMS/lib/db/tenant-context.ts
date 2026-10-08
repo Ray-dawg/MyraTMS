@@ -27,6 +27,7 @@
 // =============================================================================
 
 import { Pool, type PoolClient } from "@neondatabase/serverless"
+import { assertNotProductionUnderTest } from "@/lib/db/production-guard"
 
 /**
  * Thrown when withTenant() or asServiceAdmin() is called incorrectly:
@@ -49,6 +50,7 @@ function getPool(): Pool {
   if (!url) {
     throw new TenantContextError("DATABASE_URL env var is not set")
   }
+  assertNotProductionUnderTest(url)
   _pool = new Pool({ connectionString: url })
   return _pool
 }
@@ -329,7 +331,8 @@ export async function resolveTrackingToken(
     )
     await client.query("COMMIT")
     if (rows.length === 0) return null
-    return { tenantId: rows[0].tenant_id, loadId: rows[0].load_id }
+    // Neon returns BIGINT as a string; coerce so callers can pass it to withTenant().
+    return { tenantId: Number(rows[0].tenant_id), loadId: rows[0].load_id }
   } catch (err) {
     try {
       await client.query("ROLLBACK")

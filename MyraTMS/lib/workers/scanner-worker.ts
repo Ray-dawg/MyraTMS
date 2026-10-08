@@ -24,6 +24,8 @@ import { LoadBoardAPIError } from '@/lib/loadboards/base';
 import { getClient } from '@/lib/loadboards/registry';
 import { getSource as getRegistrySource } from '@/lib/loadboards/source-registry';
 import { takeToken } from '@/lib/loadboards/rate-limiter';
+import { posterFromRawLoad } from '@/lib/pipeline/poster-identity';
+import { normalizeCompanyName } from '@/lib/pipeline/load-source-classifier';
 
 /** Thin RedisCache shim wrapping the existing REST-client helpers */
 class RedisCache {
@@ -77,6 +79,11 @@ export interface RawLoad {
   shipperContactName: string | null;
   shipperPhone: string | null;
   shipperEmail: string | null;
+  // E2-01 §4.2 — poster identity. Optional on input; the scanner always
+  // writes the normalized block to pipeline_loads.
+  posterCompanyRaw?: string | null;
+  posterMcNumber?: string | null;
+  posterDotNumber?: string | null;
 
   // Metadata
   postedAt: string; // When the load was first posted
@@ -153,6 +160,9 @@ export class ScannerService {
         shipperContactName: row.shipperContactName ?? null,
         shipperPhone: row.shipperPhone ?? null,
         shipperEmail: row.shipperEmail ?? null,
+        posterCompanyRaw: row.posterCompanyRaw ?? null,
+        posterMcNumber: row.posterMcNumber ?? null,
+        posterDotNumber: row.posterDotNumber ?? null,
         postedAt: row.postedAt ?? new Date().toISOString(),
         expiresAt: row.expiresAt ?? null,
         scannedAt: new Date().toISOString(),
@@ -172,6 +182,7 @@ export class ScannerService {
 
     for (let i = 0; i < valid.length; i++) {
       const load = valid[i];
+      const poster = posterFromRawLoad(load);
       try {
         const res = await db.query<{ id: number }>(
           `INSERT INTO pipeline_loads (
@@ -182,10 +193,12 @@ export class ScannerService {
              distance_miles,
              shipper_company, shipper_contact_name, shipper_phone, shipper_email,
              posted_rate, posted_rate_currency, rate_type,
+             poster_company_raw, poster_company_normalized, poster_mc_number, poster_dot_number,
              stage, stage_updated_at, created_by
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
              $15, $16, $17, $18, $19, $20, $21,
+             $22, $23, $24, $25,
              'scanned', NOW(), 'scanner-csv-v1'
            )
            ON CONFLICT (load_id, load_board_source) DO NOTHING
@@ -212,6 +225,10 @@ export class ScannerService {
             load.postedRate,
             load.postedRateCurrency,
             load.rateType,
+            poster.posterCompanyRaw,
+            poster.posterCompanyRaw ? normalizeCompanyName(poster.posterCompanyRaw) : null,
+            poster.posterMcNumber,
+            poster.posterDotNumber,
           ],
         );
 
@@ -248,6 +265,10 @@ export class ScannerService {
             distanceMiles: load.distanceMiles ?? 0,
             pickupDate: load.pickupDate,
             shipperPhone: load.shipperPhone,
+            posterCompanyRaw: poster.posterCompanyRaw,
+            posterMcNumber: poster.posterMcNumber,
+            posterDotNumber: poster.posterDotNumber,
+            isManualImport: source === 'manual',
           },
           { priority: load.postedRate ? Math.round(load.postedRate) : 0 },
         );
@@ -374,6 +395,7 @@ export class ScannerService {
         skipped++;
         continue;
       }
+      const poster = posterFromRawLoad(load);
 
       try {
         const res = await db.query<{ id: number }>(
@@ -385,10 +407,12 @@ export class ScannerService {
              distance_miles,
              shipper_company, shipper_contact_name, shipper_phone, shipper_email,
              posted_rate, posted_rate_currency, rate_type,
+             poster_company_raw, poster_company_normalized, poster_mc_number, poster_dot_number,
              stage, stage_updated_at, created_by
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
              $15, $16, $17, $18, $19, $20, $21,
+             $22, $23, $24, $25,
              'scanned', NOW(), 'scanner-v1'
            )
            ON CONFLICT (load_id, load_board_source) DO NOTHING
@@ -401,6 +425,10 @@ export class ScannerService {
             load.distanceMiles,
             load.shipperCompany, load.shipperContactName, load.shipperPhone, load.shipperEmail,
             load.postedRate, load.postedRateCurrency, load.rateType,
+            poster.posterCompanyRaw,
+            poster.posterCompanyRaw ? normalizeCompanyName(poster.posterCompanyRaw) : null,
+            poster.posterMcNumber,
+            poster.posterDotNumber,
           ],
         );
 
@@ -429,6 +457,10 @@ export class ScannerService {
             distanceMiles: load.distanceMiles ?? 0,
             pickupDate: load.pickupDate,
             shipperPhone: load.shipperPhone,
+            posterCompanyRaw: poster.posterCompanyRaw,
+            posterMcNumber: poster.posterMcNumber,
+            posterDotNumber: poster.posterDotNumber,
+            isManualImport: false,
           },
           { priority: load.postedRate ? Math.round(load.postedRate) : 0 },
         );

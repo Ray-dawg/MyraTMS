@@ -19,7 +19,10 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
-    include: ['**/__tests__/**/*.test.ts'],
+    // tests/multitenant/* was silently excluded by the old pattern - the
+    // isolation suite had never run under `pnpm test` (found 2026-10-07).
+    include: ['**/__tests__/**/*.test.ts', 'tests/**/*.test.ts'],
+    setupFiles: ['./vitest.setup.ts'],
   },
   resolve: {
     alias: {

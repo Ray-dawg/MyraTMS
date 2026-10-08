@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getDb } from "@/lib/db"
+import { asServiceAdmin } from "@/lib/db/tenant-context"
 import { createToken, comparePassword } from "@/lib/auth"
 
 export async function POST(req: NextRequest) {
@@ -36,11 +37,24 @@ export async function POST(req: NextRequest) {
     // Resolve the user's primary tenant + the full set they belong to.
     // Backwards-compat: if no tenant_users rows exist (legacy DB pre-migration
     // 027), createToken's backfill defaults to LEGACY_DEFAULT_TENANT_ID = 2.
-    const tenantRows = await sql`
-      SELECT tenant_id, is_primary
-        FROM tenant_users
-       WHERE user_id = ${user.id}
-       ORDER BY is_primary DESC, joined_at ASC`
+    //
+    // Must run as service_admin: at login there is no tenant context yet, and
+    // once RLS is enabled on tenant_users (Phase M3 day 2) a context-less read
+    // returns zero rows - every login would silently fall back to tenant 2.
+    // Found in the M3 pre-flight 2026-10-07.
+    const tenantRows = await asServiceAdmin(
+      "login: resolve tenant membership before any tenant context exists",
+      async (client) => {
+        const { rows } = await client.query<{ tenant_id: string | number; is_primary: boolean }>(
+          `SELECT tenant_id, is_primary
+             FROM tenant_users
+            WHERE user_id = $1
+            ORDER BY is_primary DESC, joined_at ASC`,
+          [user.id],
+        )
+        return rows
+      },
+    )
     const allTenantIds = tenantRows.map((r) => Number(r.tenant_id))
     const primaryTenantId = tenantRows.find((r) => r.is_primary)?.tenant_id
     const tenantId = primaryTenantId !== undefined ? Number(primaryTenantId) : undefined

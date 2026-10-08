@@ -1,8 +1,10 @@
 import { neon } from '@neondatabase/serverless';
+import { assertNotProductionUnderTest } from '@/lib/db/production-guard';
 
 // Neon serverless v1 splits the API: `sql\`...\`` is the tagged-template form,
 // `sql.query(text, params)` is the conventional parameterized form. We expose
 // both on `db` so prebuilt Engine 2 workers (Pattern B) stay untouched.
+assertNotProductionUnderTest(process.env.DATABASE_URL);
 const sql: any = neon(process.env.DATABASE_URL!);
 
 export interface QueryResult<T = any> {

@@ -63,7 +63,7 @@ pnpm vitest run --no-file-parallelism <file>       # when spawn/OOM errors appea
 
 Test files live under `**/__tests__/**/*.test.ts` (configured in `vitest.config.ts`); 115 test files as of 2026-10-07.
 
-**⚠️ Tests hit whatever `DATABASE_URL` is in `MyraTMS/.env.local`, and that has pointed at the production Neon branch.** Most Engine 2/3 tests create and clean rows in real tables. Before running the suite, either point `DATABASE_URL` at a disposable Neon branch (the `tXX-verify` pattern) or accept that you are writing to production. Quote the connection string when exporting it in a shell — it contains `&`. Known rotating pre-existing failures (~10/850): `cost-calculator`, `carrier-brief-compiler-worker`, `ranker`, `researcher`, `t25-reconcile-payer`.
+**Tests refuse the production Neon branch.** Since 2026-10-07, `vitest.setup.ts` + `lib/db/production-guard.ts` throw before any connection when `DATABASE_URL` contains the production branch/endpoint id (`br-rough-forest-aif4a3vf` / `ep-lively-shadow-aibzw8bp`); `ALLOW_PROD_TESTS=1` is the only escape hatch, for explicitly-confirmed post-apply verification runs. Most Engine 2/3 tests create and clean rows in real tables, so `.env.local` now points at the persistent **`dev-tests`** branch (`br-damp-river-ai21gg86`, cut from production 2026-10-07; migrations 059 + 060 applied there and not in production). Reset it from parent when it drifts. Quote the connection string when exporting it in a shell — it contains `&`. `tests/**/*.test.ts` is now included (the multi-tenant isolation suite had never run). Baseline 2026-10-07 on dev-tests: 849/864 → after fixes, only `ranker`/`researcher` remain environment-sensitive (N+1 scoring queries over HTTP; see their file headers); 5 `cost-calculator` assertions are quarantined with a reason (`test.skip`, spec-vs-code drift owned by the Engine 2 stream).
 
 **Long-running processes (from `MyraTMS/`):**
 ```bash
@@ -385,7 +385,8 @@ Cross-app linking: `NEXT_PUBLIC_API_URL` (DApp, One_pager → MyraTMS API) and `
 ## Known Issues
 
 - **`MAX_CONCURRENT_CALLS=25` was found live in production on 2026-08-26** while every doc describes shadow-drain (`0`). `SCANNER_ENABLED=false` and zero recent `agent_calls` meant no calls fired, but it is a latent gap. Patrice chose to handle it separately; **it has not been re-verified since** (needs Vercel/Railway env access). Re-check before any drain or flag flip.
-- **Tests write to production** when `.env.local`'s `DATABASE_URL` points there (see Build & Development Commands).
+- **Tests used to write to production** (and did — production holds leftover test rows: `payer_registry` id 33 `ACME CO`, 6 `TEST-`/`T2x-` `pipeline_loads`). Guarded since 2026-10-07 (see Build & Development Commands); cleanup of the leftovers is a pending, confirm-first production write.
+- **RLS enable is blocked on two findings** (2026-10-07, `docs/architecture/RLS_ROLLOUT.md` §0): `neondb_owner` has `BYPASSRLS` so enabling RLS does nothing for the app until it connects as a non-bypass role (`myra_app`, migration 061 drafted); and 029's policies error on the `''` GUC leftover of pooled connections (migration 060 fixes, applied to dev-tests only).
 - **Notifications dual source:** `useNotifications()` polls DB every 30s; topbar bell reads `useWorkspace()` mock context. Not synchronized.
 - **PATCH atomicity:** `loads/[id]/route.ts` runs separate `UPDATE` per field using `sql.unsafe()`.
 - **Edge-runtime JWT verification:** `middleware.ts` re-implements HMAC-SHA256 via Web Crypto. Keep in sync with `lib/auth.ts` and the JWT shape (`tenant_id`, `is_super_admin`).

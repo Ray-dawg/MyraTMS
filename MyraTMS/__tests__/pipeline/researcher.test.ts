@@ -9,6 +9,11 @@
  * just contributes as a higher-confidence source.
  */
 
+// Timeout note (2026-10-07): this is a live Neon + Upstash integration test. The
+// worker fans out one scoring/rate query per candidate over HTTP, so wall time
+// scales with table size (~65s against a production-sized branch from a laptop).
+// The old 30s ceiling made it the suite's most-cited 'rotating' failure; it was
+// never a logic failure. 180s keeps it meaningful without flaking.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Queue } from 'bullmq';
 import { db } from '@/lib/pipeline/db-adapter';
@@ -113,5 +118,5 @@ describe('ResearcherWorker', () => {
     expect(after.rows[0].stage).toBe('qualified');
     const briefJobs = await briefQueue.getJobs(['waiting', 'prioritized', 'active']);
     expect(briefJobs.length).toBe(0);
-  }, 30_000);
+  }, 180_000);
 });

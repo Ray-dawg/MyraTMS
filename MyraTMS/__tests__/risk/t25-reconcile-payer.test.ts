@@ -30,7 +30,9 @@ describe('reconcilePayerRegistry', () => {
 
   afterAll(async () => {
     await db.query(`DELETE FROM pipeline_loads WHERE id IN ($1, $2)`, [pl1, pl2]);
-    await db.query(`DELETE FROM payer_registry WHERE legal_name = 'Acme Co'`);
+    // Case-insensitive: whichever of the two seeded spellings got inserted first
+    // becomes the stored legal_name (row order is not guaranteed).
+    await db.query(`DELETE FROM payer_registry WHERE LOWER(TRIM(legal_name)) = 'acme co'`);
   });
 
   it(
@@ -46,7 +48,9 @@ describe('reconcilePayerRegistry', () => {
       expect(rows.rows[0].payer_registry_id).not.toBeNull();
       expect(rows.rows[0].payer_registry_id).toBe(rows.rows[1].payer_registry_id);
 
-      const payerCount = await db.query(`SELECT COUNT(*) FROM payer_registry WHERE legal_name = 'Acme Co'`);
+      const payerCount = await db.query(
+        `SELECT COUNT(*) FROM payer_registry WHERE LOWER(TRIM(legal_name)) = 'acme co'`,
+      );
       expect(payerCount.rows[0].count).toBe('1');
     },
     30000,

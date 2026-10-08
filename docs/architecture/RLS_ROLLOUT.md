@@ -1,10 +1,30 @@
 # RLS_ROLLOUT.md
 
 > **Cadence:** Updated daily during Phase M3 rollout.
-> **Last update:** 2026-10-07 — **Phase M3 still NOT STARTED.** Prerequisites (027–031) have been in production since 2026-05-04; `loads` rowsecurity verified OFF by direct query 2026-10-07. The schedule below is unchanged and unexecuted. Engine 2 tables remain deferred to M5 (migration 030 still `.PENDING`).
+> **Last update:** 2026-10-07 (evening) — **Phase M3 pre-flight run; NOT yet enabled anywhere. Two blockers found — see §0.** Earlier same day: **Phase M3 still NOT STARTED.** Prerequisites (027–031) have been in production since 2026-05-04; `loads` rowsecurity verified OFF by direct query 2026-10-07. The schedule below is unchanged and unexecuted. Engine 2 tables remain deferred to M5 (migration 030 still `.PENDING`).
 > **Related:** [ADR-001](./ADR-001-tenant-isolation.md), [ADR-004](./ADR-004-migration-strategy.md), [SECURITY.md](./SECURITY.md)
 
 This document is the live schedule and status log for Phase M3 — per-table Row-Level Security enablement. Default cadence: 1 table/day starting from lowest-traffic and progressing to hot-path tables. Patrice arbitrates acceleration.
+
+## §0 — Pre-flight findings (2026-10-07, dev-tests branch `br-damp-river-ai21gg86`)
+
+Pre-flight for batch 1 (`tenant_audit_log`, `tenant_users`, `tenant_subscriptions`) was run against a fresh branch of production. Index audit and leak audit are green; **two blockers mean the schedule in §1 must not start until they are cleared.**
+
+| Check | Result |
+|---|---|
+| Index audit (PERFORMANCE_NOTES §7) | ✅ All 30 policied tables have a `tenant_id`-leading index (direct query on production, read-only). |
+| Cross-tenant leak audit (`tests/multitenant/isolation.test.ts`) | ✅ 15/15 pass, 3 RLS-gated scenarios skipped (RLS off). **The suite had never run before** — `vitest.config.ts` only included `**/__tests__/**`, so `tests/multitenant/` was silently excluded. Fixed; three stale test bugs fixed (BIGINT-as-string tenant ids, a query against a non-existent `tenants.tenant_id`, a fixed tracking token that leaked across runs). |
+| Route audit for batch-1 tables | ✅ Every reader/writer of the three tables goes through `asServiceAdmin()`/`withTenant()` **except** `POST /api/auth/login`, which read `tenant_users` via plain `getDb()` (no context). Under RLS that returns zero rows and every login silently falls back to `LEGACY_DEFAULT_TENANT_ID = 2`. **Fixed** — now `asServiceAdmin("login: resolve tenant membership …")`. |
+| Policy behaviour under a reused pooled connection | ❌ **Blocker 1.** `current_setting('app.current_tenant_id', true)` returns `''` (not NULL) on any connection that previously ran `SET LOCAL` on it. 029's `::BIGINT` cast then errors (`invalid input syntax for type bigint: ""`) for every context-less query — including `asServiceAdmin()` reads — instead of returning zero rows. Reproduced on dev-tests. **Fix: migration `060_harden_rls_policies.sql`** (NULLIF guard; applied + verified on dev-tests: no-context → 0 rows, Myra context → correct rows, service_admin → all rows). Must be applied to production *before* the first ENABLE. |
+| Application role vs RLS | ❌ **Blocker 2.** `neondb_owner` — the role in every `DATABASE_URL` (Vercel, Railway, local) — has `rolbypassrls = true` and owns every table. With RLS **enabled** on `tenant_audit_log` and a deliberately wrong tenant context, it still saw all 338 rows. A plain non-bypass role saw 7 / 0 / 338 (Myra / wrong tenant / service_admin), so the policies themselves are correct. **The entire §1 schedule is a no-op for the deployed app until the app connects as a non-BYPASSRLS, non-owner role.** `FORCE ROW LEVEL SECURITY` does not help (BYPASSRLS skips it). SECURITY.md's "connection user is NOT a superuser" is true but insufficient. **Proposed fix: create `myra_app` (Neon console/MCP, no BYPASSRLS) + migration `061_app_role_grants.sql` (drafted, not applied) + rotate `DATABASE_URL` on Vercel and Railway.** Migrations keep using `neondb_owner`. This is a production credential change and needs Patrice's go-ahead. |
+| `resolveTrackingToken()` return type | ⚠️ Returned `tenantId` as a string (BIGINT quirk); `tracking/[token]/events` passed it straight into `withTenant()`, which rejects non-integers. Fixed at the source (`Number()`), caught by the leak suite's Scenario 5. |
+
+**Revised batch-1 pre-conditions (replaces "Pre-flight gates" for Days 1–3):**
+1. Apply `060_harden_rls_policies.sql` to production (separate, confirmed step; log in PRODUCTION_MIGRATION_LOG.md).
+2. Create `myra_app`, apply `061_app_role_grants.sql`, rotate `DATABASE_URL` on Vercel + Railway, confirm `SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user` is `false` from the app.
+3. Deploy the login-route fix (commit on `master`).
+4. Re-run `RUN_INTEGRATION_TESTS=1 TEST_RLS_ENABLED=1` isolation suite on dev-tests **as `myra_app`** with batch-1 tables enabled there.
+5. Only then: Day 1 `tenant_audit_log` on production per §3.
 
 ## §1 — Rollout schedule
 

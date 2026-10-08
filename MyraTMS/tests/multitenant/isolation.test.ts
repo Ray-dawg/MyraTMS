@@ -60,8 +60,9 @@ describe.skipIf(!isStagingDb)("multi-tenant isolation", () => {
          RETURNING id`,
         [`test-b-${suffix}`, `Test Tenant B ${suffix}`],
       )
-      tenantA = a.id
-      tenantB = b.id
+      // Neon returns BIGINT ids as strings; withTenant() requires a real integer.
+      tenantA = Number(a.id)
+      tenantB = Number(b.id)
       // Subscriptions
       await client.query(
         `INSERT INTO tenant_subscriptions (tenant_id, tier, status)
@@ -259,8 +260,8 @@ describe.skipIf(!isStagingDb)("multi-tenant isolation", () => {
         async (client) => {
           const { rows } = await client.query<{ tenant_id: number; n: number }>(
             `SELECT tenant_id, COUNT(*)::int AS n
-               FROM tenants
-              WHERE id IN ($1, $2)
+               FROM tenant_subscriptions
+              WHERE tenant_id IN ($1, $2)
               GROUP BY tenant_id`,
             [tenantA, tenantB],
           )
@@ -319,28 +320,31 @@ describe.skipIf(!isStagingDb)("multi-tenant isolation", () => {
 
     it("resolves an existing token to its tenant_id and load_id", async () => {
       const loadId = `TEST-LD-${Date.now()}`
-      const token = "f".repeat(64)
-      await withTenant(tenantA, async (client) => {
-        await client.query(
-          `INSERT INTO loads (id, origin, destination, tenant_id, status)
-           VALUES ($1, 'Toronto', 'Sudbury', $2, 'Booked')`,
-          [loadId, tenantA],
-        )
-        await client.query(
-          `INSERT INTO tracking_tokens (load_id, token, tenant_id)
-           VALUES ($1, $2, $3)`,
-          [loadId, token, tenantA],
-        )
-      })
+      // Unique per run: a fixed token leaked across runs whenever the
+      // assertion below threw before cleanup (duplicate-key on rerun).
+      const token = Date.now().toString(16).padStart(64, "f").slice(-64)
+      try {
+        await withTenant(tenantA, async (client) => {
+          await client.query(
+            `INSERT INTO loads (id, origin, destination, tenant_id, status)
+             VALUES ($1, 'Toronto', 'Sudbury', $2, 'Booked')`,
+            [loadId, tenantA],
+          )
+          await client.query(
+            `INSERT INTO tracking_tokens (load_id, token, tenant_id)
+             VALUES ($1, $2, $3)`,
+            [loadId, token, tenantA],
+          )
+        })
 
-      const resolved = await resolveTrackingToken(token)
-      expect(resolved).toEqual({ tenantId: tenantA, loadId })
-
-      // Cleanup
-      await asServiceAdmin("test cleanup", async (client) => {
-        await client.query("DELETE FROM tracking_tokens WHERE token = $1", [token])
-        await client.query("DELETE FROM loads WHERE id = $1", [loadId])
-      })
+        const resolved = await resolveTrackingToken(token)
+        expect(resolved).toEqual({ tenantId: tenantA, loadId })
+      } finally {
+        await asServiceAdmin("test cleanup", async (client) => {
+          await client.query("DELETE FROM tracking_tokens WHERE token = $1", [token])
+          await client.query("DELETE FROM loads WHERE id = $1", [loadId])
+        })
+      }
     })
 
     it("token resolution is recorded in tenant_audit_log", async () => {

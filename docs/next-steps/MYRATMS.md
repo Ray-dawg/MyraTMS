@@ -2,6 +2,10 @@
 
 > Written 2026-10-07 against `master` @ `41afeb6`. Paste this whole file as the opening message of a new conversation dedicated to the TMS platform (multi-tenant rollout, DApp, tracking page, landing site, platform hygiene). Re-verify facts before acting.
 
+## Progress log
+
+- **2026-10-07 (session 1 of this brief):** Step 1 done — tests refuse production (`lib/db/production-guard.ts`), `.env.local` → `dev-tests` branch, full run 849/864 then fixed/quarantined to green except `ranker`/`researcher` timing. Step 2 done — index audit green, leak suite (never previously run) now green, login route fixed. **Step 3 blocked**: see `docs/architecture/RLS_ROLLOUT.md` §0 — `neondb_owner` has BYPASSRLS (needs `myra_app` role + migration 061 + DATABASE_URL rotation) and 029's policies need migration 060. Neither applied to production; both need Patrice's go-ahead.
+
 ## Where it stands
 
 - **Multi-tenant M1 + M2 in production since 2026-05-04** (migrations 027–031 applied; code promoted; `docs/architecture/PRODUCTION_MIGRATION_LOG.md` Entry 1). Verified 2026-10-07: **RLS is OFF on every table** (M3 not started), `pipeline_loads.tenant_id` does not exist (M5 / migration 030 not started), M4 not started.

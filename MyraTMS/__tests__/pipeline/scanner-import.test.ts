@@ -122,4 +122,30 @@ describe('ScannerService.ingestRawLoads', () => {
     const priorities = ourJobs.map((j) => j.opts.priority).sort();
     expect(priorities).toEqual([2400, 3100]);
   }, 30_000);
+
+  it('persists poster identity columns and carries them on the qualify payload', async () => {
+    const loadId = `${RUN_ID}-POSTER`;
+    const res = await service.ingestRawLoads([{
+      loadId, originCity: 'Sudbury', originState: 'ON', originCountry: 'CA',
+      destinationCity: 'Toronto', destinationState: 'ON', destinationCountry: 'CA',
+      pickupDate: new Date(Date.now() + 3 * 86400_000).toISOString(),
+      shipperCompany: 'Ignored Co', posterCompanyRaw: 'Acme Logistics Inc.',
+      posterMcNumber: 'MC-123456', posterDotNumber: 'USDOT 7890',
+    }], 'manual');
+    expect(res.inserted).toBe(1);
+    insertedIds.push(res.insertedIds[0]);
+    const row = await db.query(
+      `SELECT poster_company_raw, poster_company_normalized, poster_mc_number, poster_dot_number
+         FROM pipeline_loads WHERE id = $1`, [res.insertedIds[0]]);
+    expect(row.rows[0]).toEqual({
+      poster_company_raw: 'Acme Logistics Inc.',
+      poster_company_normalized: 'acme logistics',
+      poster_mc_number: '123456',
+      poster_dot_number: '7890',
+    });
+    const jobs = await queue.getJobs(['waiting', 'prioritized']);
+    const job = jobs.find((j) => j.data.pipelineLoadId === res.insertedIds[0]);
+    expect(job?.data.posterMcNumber).toBe('123456');
+    expect(job?.data.isManualImport).toBe(true);
+  });
 });
