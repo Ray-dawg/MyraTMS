@@ -41,6 +41,9 @@ import { attachDocument } from '@/lib/documents';
 import { completeDispatchOnSignedRateCon } from '@/lib/dispatch-gate';
 import { extractRateConTerms, compareTerms } from '@/lib/documents/rate-con-terms';
 import { bridgeToExceptions } from '@/lib/exceptions/bridge';
+import { checkSenderAuthorization } from '@/lib/contract-intake/authorization';
+import { extractTenderTerms } from '@/lib/documents/tender-terms';
+import { validateTenderedRate } from '@/lib/contract-intake/validate-rate';
 import { classifyInboundEmail } from './inbound-classifier';
 
 export interface ImapEnvelopeAddress {
@@ -128,6 +131,13 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
   let senderVerified = false;
   let verificationNote: string | null = null;
   let quarantined = true;
+  let intakeType: string | null = null;
+  let senderAuthorized: boolean | null = null;
+  let intakeStatus: string | null = null;
+  let tenderTenantId: number | null = null;
+  let tenderExceptionType: string | null = null;
+  let tenderExceptionTitle: string | null = null;
+  let tenderExceptionDescription: string | null = null;
 
   if (classification.type === 'shipper_reply') {
     replyType = 'shipper_confirmation_reply';
@@ -289,21 +299,79 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
       verificationNote = `no loads row matches reference '${classification.loadReference}'`;
     }
   } else {
+    // T-30 — an unsolicited freight tender never matches either known reply
+    // pattern; check the sender against the whitelist BEFORE any extraction
+    // runs (spec §10 step 2 — never spend a token on a sender that was never
+    // going to be accepted).
     verificationNote = 'subject did not match any known pattern';
+    const authorization = await checkSenderAuthorization(fromAddress);
+
+    if (!authorization) {
+      intakeStatus = 'unauthorized_sender';
+      tenderTenantId = await getMyraTenantId(); // no authorization row to source a tenant from — same "effectively Myra-only mailbox" reality T-19/T-25/T-27 document
+      tenderExceptionType = 'unauthorized_tender_sender';
+      tenderExceptionTitle = `Unauthorized freight-tender sender: ${fromAddress}`;
+      tenderExceptionDescription = `An email from ${fromAddress} did not match any known reply pattern and is not on any tenant's contract_shipper_authorizations whitelist.`;
+    } else {
+      intakeType = 'freight_tender';
+      senderAuthorized = true;
+      if (attachments.length > 0) {
+        const first = attachments[0];
+        const extracted = await extractTenderTerms(first.content);
+        const authTenantId = Number(authorization.tenantId); // Neon BIGINT -> string
+        tenderTenantId = authTenantId;
+        tenderExceptionType = 'tender_pending_approval';
+        intakeStatus = 'pending_review';
+        if (extracted) {
+          const validation = await validateTenderedRate(authTenantId, extracted, authorization.marginFloorOverrideAmount);
+          tenderExceptionTitle = validation.acceptable
+            ? `New tender ready — approve to inject (from ${fromAddress})`
+            : `Tender below margin floor — accept anyway or decline (from ${fromAddress})`;
+          tenderExceptionDescription = `Parsed tender: ${JSON.stringify(extracted)}. ${validation.reason}`;
+        } else {
+          tenderExceptionTitle = `Tender could not be parsed — manual review needed (from ${fromAddress})`;
+          tenderExceptionDescription = 'Claude-based extraction failed or returned no usable fields.';
+        }
+      }
+      // Authorized sender, no attachment: nothing to review yet — intake_status
+      // stays null, no exception is raised. A follow-up email with the actual
+      // tender PDF will be processed on its own next poll.
+    }
   }
 
   if (quarantined) result.quarantined++;
 
-  await db.query(
+  const inserted = await db.query<{ id: number }>(
     `INSERT INTO inbound_emails (
        message_id, from_address, subject, body_text, received_at,
        matched_load_id, match_method, sender_verified, verification_note,
-       reply_type, attachment_count, processed_at, quarantined
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12)`,
+       reply_type, attachment_count, processed_at, quarantined,
+       intake_type, sender_authorized, intake_status
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15)
+     RETURNING id`,
     [
       messageId, fromAddress, subject, bodyText.slice(0, 20000), receivedAt,
       matchedLoadId, matchMethod, senderVerified, verificationNote,
       replyType, attachments.length, quarantined,
+      intakeType, senderAuthorized, intakeStatus,
     ],
   );
+
+  if (tenderExceptionType && tenderTenantId !== null) {
+    const emailId = inserted.rows[0].id;
+    await bridgeToExceptions({
+      tenantId: tenderTenantId,
+      sourceModule: 'contract_intake',
+      exceptionType: tenderExceptionType,
+      // bridge dedups null-link signals on type+title; the email id keeps
+      // distinct tenders from the same sender from collapsing into one.
+      title: `${tenderExceptionTitle} [email #${emailId}]`,
+      description: tenderExceptionDescription!,
+      context: {},
+      pipelineLoadId: null,
+      loadId: null,
+      carrierId: null,
+      inboundEmailId: emailId,
+    });
+  }
 }
