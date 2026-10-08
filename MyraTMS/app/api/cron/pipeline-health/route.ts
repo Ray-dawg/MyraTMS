@@ -1,7 +1,12 @@
 /**
  * Cron: pipeline-health
  *
- * Runs every 5 minutes. Three responsibilities:
+ * Runs once a day at 11:00 UTC (vercel.json `0 11 * * *`). Designed for a
+ * 5-minute cadence; reduced to daily at the 2026-05-27 production deploy
+ * (commit eee874b) because the Vercel plan allows one run per day per cron.
+ * Consequence: the stuck-load thresholds in lib/pipeline/health-checks.ts
+ * (60 min default) are detected up to 24 h late until the schedule is
+ * tightened. Three responsibilities:
  *   1. Advance pipeline_loads from 'dispatched' → 'delivered' when the linked
  *      TMS loads.status flips to 'Delivered' (driven by driver POD upload)
  *   2. Health checks (E2-03 M5, see lib/pipeline/health-checks.ts):
@@ -21,7 +26,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { logger } from '@/lib/logger';
 import { advanceDeliveredLoads } from '@/lib/workers/dispatcher-worker';
-import { detectStuckPipelineLoads, detectMissedPickupWindows } from '@/lib/pipeline/health-checks';
+import { detectStuckPipelineLoads, detectMissedPickupWindows, expireUnresolvedSourceReviews } from '@/lib/pipeline/health-checks';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -52,6 +57,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const stuckResult = await detectStuckPipelineLoads();
   const latePickupResult = await detectMissedPickupWindows();
+  const sourceReviewExpiry = await expireUnresolvedSourceReviews();
 
   return NextResponse.json({
     ok: true,
@@ -60,5 +66,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     stuckWritten: stuckResult.written,
     latePickup: latePickupResult.found,
     latePickupWritten: latePickupResult.written,
+    sourceReviewExpiry,
   });
 }

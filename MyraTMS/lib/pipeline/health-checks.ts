@@ -260,3 +260,41 @@ export async function detectOverdueCarrierSignatures(tenantId: number): Promise<
   }
   return { found, written };
 }
+
+/**
+ * E2-01 §4.7 step 4 — a load parked at 'escalated' for human source review
+ * must not wait forever. Once its pickup is inside the Qualifier's 4-hour
+ * freshness window it would be rejected on re-qualification anyway, so expire
+ * it and close the Alert Center row. Idempotent.
+ */
+export async function expireUnresolvedSourceReviews(): Promise<{ found: number; expired: number }> {
+  try {
+    const found = await db.query<{ id: number }>(
+      `SELECT id FROM pipeline_loads
+        WHERE stage = 'escalated'
+          AND qualification_reason LIKE '%\\_review'
+          AND pickup_date < NOW() + INTERVAL '4 hours'`,
+    );
+    const ids = found.rows.map((r) => r.id);
+    if (ids.length === 0) return { found: 0, expired: 0 };
+
+    await db.query(
+      `UPDATE pipeline_loads
+          SET stage = 'expired', stage_updated_at = NOW(),
+              qualification_detail = COALESCE(qualification_detail, '') || '; review SLA missed',
+              updated_at = NOW()
+        WHERE id = ANY($1::int[])`,
+      [ids],
+    );
+    await db.query(
+      `UPDATE exceptions SET status = 'resolved', resolved_at = NOW()
+        WHERE pipeline_load_id = ANY($1::int[]) AND type = 'load_source_review' AND status <> 'resolved'`,
+      [ids],
+    );
+    logger.info('[health-checks] expired unresolved load-source reviews', { count: ids.length });
+    return { found: ids.length, expired: ids.length };
+  } catch (err) {
+    logger.error('[health-checks] source-review expiry crash', err);
+    return { found: 0, expired: 0 };
+  }
+}

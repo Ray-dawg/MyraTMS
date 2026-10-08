@@ -9,6 +9,7 @@ import { db } from '@/lib/pipeline/db-adapter';
 import { withTenant } from '@/lib/db/tenant-context';
 import { LEGACY_DEFAULT_TENANT_ID } from '@/lib/auth';
 import {
+  expireUnresolvedSourceReviews,
   detectStuckPipelineLoads,
   detectMissedPickupWindows,
   detectOverdueCarrierSignatures,
@@ -244,5 +245,33 @@ describe('detectOverdueCarrierSignatures (E2-04 M6)', () => {
     const second = await detectOverdueCarrierSignatures(LEGACY_DEFAULT_TENANT_ID);
     expect(first.written).toBeGreaterThanOrEqual(1);
     expect(second.written).toBe(0);
+  }, 30_000);
+});
+
+describe('expireUnresolvedSourceReviews (E2-01 §4.7 step 4)', () => {
+  afterEach(async () => {
+    const ids = seededPipelineLoadIds.splice(0);
+    if (ids.length) {
+      await db.query(`DELETE FROM exceptions WHERE pipeline_load_id = ANY($1)`, [ids]);
+      await db.query(`DELETE FROM pipeline_loads WHERE id = ANY($1)`, [ids]);
+    }
+  });
+
+  it('expires a review load whose pickup is inside 4h and resolves its exception, leaves a fresh one alone', async () => {
+    const stale = await seedLoad({ stage: 'escalated', stageUpdatedAgo: '10 minutes', pickupDateOffset: '+1 hour' });
+    const fresh = await seedLoad({ stage: 'escalated', stageUpdatedAgo: '10 minutes', pickupDateOffset: '+2 days' });
+    await db.query(`UPDATE pipeline_loads SET qualification_reason = 'poster_unresolved_review' WHERE id = ANY($1)`, [[stale, fresh]]);
+    await db.query(
+      `INSERT INTO exceptions (type, severity, title, detail, pipeline_load_id, source_module, status)
+       VALUES ('load_source_review', 'medium', 't', '{}', $1, 'load_source_review', 'active')`,
+      [stale],
+    );
+
+    const r = await expireUnresolvedSourceReviews();
+
+    expect(r.expired).toBeGreaterThanOrEqual(1);
+    expect((await db.query(`SELECT stage FROM pipeline_loads WHERE id = $1`, [stale])).rows[0].stage).toBe('expired');
+    expect((await db.query(`SELECT stage FROM pipeline_loads WHERE id = $1`, [fresh])).rows[0].stage).toBe('escalated');
+    expect((await db.query(`SELECT status FROM exceptions WHERE pipeline_load_id = $1`, [stale])).rows[0].status).toBe('resolved');
   }, 30_000);
 });
