@@ -25,44 +25,64 @@ interface TenderInput {
   weightLbs?: number | null
 }
 
+// Exactly the vocabularies extractTenderTerms() normalizes to, and exactly
+// what pipeline_loads' VARCHAR(2)/VARCHAR(3) columns can hold.
+const TENDER_COUNTRIES = new Set(["US", "CA"])
+const TENDER_CURRENCIES = new Set(["USD", "CAD"])
+
+// Target column widths on pipeline_loads, so plausible operator input is a
+// 400 rather than an opaque 500 from a value-too-long error mid-transaction.
+const TENDER_STRING_WIDTHS: Record<string, number> = {
+  originCity: 100,
+  originState: 10,
+  destinationCity: 100,
+  destinationState: 10,
+  equipmentType: 50,
+}
+
 /**
  * T-30 — validates a tender BEFORE anything is claimed or inserted, so an
- * incomplete tender is a 400 that leaves both the exception and the
- * inbound_emails row untouched rather than a 500 from a NOT NULL violation
- * mid-transaction.
+ * incomplete or unstorable tender is a 400 that leaves both the exception and
+ * the inbound_emails row untouched rather than a 500 from a NOT NULL, enum,
+ * width or type violation mid-transaction.
  *
  * `commodity` and `weightLbs` are deliberately NOT required: both columns are
  * nullable on pipeline_loads and extractTenderTerms() routinely returns null
  * for them on a terse tender PDF. Requiring them would make a perfectly
- * injectable tender un-approvable.
+ * injectable tender un-approvable. They are still type-checked when present
+ * (`weight_lbs` is INTEGER, `commodity` is VARCHAR(200)).
  */
 function isCompleteTender(t: unknown): t is TenderInput {
   if (!t || typeof t !== "object") return false
   const v = t as Record<string, unknown>
-  const required = [
-    "originCity",
-    "originState",
-    "originCountry",
-    "destinationCity",
-    "destinationState",
-    "destinationCountry",
-    "equipmentType",
-    "rateCurrency",
-    "pickupDate",
-  ]
-  for (const key of required) {
+
+  for (const [key, maxLength] of Object.entries(TENDER_STRING_WIDTHS)) {
     const field = v[key]
-    if (typeof field !== "string" || field.trim() === "") return false
+    if (typeof field !== "string" || field.trim() === "" || field.length > maxLength) return false
   }
-  return typeof v.rate === "number" && Number.isFinite(v.rate) && v.rate > 0
+  if (typeof v.originCountry !== "string" || !TENDER_COUNTRIES.has(v.originCountry)) return false
+  if (typeof v.destinationCountry !== "string" || !TENDER_COUNTRIES.has(v.destinationCountry)) return false
+  if (typeof v.rateCurrency !== "string" || !TENDER_CURRENCIES.has(v.rateCurrency)) return false
+  // pickup_date is TIMESTAMP NOT NULL — an unparseable date string reaches
+  // Postgres as a cast error, i.e. a 500, unless it is rejected here.
+  if (typeof v.pickupDate !== "string" || Number.isNaN(Date.parse(v.pickupDate))) return false
+  if (typeof v.rate !== "number" || !Number.isFinite(v.rate) || v.rate <= 0) return false
+  if (v.weightLbs !== undefined && v.weightLbs !== null) {
+    if (typeof v.weightLbs !== "number" || !Number.isInteger(v.weightLbs)) return false
+  }
+  if (v.commodity !== undefined && v.commodity !== null) {
+    if (typeof v.commodity !== "string" || v.commodity.length > 200) return false
+  }
+  return true
 }
 
 /**
  * T-30 — thrown when the idempotent claim UPDATE on inbound_emails matches
  * zero rows, i.e. this tender has already been approved or rejected. A
- * distinct class so the handler can map exactly this case to 409 while every
- * OTHER throw inside the asServiceAdmin block falls through to the outer
- * catch (500) with the exception deliberately left ACTIVE.
+ * distinct class so the handler can map exactly this case to 409 (or detect a
+ * resumed wedge, see below) while every OTHER throw inside the asServiceAdmin
+ * block falls through to the outer catch (500) with the exception
+ * deliberately left ACTIVE.
  */
 class TenderAlreadyProcessedError extends Error {
   constructor() {
@@ -163,6 +183,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         }
 
         const emailId = peek.inbound_email_id
+        const claimedStatus = decision === 'approve' ? 'approved' : 'rejected'
         const approvedTender: TenderInput | null =
           decision === 'approve' && isCompleteTender(tender) ? tender : null
 
@@ -180,7 +201,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
                     SET intake_status = $2
                   WHERE id = $1 AND intake_status = 'pending_review'
                   RETURNING id`,
-                [emailId, decision === 'approve' ? 'approved' : 'rejected'],
+                [emailId, claimedStatus],
               )
               if (claimed.rows.length === 0) throw new TenderAlreadyProcessedError()
               if (!approvedTender) return null
@@ -222,12 +243,47 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             },
           )
         } catch (err) {
-          if (err instanceof TenderAlreadyProcessedError) {
+          if (!(err instanceof TenderAlreadyProcessedError)) {
+            // Anything else falls through to the outer catch (500) with the
+            // exception still ACTIVE and the claim rolled back with its
+            // transaction.
+            throw err
+          }
+
+          // The claim committed in its OWN transaction; the base resolve
+          // below runs in a second one. If that second transaction fails
+          // (pool exhaustion, a dropped connection — both plausible on
+          // Vercel) the tender is claimed and, on approve, the
+          // pipeline_loads row exists, yet the exception is still active.
+          // Without the recovery below, every retry would hit
+          // `WHERE intake_status = 'pending_review'`, claim nothing, and 409
+          // forever: the exception would be permanently unresolvable through
+          // this route.
+          //
+          // Distinguishing a resumed wedge from a genuine double-submit is
+          // possible because the base resolve UPDATE carries no status
+          // predicate, so re-resolving is naturally idempotent. The only
+          // state that means "wedged" is a stored intake_status matching
+          // THIS request's decision while the exception is still active —
+          // after a completed resolve the exception is 'resolved', so a real
+          // double-submit still gets its 409.
+          const { rows: wedgeRows } = await db.query<{
+            intake_status: string | null
+            created_pipeline_load_id: number | null
+            status: string
+          }>(
+            `SELECT ie.intake_status, ie.created_pipeline_load_id, e.status
+               FROM exceptions e
+               JOIN inbound_emails ie ON ie.id = e.inbound_email_id
+              WHERE e.id = $1`,
+            [id],
+          )
+          const wedge = wedgeRows[0]
+          if (!wedge || wedge.intake_status !== claimedStatus || wedge.status !== 'active') {
             return NextResponse.json({ error: "Tender already processed" }, { status: 409 })
           }
-          // Anything else falls through to the outer catch (500) with the
-          // exception still ACTIVE and the claim rolled back.
-          throw err
+          createdPipelineLoadId =
+            wedge.created_pipeline_load_id === null ? null : Number(wedge.created_pipeline_load_id)
         }
       }
 
