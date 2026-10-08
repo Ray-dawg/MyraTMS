@@ -155,6 +155,30 @@ describe('/api/tenants/:id/contract-shippers', () => {
     expect(body.details.conflictingTenantId).toBe(tenantId);
   });
 
+  it('reports a same-tenant casing collision as same-tenant, not "another tenant"', async () => {
+    const tenantId = await getMyraTenantId();
+    const lower = track(`casing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@shipper.example.com`);
+    // Direct SQL, mixed case: (tenant_id, shipper_email) differs so the route's
+    // ON CONFLICT does not match, but the global lower() index still trips.
+    await db.query(
+      `INSERT INTO contract_shipper_authorizations (tenant_id, shipper_email, authorized_by) VALUES ($1, $2, 'test')`,
+      [tenantId, lower.toUpperCase().replace('@SHIPPER.EXAMPLE.COM', '@shipper.example.com')],
+    );
+    const res = await POST(
+      new NextRequest(`http://localhost/api/tenants/${tenantId}/contract-shippers`, {
+        method: 'POST',
+        body: JSON.stringify({ shipperEmail: lower }),
+        headers: headersFor(superAdminToken(tenantId)),
+      }),
+      { params: Promise.resolve({ id: String(tenantId) }) },
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toMatch(/this tenant/i);
+    expect(body.error).not.toMatch(/another tenant|at most one tenant/i);
+    expect(body.details.sameTenant).toBe(true);
+  });
+
   it('rejects a POST missing shipperEmail', async () => {
     const tenantId = await getMyraTenantId();
     const req = new NextRequest(`http://localhost/api/tenants/${tenantId}/contract-shippers`, {

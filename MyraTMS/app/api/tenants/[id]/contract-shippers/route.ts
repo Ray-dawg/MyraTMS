@@ -186,7 +186,38 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ id: Number(rows[0].id) }, { status: 201 });
   } catch (err) {
     if ((err as { code?: string } | null)?.code === PG_UNIQUE_VIOLATION) {
-      return apiError(`${email} is already actively authorized for another tenant`, 409);
+      // The index is global (lower(shipper_email) WHERE is_active), so the
+      // collision is not necessarily cross-tenant: a same-tenant row differing
+      // only in case (e.g. inserted by direct SQL) trips it too. Re-read the
+      // holder so the message is true and the operator knows which fix applies.
+      try {
+        const holder = await db.query<{ id: number; tenant_id: string }>(
+          `SELECT id, tenant_id
+             FROM contract_shipper_authorizations
+            WHERE lower(shipper_email) = $1 AND is_active = true
+            ORDER BY (tenant_id = $2) DESC, id
+            LIMIT 1`,
+          [email, tenantId],
+        );
+        const h = holder.rows[0];
+        if (h && Number(h.tenant_id) === Number(tenantId)) {
+          return apiError(
+            `${email} already has an active authorization for this tenant (id ${Number(h.id)}), stored with different casing — deactivate or correct that row directly`,
+            409,
+            { id: Number(h.id), conflictingTenantId: Number(h.tenant_id), sameTenant: true },
+          );
+        }
+        if (h) {
+          return apiError(
+            `${email} is already actively authorized for tenant ${h.tenant_id} — one shipper email maps to at most one tenant`,
+            409,
+            { conflictingTenantId: Number(h.tenant_id), sameTenant: false },
+          );
+        }
+      } catch (lookupErr) {
+        console.error('[POST /api/tenants/:id/contract-shippers] conflict re-read failed:', lookupErr);
+      }
+      return apiError(`${email} conflicts with an existing active authorization`, 409);
     }
     console.error('[POST /api/tenants/:id/contract-shippers] Error:', err);
     return apiError('Internal server error', 500);

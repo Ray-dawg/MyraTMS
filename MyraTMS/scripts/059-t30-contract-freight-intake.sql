@@ -10,6 +10,17 @@ BEGIN;
 -- margin_floor_override_amount is a DOLLAR amount (same unit as
 -- resolveMargin()'s minMargin), not a percentage — the spec's own
 -- _pct name and NUMERIC(5,2) width would misrepresent that.
+-- OPEN DESIGN QUESTION, OWNED BY THE USER (deliberately unresolved here): is a
+-- stored $0 margin floor meaningful?
+--   (a) Yes, a deliberate operator choice: the column stays permissive, the
+--       `??` in lib/contract-intake/validate-rate.ts stays, and the API
+--       refuses 0 only so an empty form field cannot silently disable the floor.
+--   (b) No, never meaningful: would need
+--       CHECK (margin_floor_override_amount IS NULL OR margin_floor_override_amount > 0)
+--       PLUS changes to validate-rate.ts and its passing test
+--       validate-rate.test.ts ("accepts a tender with an explicit override floor of $0").
+-- Do not add the CHECK on its own: that half-implements (b) and leaves a green
+-- test describing a state the database could no longer hold.
 -- tenant_id is BIGINT, not INTEGER — tenants.id is BIGINT and every other
 -- tenant-scoped table in this schema (37+, including exceptions) agrees;
 -- INTEGER here was a defect the brief copied verbatim from the spec without

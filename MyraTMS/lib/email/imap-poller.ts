@@ -41,7 +41,7 @@ import { attachDocument } from '@/lib/documents';
 import { completeDispatchOnSignedRateCon } from '@/lib/dispatch-gate';
 import { extractRateConTerms, compareTerms } from '@/lib/documents/rate-con-terms';
 import { bridgeToExceptions } from '@/lib/exceptions/bridge';
-import { checkSenderAuthorization } from '@/lib/contract-intake/authorization';
+import { checkSenderAuthorization, isAmbiguousSender } from '@/lib/contract-intake/authorization';
 import { extractTenderTerms } from '@/lib/documents/tender-terms';
 import { validateTenderedRate } from '@/lib/contract-intake/validate-rate';
 import { classifyInboundEmail } from './inbound-classifier';
@@ -308,7 +308,12 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
     let authorized = false;
     let authTenantId: number | null = null;
     try {
-      const authorization = await checkSenderAuthorization(fromAddress);
+      const authResult = await checkSenderAuthorization(fromAddress);
+      // An ambiguous sender is NOT an authorization — it fails closed into the
+      // same manual-review branch — but the operator has to be told the real
+      // cause, which is the opposite of "on no whitelist".
+      const ambiguous = isAmbiguousSender(authResult) ? authResult : null;
+      const authorization = isAmbiguousSender(authResult) ? null : authResult;
 
       if (!authorization) {
         intakeStatus = 'unauthorized_sender';
@@ -317,8 +322,17 @@ async function processMessage(client: ImapClientLike, uid: number, result: PollR
         // No email-id suffix here: the title is unique per sender, so the
         // bridge's type+title dedup collapses repeats while one is open.
         // (A separate severity rule for this case is deferred to T-30b.)
-        tenderExceptionTitle = `Unauthorized freight-tender sender: ${fromAddress}`;
-        tenderExceptionDescription = `An email from ${fromAddress} did not match any known reply pattern and is not on any tenant's contract_shipper_authorizations whitelist.`;
+        // The two causes get different titles on purpose: they need different
+        // operator actions, so dedup must not collapse one into the other.
+        tenderExceptionTitle = ambiguous
+          ? `Ambiguous freight-tender sender: ${fromAddress}`
+          : `Unauthorized freight-tender sender: ${fromAddress}`;
+        tenderExceptionDescription = ambiguous
+          ? `An email from ${fromAddress} is on MORE THAN ONE tenant's contract_shipper_authorizations whitelist `
+            + `(tenants ${ambiguous.tenantIds.join(', ')}; authorizations ${ambiguous.authorizationIds.join(', ')}). `
+            + 'One shipper email maps to at most one tenant, so no tenant can be attributed and the tender was not parsed. '
+            + 'Deactivate all but the correct authorization, then re-send the tender.'
+          : `An email from ${fromAddress} did not match any known reply pattern and is not on any tenant's contract_shipper_authorizations whitelist.`;
       } else {
         authorized = true;
         authTenantId = Number(authorization.tenantId); // Neon BIGINT -> string

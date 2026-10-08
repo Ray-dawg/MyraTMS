@@ -1,6 +1,13 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { db } from '@/lib/pipeline/db-adapter';
-import { checkSenderAuthorization } from '@/lib/contract-intake/authorization';
+import { checkSenderAuthorization, isAmbiguousSender, type ContractShipperAuthorization } from '@/lib/contract-intake/authorization';
+
+// Non-ambiguous callers: assert the discriminant, then narrow for the type checker.
+async function checkOne(email: string): Promise<ContractShipperAuthorization | null> {
+  const r = await checkSenderAuthorization(email);
+  expect(isAmbiguousSender(r)).toBe(false);
+  return r as ContractShipperAuthorization | null;
+}
 
 describe('checkSenderAuthorization (acceptance criterion 1)', () => {
   let tenantId: number;
@@ -22,14 +29,14 @@ describe('checkSenderAuthorization (acceptance criterion 1)', () => {
     authId = inserted.rows[0].id;
     const emailRow = await db.query<{ shipper_email: string }>(`SELECT shipper_email FROM contract_shipper_authorizations WHERE id = $1`, [authId]);
 
-    const result = await checkSenderAuthorization(emailRow.rows[0].shipper_email);
+    const result = await checkOne(emailRow.rows[0].shipper_email);
     expect(result).not.toBeNull();
     expect(result?.tenantId).toBe(tenantId);
     expect(result?.marginFloorOverrideAmount).toBe(150);
   });
 
   it('returns null for an unauthorized sender (same tenant has no row for this address)', async () => {
-    const result = await checkSenderAuthorization(`never-authorized-${Date.now()}@nobody.example.com`);
+    const result = await checkOne(`never-authorized-${Date.now()}@nobody.example.com`);
     expect(result).toBeNull();
   });
 
@@ -43,7 +50,7 @@ describe('checkSenderAuthorization (acceptance criterion 1)', () => {
       [tenantId, email],
     );
     authId = inserted.rows[0].id;
-    const result = await checkSenderAuthorization(email);
+    const result = await checkOne(email);
     expect(result).toBeNull();
   });
 
@@ -57,7 +64,7 @@ describe('checkSenderAuthorization (acceptance criterion 1)', () => {
       [tenantId, email],
     );
     authId = inserted.rows[0].id;
-    const result = await checkSenderAuthorization(email.toLowerCase());
+    const result = await checkOne(email.toLowerCase());
     expect(Number(result?.id)).toBe(Number(authId));
   });
 });
@@ -95,7 +102,7 @@ describe('uq_contract_shipper_auth_active_email (structural invariant)', () => {
     ).rejects.toThrow(/uq_contract_shipper_auth_active_email|duplicate key/i);
 
     // ...so the reader is unambiguous by construction.
-    const result = await checkSenderAuthorization(email);
+    const result = await checkOne(email);
     expect(Number(result?.tenantId)).toBe(tenantA);
   });
 
@@ -137,23 +144,24 @@ describe('checkSenderAuthorization fails closed on an ambiguous sender', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns null and warns, naming every colliding tenant', async () => {
-    vi.doMock('@/lib/pipeline/db-adapter', () => ({
-      db: {
-        query: vi.fn().mockResolvedValue({
-          rows: [
-            { id: 11, tenant_id: 2, shipper_email: 'both@shipper.example.com', margin_floor_override_amount: '150.00' },
-            { id: 12, tenant_id: 7, shipper_email: 'both@shipper.example.com', margin_floor_override_amount: null },
-          ],
-          rowCount: 2,
-        }),
-      },
-    }));
+  it('returns an ambiguous result and warns, naming every colliding tenant', async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        { id: 11, tenant_id: 2, shipper_email: 'both@shipper.example.com', margin_floor_override_amount: '150.00' },
+        { id: 12, tenant_id: 7, shipper_email: 'both@shipper.example.com', margin_floor_override_amount: null },
+      ],
+      rowCount: 2,
+    });
+    vi.doMock('@/lib/pipeline/db-adapter', () => ({ db: { query } }));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { checkSenderAuthorization: fn } = await import('@/lib/contract-intake/authorization');
 
     const result = await fn('BOTH@shipper.example.com');
-    expect(result).toBeNull();
+    expect(result).toEqual({ ambiguous: true, tenantIds: [2, 7], authorizationIds: [11, 12] });
+    // This branch is only reachable because the SELECT has no LIMIT 1. If one
+    // is re-added the stub would still return two rows and this test would stay
+    // green over code that can never run in production.
+    expect(query.mock.calls[0][0]).not.toMatch(/LIMIT/i);
     expect(warn).toHaveBeenCalledTimes(1);
     const line = String(warn.mock.calls[0][0]);
     expect(line).toContain('ambiguous sender');

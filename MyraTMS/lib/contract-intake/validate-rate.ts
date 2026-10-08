@@ -42,6 +42,10 @@ export async function validateTenderedRate(
     },
   });
 
+  // `??` (not `||`) keeps an explicit $0 override as a real floor. Whether a
+  // stored $0 should be legal at all is an OPEN question owned by the user; see
+  // the comment on margin_floor_override_amount in
+  // scripts/059-t30-contract-freight-intake.sql. Do not resolve it here.
   const marginFloor = marginFloorOverrideAmount ?? (await resolveMargin(tenantId, currency)).margin.minMargin;
   const dollarMargin = tender.rate - quote.cost.total;
   const acceptable = dollarMargin >= marginFloor;

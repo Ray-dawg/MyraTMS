@@ -25,7 +25,36 @@ export interface ContractShipperAuthorization {
   marginFloorOverrideAmount: number | null;
 }
 
-export async function checkSenderAuthorization(fromAddress: string): Promise<ContractShipperAuthorization | null> {
+/**
+ * More than one tenant holds an active authorization for the sender. Reported
+ * distinctly from "not on any whitelist" so the operator-facing exception can
+ * name the real cause: telling them the address is on no whitelist when it is
+ * on two sends them after the wrong problem, and the only other record of it
+ * would be a logger.warn buried in worker logs.
+ */
+export interface AmbiguousSenderAuthorization {
+  ambiguous: true;
+  tenantIds: number[];
+  authorizationIds: number[];
+}
+
+/**
+ * `null` keeps meaning "not authorized" so existing truthiness checks at call
+ * sites stay correct; an ambiguous sender is a distinct object rather than a
+ * fourth falsy value, and `isAmbiguousSender()` is the only way to read it.
+ */
+export type SenderAuthorizationResult =
+  | ContractShipperAuthorization
+  | AmbiguousSenderAuthorization
+  | null;
+
+export function isAmbiguousSender(
+  result: SenderAuthorizationResult,
+): result is AmbiguousSenderAuthorization {
+  return result !== null && 'ambiguous' in result;
+}
+
+export async function checkSenderAuthorization(fromAddress: string): Promise<SenderAuthorizationResult> {
   const email = fromAddress.toLowerCase();
   const { rows } = await db.query<{
     id: number;
@@ -45,12 +74,16 @@ export async function checkSenderAuthorization(fromAddress: string): Promise<Con
   if (rows.length === 0) return null;
 
   if (rows.length > 1) {
+    const tenantIds = rows.map((r) => Number(r.tenant_id));
+    const authorizationIds = rows.map((r) => Number(r.id));
     logger.warn('[contract-intake/authorization] ambiguous sender — more than one tenant holds an active authorization; failing closed', {
       fromAddress: email,
-      tenantIds: rows.map((r) => Number(r.tenant_id)),
-      authorizationIds: rows.map((r) => Number(r.id)),
+      tenantIds,
+      authorizationIds,
     });
-    return null;
+    // Fails closed exactly as before — no authorization is returned — but the
+    // caller can now say WHY.
+    return { ambiguous: true, tenantIds, authorizationIds };
   }
 
   const row = rows[0];
