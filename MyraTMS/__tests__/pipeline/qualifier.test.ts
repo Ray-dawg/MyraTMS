@@ -112,7 +112,7 @@ describe('QualifierWorker', () => {
 
     const result = await worker.process(tooSoonPayload);
     expect(result.details?.passed).toBe(false);
-    expect(result.details?.reason).toMatch(/4 hours/);
+    expect(result.details?.reason).toBe('pickup_too_soon');
   });
 });
 
@@ -218,9 +218,9 @@ describe('QualifierWorker — shadow shipper-direct classification', () => {
       stage: string;
       load_source_class: string | null;
       load_source_evaluated_at: string | null;
-      qualification_detail: string | null;
+      load_source_evidence: { evaluatePolicy?: { decision?: string } } | null;
     }>(
-      `SELECT stage, load_source_class, load_source_evaluated_at, qualification_detail
+      `SELECT stage, load_source_class, load_source_evaluated_at, load_source_evidence
          FROM pipeline_loads WHERE id = $1`,
       [pipelineLoadId],
     );
@@ -229,7 +229,7 @@ describe('QualifierWorker — shadow shipper-direct classification', () => {
     expect(after.rows[0].stage).toBe('qualified');
     expect(after.rows[0].load_source_class).toBe('unresolved');
     expect(after.rows[0].load_source_evaluated_at).not.toBeNull();
-    expect(after.rows[0].qualification_detail).toContain('evaluatePolicy=reject');
+    expect(after.rows[0].load_source_evidence?.evaluatePolicy?.decision).toBe('reject');
 
     // evaluatePolicy() really ran end-to-end, not just returned a value in
     // memory — it logged its own audit row under the policy_engine agent.

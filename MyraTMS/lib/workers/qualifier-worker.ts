@@ -33,6 +33,7 @@ import {
 import { lookupAuthority } from '@/lib/verification/authority-lookup';
 import { evaluatePolicy } from '@/lib/governance/evaluate-policy-db';
 import type { PolicyEvaluationResult } from '@/lib/governance/policy-types';
+import { getShipperDirectGateMode } from '@/lib/pipeline/gate-mode';
 import { BaseWorker, BaseJobPayload, ProcessResult, WorkerConfig } from './base-worker';
 
 /**
@@ -68,7 +69,7 @@ export interface QualifyJobPayload extends BaseJobPayload {
  * the classifier's and evaluatePolicy()'s accuracy can be measured before
  * either is ever allowed to gate a real load.
  */
-interface ShadowSourceClassification {
+interface SourceClassification {
   classification: ClassifyLoadSourceResult;
   policyResult: PolicyEvaluationResult | null;
   policyError: string | null;
@@ -80,6 +81,8 @@ interface ShadowSourceClassification {
 interface QualificationResult {
   passed: boolean;
   reason: string;
+  /** Human sentence for qualification_detail; `reason` is the §4.9 code. */
+  detail?: string;
   priorityScore: number;
   estimatedMarginLow: number;
   estimatedMarginHigh: number;
@@ -111,19 +114,18 @@ function formatLocation(loc: { city: string; state: string }): string {
 /**
  * Qualifier worker - filters loads to eliminate unprofitable ones early
  *
- * Shadow shipper-direct / tenant-policy classification (E2-01 M1 + T-19,
- * wired 2026-08-25): behind SHIPPER_DIRECT_GATE_ENABLED (default false/off).
- * When enabled, every load is classified via classifyLoadSource() and
- * evaluated via evaluatePolicy() — both real, both writing their own audit
- * trail (load_source_class/etc. on pipeline_loads; authority_evaluations
- * under the policy_engine agent) — but the result NEVER changes the
- * qualify/disqualify decision below. This is intentionally shadow-only:
- * no ingest path captures poster identity (company/MC/DOT) yet, so today
- * every real load classifies as 'unresolved' / 'poster_identity_missing'.
- * Enforcing on that would silently reject the entire live pipeline. Once
- * poster-identity capture lands at the scanner (a separate, not-yet-built
- * change), this same code starts seeing real signal — flipping enforcement
- * on from there is a follow-up change, not a re-wire.
+ * Shipper-direct / tenant-policy classification (E2-01 M1 + T-19), gated by
+ * lib/pipeline/gate-mode.ts:
+ *   off     — SHIPPER_DIRECT_GATE_ENABLED != true: nothing is classified.
+ *   shadow  — classification + evaluatePolicy() run and are written to
+ *             pipeline_loads (load_source_class etc.) but never gate.
+ *   enforce — F1 runs FIRST: verdict reject → 'disqualified' with the §4.9
+ *             reason code; review → 'escalated' + an Alert Center exceptions
+ *             row (source_module='load_source_review'); accept → Filters
+ *             2–7 run exactly as before, with a +100 priority bonus for
+ *             registry/attestation-verified shippers (§4.6).
+ * Any failure inside the classifier is caught and logged; in enforce mode a
+ * failed classification is treated as a review (fail closed), never accept.
  */
 export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
   private researchQueue: Queue;
@@ -154,11 +156,46 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
     const { pipelineLoadId } = payload;
     logger.debug(`[Qualifier] Processing load ${pipelineLoadId}`);
 
-    // Shadow-only — see class-level comment. Never throws, never affects
-    // qualResult below.
-    const sourceClassification = await this.runShadowSourceClassification(payload);
+    // See class-level comment. Never throws.
+    const sourceClassification = await this.classifyPosterSource(payload);
+    const gateMode = getShipperDirectGateMode();
+
+    if (gateMode === 'enforce') {
+      // F1 — poster classification is the first filter in enforce mode
+      // (PRD §4.6): "are we allowed to touch this load" before "is it worth it".
+      const classification = sourceClassification?.classification;
+      if (!classification) {
+        // Classifier threw (missing webKey, DB hiccup). Fail closed to review.
+        logger.warn(`[Qualifier] Load ${pipelineLoadId} F1 classification unavailable — routing to review`);
+        return {
+          success: true, pipelineLoadId, stage: this.config.expectedStage, duration: 0,
+          details: { passed: false, review: true, reason: 'authority_lookup_failed_review', detail: 'F1 poster classification failed (infra); human review required', sourceClassification },
+        };
+      }
+      if (classification.verdict === 'reject') {
+        logger.info(`[Qualifier] Load ${pipelineLoadId} rejected by F1: ${classification.reasonCode}`);
+        return {
+          success: true, pipelineLoadId, stage: this.config.expectedStage, duration: 0,
+          details: { passed: false, reason: classification.reasonCode ?? 'poster_unresolved_review', detail: `F1 poster classification: class=${classification.class}`, sourceClassification },
+        };
+      }
+      if (classification.verdict === 'review') {
+        logger.info(`[Qualifier] Load ${pipelineLoadId} routed to review: ${classification.reasonCode}`);
+        return {
+          success: true, pipelineLoadId, stage: this.config.expectedStage, duration: 0,
+          details: { passed: false, review: true, reason: classification.reasonCode ?? 'poster_unresolved_review', detail: `F1 poster classification needs a human: class=${classification.class}`, sourceClassification },
+        };
+      }
+    }
 
     const qualResult = await this.qualifyLoad(payload);
+
+    if (gateMode === 'enforce' && sourceClassification && qualResult.passed) {
+      const { method, confidence } = sourceClassification.classification;
+      if ((method === 'registry' || method === 'manual_attestation') && confidence >= 0.9) {
+        qualResult.priorityScore += 100; // PRD §4.6 — verified-shipper freight to the front of the queue
+      }
+    }
 
     if (qualResult.passed) {
       logger.info(`[Qualifier] Load ${pipelineLoadId} qualified`, {
@@ -236,6 +273,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       details: {
         passed: false,
         reason: qualResult.reason,
+        detail: qualResult.detail,
         sourceClassification,
       },
     };
@@ -248,10 +286,10 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
    * and logged, never thrown — a classification failure must never look
    * like a qualification failure.
    */
-  private async runShadowSourceClassification(
+  private async classifyPosterSource(
     payload: QualifyJobPayload,
-  ): Promise<ShadowSourceClassification | null> {
-    if (process.env.SHIPPER_DIRECT_GATE_ENABLED !== 'true') {
+  ): Promise<SourceClassification | null> {
+    if (getShipperDirectGateMode() === 'off') {
       return null;
     }
 
@@ -294,7 +332,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       const classification = classifyLoadSource({
         poster,
         isManualImport: payload.isManualImport ?? false,
-        attestation: null,
+        attestation: payload.attestation ? { value: payload.attestation } : null,
         registryHit,
         lookupResult,
         agreementMatch,
@@ -333,9 +371,10 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
    * Returns immediately on first failure.
    */
   private async qualifyLoad(payload: QualifyJobPayload): Promise<QualificationResult> {
-    const fail = (reason: string): QualificationResult => ({
+    const fail = (reason: string, detail: string): QualificationResult => ({
       passed: false,
       reason,
+      detail,
       priorityScore: 0,
       estimatedMarginLow: 0,
       estimatedMarginHigh: 0,
@@ -346,7 +385,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
     // FILTER 1: Freshness — reject pickups < 4h away (or in the past).
     const pickupTime = new Date(payload.pickupDate).getTime();
     if (pickupTime < Date.now() + 4 * 3600_000) {
-      return fail('Pickup is in the past or less than 4 hours away');
+      return fail('pickup_too_soon', 'Pickup is in the past or less than 4 hours away');
     }
 
     // FILTER 2: Equipment availability — at least one carrier with this equipment,
@@ -362,7 +401,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       [normalizedEquip],
     );
     if ((equipMatch.rows[0]?.count ?? 0) === 0) {
-      return fail(`No active insured carriers with ${normalizedEquip} equipment`);
+      return fail('no_equipment_match', `No active insured carriers with ${normalizedEquip} equipment`);
     }
 
     // FILTER 3: Lane coverage — carriers with history on this lane (origin region),
@@ -395,14 +434,14 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
     const minMargin = await getMarginFloor(payload.origin.country === 'CA' ? 'CAD' : 'USD');
 
     if (estimatedMarginHigh < minMargin * 0.5) {
-      return fail(`Best-case margin $${estimatedMarginHigh.toFixed(0)} < 50% of minimum $${minMargin}`);
+      return fail('margin_too_thin', `Best-case margin $${estimatedMarginHigh.toFixed(0)} < 50% of minimum $${minMargin}`);
     }
 
     // FILTER 5: DNC list.
     if (payload.shipperPhone) {
       const dnc = await db.query(`SELECT 1 FROM dnc_list WHERE phone = $1`, [payload.shipperPhone]);
       if (dnc.rows.length > 0) {
-        return fail('Shipper phone is on do-not-call list');
+        return fail('dnc_listed', 'Shipper phone is on do-not-call list');
       }
     }
 
@@ -428,10 +467,10 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
       const f = fatigue.rows[0];
       if (f) {
         if ((f.recent_contacts ?? 0) >= 3) {
-          return fail(`Shipper contacted ${f.recent_contacts} times in last 14 days`);
+          return fail('shipper_fatigue', `Shipper contacted ${f.recent_contacts} times in last 14 days`);
         }
         if (f.last_outcome === 'declined' && (f.recent_contacts ?? 0) >= 1) {
-          return fail('Shipper declined within last 14 days');
+          return fail('shipper_fatigue', 'Shipper declined within last 14 days');
         }
         isRepeatShipper = (f.total_calls ?? 0) > 0;
       }
@@ -500,6 +539,7 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
              priority_score = $4,
              carrier_match_count = $5,
              qualification_reason = 'qualified',
+             qualification_detail = NULL,
              updated_at = NOW()
          WHERE id = $1`,
         [
@@ -510,21 +550,69 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
           result.details.carrierMatchCount,
         ],
       );
+    } else if (result.details?.review) {
+      // E2-01 §4.7 — F1 review verdict: park at 'escalated' and surface in
+      // the Alert Center. resolve-source (lib/pipeline/resolve-load-source.ts)
+      // is the way back in; pipeline-health expires it past the pickup window.
+      await db.query(
+        `UPDATE pipeline_loads
+         SET stage = 'escalated',
+             stage_updated_at = NOW(),
+             qualification_reason = $2,
+             qualification_detail = $3,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [pipelineLoadId, result.details.reason, result.details.detail ?? null],
+      );
+      await this.insertReviewException(pipelineLoadId, result.details.sourceClassification ?? null);
     } else {
       await db.query(
         `UPDATE pipeline_loads
          SET stage = 'disqualified',
              stage_updated_at = NOW(),
              qualification_reason = $2,
+             qualification_detail = $3,
              updated_at = NOW()
          WHERE id = $1`,
-        [pipelineLoadId, result.details?.reason ?? 'unspecified'],
+        [pipelineLoadId, result.details?.reason ?? 'unspecified', result.details?.detail ?? null],
       );
     }
 
-    await this.persistShadowClassification(pipelineLoadId, result.details?.sourceClassification ?? null);
+    await this.persistSourceClassification(pipelineLoadId, result.details?.sourceClassification ?? null);
 
-    logger.debug(`[Qualifier] Pipeline load ${pipelineLoadId} → ${result.details?.passed ? 'qualified' : 'disqualified'}`);
+    const outcome = result.details?.passed ? 'qualified' : result.details?.review ? 'escalated (review)' : 'disqualified';
+    logger.debug(`[Qualifier] Pipeline load ${pipelineLoadId} → ${outcome}`);
+  }
+
+  /**
+   * E2-01 §4.7 step 2 — one Alert Center row per F1 review verdict, with the
+   * evidence snapshot in `detail` so the operator can decide from the card.
+   * Same table/columns the Dispatcher's escalations already use; no new UI.
+   */
+  private async insertReviewException(pipelineLoadId: number, source: SourceClassification | null): Promise<void> {
+    const load = (
+      await db.query<{
+        origin_city: string; origin_state: string; destination_city: string; destination_state: string;
+        poster_company_raw: string | null;
+      }>(
+        `SELECT origin_city, origin_state, destination_city, destination_state, poster_company_raw
+           FROM pipeline_loads WHERE id = $1`,
+        [pipelineLoadId],
+      )
+    ).rows[0];
+    const poster = load?.poster_company_raw ?? 'unknown poster';
+    const cls = source?.classification;
+    const title = `Load source review: ${poster} — ${load?.origin_city}, ${load?.origin_state} → ${load?.destination_city}, ${load?.destination_state}`;
+    const suggestedAction =
+      cls?.class === 'carrier_reposted'
+        ? `${poster} holds for-hire carrier authority and is posting freight. Confirm this is their own private-fleet freight. The registry will remember your answer.`
+        : `Confirm whether ${poster} is a direct shipper or a broker. The registry will remember your answer.`;
+    const detail = JSON.stringify({ reasonCode: cls?.reasonCode ?? null, class: cls?.class ?? null, evidence: cls?.evidence ?? null });
+    await db.query(
+      `INSERT INTO exceptions (load_id, carrier_id, type, severity, title, detail, pipeline_load_id, source_module, suggested_action, sla_due_at)
+       VALUES (NULL, NULL, 'load_source_review', 'medium', $1, $2, $3, 'load_source_review', $4, NOW() + INTERVAL '4 hours')`,
+      [title, detail, pipelineLoadId, suggestedAction],
+    );
   }
 
   /**
@@ -534,17 +622,19 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
    * back or interfere with the real decision, and this only ever fires
    * when the load has already been persisted by the caller above.
    */
-  private async persistShadowClassification(
+  private async persistSourceClassification(
     pipelineLoadId: number,
-    shadow: ShadowSourceClassification | null,
+    shadow: SourceClassification | null,
   ): Promise<void> {
     if (!shadow) return;
 
     const { classification, policyResult, policyError } = shadow;
-    const detail = [
-      `class=${classification.class} verdict=${classification.verdict} method=${classification.method ?? 'none'} reason=${classification.reasonCode ?? 'none'}`,
-      policyResult ? `evaluatePolicy=${policyResult.decision} (${policyResult.reason})` : `evaluatePolicy=error (${policyError})`,
-    ].join(' | ');
+    const evidence = {
+      ...classification.evidence,
+      verdict: classification.verdict,
+      reasonCode: classification.reasonCode,
+      evaluatePolicy: policyResult ? { decision: policyResult.decision, reason: policyResult.reason, policyId: policyResult.policyId } : { error: policyError },
+    };
 
     try {
       await db.query(
@@ -553,16 +643,14 @@ export class QualifierWorker extends BaseWorker<QualifyJobPayload> {
              load_source_method = $3,
              load_source_confidence = $4,
              load_source_evaluated_at = NOW(),
-             load_source_evidence = $5,
-             qualification_detail = $6
+             load_source_evidence = $5
          WHERE id = $1`,
         [
           pipelineLoadId,
           classification.class,
           classification.method,
           classification.confidence,
-          JSON.stringify(classification.evidence),
-          detail,
+          JSON.stringify(evidence),
         ],
       );
     } catch (err) {
