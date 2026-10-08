@@ -277,6 +277,9 @@ describe('PATCH /api/exceptions/:id — T-30 contract_intake tender approve/reje
       { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '2026-02-30' } },
       { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '1' } },
       { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '2026-9-5' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '0000-01-01' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: '10/08/2026' } },
+      { field: 'pickupDate', tender: { ...COMPLETE_TENDER, pickupDate: 'October 8, 2026' } },
       { field: 'equipmentType', tender: { ...COMPLETE_TENDER, equipmentType: 'x'.repeat(51) } },
       { field: 'originState', tender: { ...COMPLETE_TENDER, originState: 'x'.repeat(11) } },
       { field: 'originCity', tender: { ...COMPLETE_TENDER, originCity: '   ' } },
@@ -290,12 +293,39 @@ describe('PATCH /api/exceptions/:id — T-30 contract_intake tender approve/reje
       const res = await patch(exceptionId, tenantId, { action: 'resolve', decision: 'approve', tender });
       const label = JSON.stringify(tender[field] ?? null);
       expect(res.status, `${field}=${label}`).toBe(400);
-      expect((await res.json()).error, `${field}=${label}`).toContain(field);
+      expect((await res.json()).error, `${field}=${label}`).toContain(`tender.${field} `);
     }
 
     expect(await exceptionStatus(exceptionId)).toBe('active');
     expect((await emailState(inboundEmailId)).intake_status).toBe('pending_review');
     expect(await tenderLoadCount(inboundEmailId)).toBe(0);
+  });
+
+  // extractTenderTerms() does no normalization, so these are realistic
+  // extractor outputs that stored fine before the date-shape check existed.
+  // Rejecting them would turn an authorized tender into a 400.
+  it.each([
+    '2026-10-08T00:00:00',
+    '2026-10-08T00:00:00Z',
+    '2026-10-08T00:00:00.000+00:00',
+    '2026-10-08 00:00:00',
+    ' 2026-10-08 ',
+  ])('accepts pickupDate %j and stores the bare date 2026-10-08', async (pickupDate) => {
+    tenantId = await getMyraTenantId();
+    inboundEmailId = await seedInboundEmail();
+    exceptionId = await seedTenderException(tenantId, inboundEmailId);
+
+    const res = await patch(exceptionId, tenantId, {
+      action: 'resolve', decision: 'approve', tender: { ...COMPLETE_TENDER, pickupDate },
+    });
+    expect(res.status).toBe(200);
+
+    const { rows } = await db.query<{ d: string }>(
+      `SELECT to_char(pickup_date, 'YYYY-MM-DD HH24:MI:SS') AS d FROM pipeline_loads WHERE load_id LIKE $1`,
+      [`email_tender-${inboundEmailId}-%`],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].d).toBe('2026-10-08 00:00:00');
   });
 
   it('a second approve is a 409 and still leaves exactly one pipeline_loads row', async () => {

@@ -54,14 +54,25 @@ const MAX_COMMODITY_LENGTH = 200
  * what a date string may be. `Date.parse()` alone accepts both '1' (year 2001)
  * and '2026-02-30' (which it silently rolls forward to 2026-03-02); Postgres
  * rejects both, i.e. they reach the DB as the opaque 500 this validation
- * exists to replace. So: require the YYYY-MM-DD shape extractTenderTerms()
- * emits, then round-trip it to catch an impossible calendar date.
+ * exists to replace.
+ *
+ * extractTenderTerms() does NO normalization (typeof checks only) and the LLM
+ * is merely *asked* for YYYY-MM-DD, so an ISO datetime ('2026-10-08T00:00:00',
+ * optionally with Z / offset) or stray surrounding whitespace is a realistic
+ * extractor output that used to store fine. Those are accepted and reduced to
+ * the bare date. Slash and word forms ('10/08/2026', 'October 8, 2026') stay
+ * rejected: they are MDY/DMY-ambiguous and guessing wrong silently ships a
+ * load on the wrong day. Returns the normalized YYYY-MM-DD, or null.
  */
-function isStorableDate(raw: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false
-  const parsed = new Date(`${raw}T00:00:00Z`)
-  if (Number.isNaN(parsed.getTime())) return false
-  return parsed.toISOString().slice(0, 10) === raw
+function normalizeTenderDate(raw: string): string | null {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[T ][0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(raw.trim())
+  if (!m) return null
+  const date = m[1]
+  // Postgres has no year zero; toISOString() would happily round-trip it.
+  if (date.startsWith("0000-")) return null
+  const parsed = new Date(`${date}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime())) return null
+  return parsed.toISOString().slice(0, 10) === date ? date : null
 }
 
 type TenderValidation =
@@ -112,7 +123,8 @@ function validateTender(raw: unknown): TenderValidation {
     return { ok: false, error: `tender.rateCurrency must be one of ${TENDER_CURRENCIES.join(", ")}` }
   }
 
-  if (typeof v.pickupDate !== "string" || !isStorableDate(v.pickupDate)) {
+  const pickupDate = typeof v.pickupDate === "string" ? normalizeTenderDate(v.pickupDate) : null
+  if (pickupDate === null) {
     return { ok: false, error: "tender.pickupDate must be a real calendar date in YYYY-MM-DD form" }
   }
 
@@ -144,7 +156,7 @@ function validateTender(raw: unknown): TenderValidation {
     }
   }
 
-  return { ok: true, value: v as unknown as TenderInput }
+  return { ok: true, value: { ...(v as unknown as TenderInput), pickupDate } }
 }
 
 /**
