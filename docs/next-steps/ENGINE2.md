@@ -31,8 +31,9 @@ This is the single thing every other stream is waiting on. The Engine 3 handoff 
 
 The double-brokering gate is code-complete (see the tracker Change Log, 2026-10-08). It ships with `SHIPPER_DIRECT_GATE_ENABLED=false` and `SHIPPER_DIRECT_GATE_MODE=shadow`, so nothing blocks until this checklist is walked. It can run before or in parallel with Pilot 1; step 6 should land **before** Phase 6B so the ten consenting shippers' loads are classified.
 
-1. Register an FMCSA QCMobile webKey; set `FMCSA_QC_WEBKEY` on Railway **and** Vercel. Without it every registry miss goes to human review (fail closed) and the queue will be unworkable.
-2. Seed the registry: `pnpm tsx --env-file=.env.local scripts/e2_seed_poster_registry.ts <patrice-labels.csv>` (205 shipper-list rows + mines rows + broker list + Patrice's labels; PRD §4.13 criterion 5).
+1. ~~Register an FMCSA QCMobile webKey~~ — **done 2026-10-08**, key seeded in `MyraTMS/.env.local`. Still must be set on Railway **and** Vercel. Without it every registry miss goes to human review (fail closed) and the queue will be unworkable.
+2. **Seed the registry — this is now the load-bearing step, not an optional calibration.** Live FMCSA runs on 2026-10-08 proved QCMobile *cannot* establish shipper-direct status (see the tracker entry for that date): every classic private fleet tested also holds "Authorized For Hire" operating authority, so the classifier's FMCSA `shipper_direct` accept path is unreachable for real shippers. FMCSA can only *reject* (active broker authority) or *escalate*. Every accept therefore comes from `poster_registry` or an import attestation. Budget real labelling time here.
+   Seed it: `pnpm tsx --env-file=.env.local scripts/e2_seed_poster_registry.ts <patrice-labels.csv>` (205 shipper-list rows + mines rows + broker list + Patrice's labels; PRD §4.13 criterion 5).
 3. Backfill history in shadow: `pnpm tsx --env-file=.env.local scripts/e2_backfill_load_source.ts`.
 4. Calibrate: `pnpm tsx --env-file=.env.local scripts/e2_source_calibration_report.ts` → **must exit 0**. Label `unresolvedTopPosters`, re-seed, re-run until it does. Attach the final JSON to the PR (criterion 4).
 5. Set `SHIPPER_DIRECT_GATE_ENABLED=true`, `SHIPPER_DIRECT_GATE_MODE=shadow` on Railway. Watch 24 h of real ingest: distribution of `load_source_class`, registry hit rate (re-run the report).

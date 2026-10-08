@@ -20,7 +20,15 @@ import type {
 
 export type { AuthorityLookupInput, AuthorityLookupResult, EntityClass, LookupProvider, LookupStatus };
 
-const TIMEOUT_MS = () => Number(process.env.AUTHORITY_LOOKUP_TIMEOUT_MS ?? 4000);
+// Live QCMobile is slow: measured 2026-10-08, /carriers/{dot} took 10.6s and
+// 20.2s while /carriers/docket-number/{mc} answered in 1.9s. The previous 4000ms
+// default aborted essentially every DOT lookup, which fails closed to
+// 'unresolved' review - i.e. the gate would have flooded the review queue in
+// enforce mode for a reason that looks nothing like its real cause. Every caller
+// is a background worker or a batch script (Qualifier on Railway, the backfill
+// script), never a user-facing request, so a generous ceiling is affordable.
+// Timeouts do not retry, so this is also the worst case per lookup.
+const TIMEOUT_MS = () => Number(process.env.AUTHORITY_LOOKUP_TIMEOUT_MS ?? 25_000);
 const CACHE_DAYS = () => Number(process.env.AUTHORITY_LOOKUP_CACHE_DAYS ?? 30);
 const QC_BASE_URL = () => process.env.FMCSA_QC_BASE_URL ?? 'https://mobile.fmcsa.dot.gov/qc/services';
 const QC_WEBKEY = () => process.env.FMCSA_QC_WEBKEY;
@@ -81,15 +89,51 @@ async function writeAudit(params: {
   );
 }
 
-function classifyFromQcCarrier(c: any): { entityClass: EntityClass; authority: AuthorityLookupResult['authority'] } {
+export type OperationClassification = 'for_hire' | 'private' | 'unknown';
+
+/**
+ * The QCMobile `/carriers/{dot}` payload carries NO operation-classification
+ * field - verified against live FMCSA on 2026-10-08. The earlier code read
+ * `carrier.operatingStatus`, which is always undefined, so this value was
+ * permanently 'unknown' and both the shipper_direct and carrier_reposted
+ * branches of classifyLoadSource() were unreachable. The for-hire/private
+ * split lives on a separate sub-resource, so a resolved carrier costs one
+ * extra call.
+ *
+ * Descriptions observed live: 'Authorized For Hire', 'Exempt For Hire',
+ * 'Private Property', 'Private Passenger, Business', 'Migrant', 'U.S. Mail',
+ * 'Federal Government', 'State Government', 'Local Government', 'Indian Nation'.
+ *
+ * For-hire beats private when an entity holds both (Werner Enterprises holds
+ * 'Authorized For Hire' AND 'Private Property'): anything legally able to haul
+ * for others must not be auto-accepted as shipper-direct, so it routes to
+ * carrier_reposted review instead. Fail closed, per PRD section 4.1.
+ */
+export function operationClassFromDescriptions(descs: Array<string | null | undefined>): OperationClassification {
+  const d = descs.map((x) => (x ?? '').toLowerCase());
+  if (d.some((x) => x.includes('for hire'))) return 'for_hire';
+  if (d.some((x) => x.includes('private'))) return 'private';
+  return 'unknown';
+}
+
+/**
+ * Fails closed: any non-resolved response yields 'unknown', which routes the
+ * load to human review rather than to an accept.
+ */
+async function fetchOperationClassification(dotNumber: string | number): Promise<OperationClassification> {
+  const { status, content } = await fetchQcMobile(`/carriers/${dotNumber}/operation-classification`);
+  if (status !== 'resolved') return 'unknown';
+  return operationClassFromDescriptions(content.map((r: any) => r?.operationClassDesc));
+}
+
+function classifyFromQcCarrier(
+  c: any,
+  operationClassification: OperationClassification,
+): { entityClass: EntityClass; authority: AuthorityLookupResult['authority'] } {
   const brokerActive = c.brokerAuthorityStatus === 'A';
   const commonActive = c.commonAuthorityStatus === 'A';
   const contractActive = c.contractAuthorityStatus === 'A';
   const carrierAuthority = commonActive || contractActive;
-  const operatingStatus: string = (c.operatingStatus ?? '').toLowerCase();
-  let operationClassification: 'for_hire' | 'private' | 'unknown' = 'unknown';
-  if (operatingStatus.includes('private')) operationClassification = 'private';
-  else if (operatingStatus.includes('for hire') || operatingStatus.includes('authorized for')) operationClassification = 'for_hire';
 
   let entityClass: EntityClass = 'unknown';
   if (brokerActive) entityClass = 'broker';
@@ -133,7 +177,17 @@ async function fetchQcMobile(path: string): Promise<{ status: LookupStatus; cont
       }
       if (!res.ok) return { status: 'error', content: [], raw: { httpStatus: res.status } };
       const body = await res.json();
-      const content: any[] = Array.isArray(body?.content) ? body.content : [];
+      // QCMobile is not consistent about `content`: /carriers/docket-number/{mc},
+      // /carriers/name/{n} and /operation-classification return an ARRAY, while
+      // /carriers/{dot} returns a single OBJECT ({ _links, carrier }). Treating
+      // only the array form as data made every DOT-number lookup resolve to
+      // 'not_found' - verified against live FMCSA 2026-10-08. Normalise to an array.
+      const rawContent: any = body?.content;
+      const content: any[] = Array.isArray(rawContent)
+        ? rawContent
+        : rawContent && typeof rawContent === 'object' && rawContent.carrier
+          ? [rawContent]
+          : [];
       return { status: content.length === 0 ? 'not_found' : 'resolved', content, raw: body };
     } catch (err) {
       clearTimeout(timer);
@@ -182,7 +236,11 @@ async function lookupQcMobile(input: AuthorityLookupInput): Promise<AuthorityLoo
   }
 
   const c = matches[0].carrier;
-  const { entityClass, authority } = classifyFromQcCarrier(c);
+  const dotForOpClass = c.dotNumber ?? input.dotNumber;
+  const operationClassification = dotForOpClass
+    ? await fetchOperationClassification(dotForOpClass)
+    : 'unknown';
+  const { entityClass, authority } = classifyFromQcCarrier(c, operationClassification);
   return {
     entityClass,
     legalName: c.legalName ?? c.dbaName ?? null,

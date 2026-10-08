@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
 import { db } from '@/lib/pipeline/db-adapter';
-import { lookupAuthority } from '@/lib/verification/authority-lookup';
+import { lookupAuthority, operationClassFromDescriptions } from '@/lib/verification/authority-lookup';
 
 const RUN_ID = Date.now();
 const TEST_MC = `TESTMC${RUN_ID}`;
@@ -56,6 +56,8 @@ describe('authority-lookup', () => {
       },
     });
 
+    responseQueue.push({ status: 200, body: { content: [] } }); // /operation-classification: pure broker, no classes
+
     const result = await lookupAuthority({ mcNumber: TEST_MC, country: 'US' });
 
     expect(result.status).toBe('resolved');
@@ -85,11 +87,11 @@ describe('authority-lookup', () => {
             commonAuthorityStatus: 'A',
             contractAuthorityStatus: 'N',
             allowedToOperate: 'Y',
-            operatingStatus: 'AUTHORIZED FOR Property',
           },
         }],
       },
     });
+    responseQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } }); // GET /operation-classification sub-resource
 
     const result = await lookupAuthority({ dotNumber: TEST_DOT + '2', country: 'US' });
     expect(result.status).toBe('resolved');
@@ -109,11 +111,11 @@ describe('authority-lookup', () => {
             commonAuthorityStatus: 'A',
             contractAuthorityStatus: 'N',
             allowedToOperate: 'Y',
-            operatingStatus: 'AUTHORIZED FOR Private(Property)',
           },
         }],
       },
     });
+    responseQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Private Property' }] } }); // GET /operation-classification sub-resource
 
     const result = await lookupAuthority({ dotNumber: TEST_DOT + '3', country: 'US' });
     expect(result.status).toBe('resolved');
@@ -148,11 +150,13 @@ describe('authority-lookup', () => {
       status: 200,
       body: {
         content: [
-          { carrier: { legalName: 'Test Resolved Co', dotNumber: 'B1', phyState: 'ON', brokerAuthorityStatus: 'N', commonAuthorityStatus: 'A', contractAuthorityStatus: 'N', allowedToOperate: 'Y', operatingStatus: 'AUTHORIZED FOR Property' } },
-          { carrier: { legalName: 'Test Resolved Co', dotNumber: 'B2', phyState: 'TX', brokerAuthorityStatus: 'N', commonAuthorityStatus: 'A', contractAuthorityStatus: 'N', allowedToOperate: 'Y', operatingStatus: 'AUTHORIZED FOR Property' } },
+          { carrier: { legalName: 'Test Resolved Co', dotNumber: 'B1', phyState: 'ON', brokerAuthorityStatus: 'N', commonAuthorityStatus: 'A', contractAuthorityStatus: 'N', allowedToOperate: 'Y' } },
+          { carrier: { legalName: 'Test Resolved Co', dotNumber: 'B2', phyState: 'TX', brokerAuthorityStatus: 'N', commonAuthorityStatus: 'A', contractAuthorityStatus: 'N', allowedToOperate: 'Y' } },
         ],
       },
     });
+    responseQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } }); // GET /operation-classification sub-resource
+
     const result = await lookupAuthority({ companyName: 'Test Resolved Co', country: 'US', provinceState: 'ON' });
     expect(result.status).toBe('resolved');
     expect(result.dotNumber).toBe('B1');
@@ -171,6 +175,8 @@ describe('authority-lookup', () => {
       status: 200,
       body: { content: [{ carrier: { legalName: 'Test Retry Co', dotNumber: TEST_DOT + '4', brokerAuthorityStatus: 'A', commonAuthorityStatus: 'N', contractAuthorityStatus: 'N', allowedToOperate: 'Y' } }] },
     });
+    responseQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } }); // GET /operation-classification sub-resource
+
     const result = await lookupAuthority({ mcNumber: TEST_MC + 'RETRY', country: 'US' });
     expect(result.status).toBe('resolved');
     expect(result.legalName).toBe('Test Retry Co');
@@ -181,6 +187,8 @@ describe('authority-lookup', () => {
       status: 200,
       body: { content: [{ carrier: { legalName: 'Test Cache Co', dotNumber: TEST_DOT + '5', brokerAuthorityStatus: 'A', commonAuthorityStatus: 'N', contractAuthorityStatus: 'N', allowedToOperate: 'Y' } }] },
     });
+    responseQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } }); // GET /operation-classification sub-resource
+
     const first = await lookupAuthority({ mcNumber: TEST_MC + 'CACHE', country: 'US' });
     expect(first.status).toBe('resolved');
 
@@ -207,5 +215,37 @@ describe('authority-lookup', () => {
       [],
     );
     expect(audit.rows.some((r) => r.response?.reason === 'not_implemented')).toBe(true);
+  });
+});
+
+describe('operationClassFromDescriptions (E2-01 — live-FMCSA shape regression)', () => {
+  // Regression for the 2026-10-08 finding: the old code read
+  // `carrier.operatingStatus`, a field live QCMobile never returns, so
+  // operationClassification was permanently 'unknown' and classifyLoadSource()
+  // could never reach shipper_direct or carrier_reposted via FMCSA. These are
+  // the exact operationClassDesc strings the live API returns.
+  it('maps a pure private fleet to private (the shipper_direct accept path)', () => {
+    expect(operationClassFromDescriptions(['Private Property'])).toBe('private');
+    expect(operationClassFromDescriptions(['Private Passenger, Business'])).toBe('private');
+  });
+
+  it('maps an authorized/exempt for-hire carrier to for_hire', () => {
+    expect(operationClassFromDescriptions(['Authorized For Hire'])).toBe('for_hire');
+    expect(operationClassFromDescriptions(['Exempt For Hire'])).toBe('for_hire');
+  });
+
+  it('lets for_hire win over private when an entity holds both (Werner Enterprises, DOT 53467)', () => {
+    // Verified live: Werner returns Authorized For Hire + Private Property +
+    // Private Passenger. Anything able to haul for others must not be
+    // auto-accepted as shipper-direct — it goes to carrier_reposted review.
+    expect(
+      operationClassFromDescriptions(['Authorized For Hire', 'Private Property', 'Private Passenger, Business']),
+    ).toBe('for_hire');
+  });
+
+  it('returns unknown (→ human review, never accept) on an empty or unrecognised set', () => {
+    expect(operationClassFromDescriptions([])).toBe('unknown');
+    expect(operationClassFromDescriptions(['U.S. Mail', 'Federal Government'])).toBe('unknown');
+    expect(operationClassFromDescriptions([null, undefined])).toBe('unknown');
   });
 });
