@@ -30,6 +30,8 @@ describe('GET /api/contract-intake/pending', () => {
   // exceptions.id is a uuid — never coerce it to a number.
   let exceptionId: string | null = null;
   let title: string | null = null;
+  // Second fixture, used only by the LEFT JOIN case.
+  let nullEmailExceptionId: string | null = null;
 
   beforeEach(async () => {
     tenantId = await getMyraTenantId();
@@ -71,8 +73,10 @@ describe('GET /api/contract-intake/pending', () => {
   });
 
   afterEach(async () => {
+    if (nullEmailExceptionId) await db.query(`DELETE FROM exceptions WHERE id = $1`, [nullEmailExceptionId]);
     if (exceptionId) await db.query(`DELETE FROM exceptions WHERE id = $1`, [exceptionId]);
     if (inboundEmailId) await db.query(`DELETE FROM inbound_emails WHERE id = $1`, [inboundEmailId]);
+    nullEmailExceptionId = null;
     exceptionId = null;
     inboundEmailId = null;
     tenantId = null;
@@ -132,5 +136,42 @@ describe('GET /api/contract-intake/pending', () => {
   it('rejects an unauthenticated caller', async () => {
     const res = await GET(new NextRequest('http://localhost/api/contract-intake/pending'));
     expect(res.status).toBe(401);
+  });
+
+  // The LEFT JOIN is a deliberate departure from the plan's INNER JOIN,
+  // specifically so a contract_intake exception with no inbound_email_id can
+  // never be hidden forever from the list whose whole job is visibility.
+  // Without this case, reverting to an INNER JOIN keeps the suite green.
+  it('still lists a contract_intake exception that has no inbound_email_id', async () => {
+    const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const orphanTitle = `T-30 test tender without email ${unique}`;
+    const wrote = await bridgeToExceptions({
+      tenantId: tenantId!,
+      sourceModule: 'contract_intake',
+      exceptionType: 'tender_pending_approval',
+      title: orphanTitle,
+      description: 'Signal with no inbound_emails row behind it',
+      context: {},
+      pipelineLoadId: null,
+      loadId: null,
+      carrierId: null,
+      inboundEmailId: null,
+    });
+    expect(wrote).toBe(true);
+    const orphan = await db.query<{ id: string }>(
+      `SELECT id FROM exceptions WHERE title = $1 AND inbound_email_id IS NULL`,
+      [orphanTitle],
+    );
+    expect(orphan.rows).toHaveLength(1);
+    nullEmailExceptionId = orphan.rows[0].id;
+
+    const res = await GET(requestWithToken(tokenFor(tenantId!)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const row = body.pending.find((p: { id: string }) => p.id === nullEmailExceptionId);
+    expect(row).toBeDefined();
+    expect(row.inbound_email_id).toBeNull();
+    expect(row.from_address).toBeNull();
+    expect(row.intake_status).toBeNull();
   });
 });

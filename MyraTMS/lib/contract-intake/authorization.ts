@@ -2,7 +2,21 @@
 // T-30 §3.2 — authorization is checked BEFORE any parsing, and is a
 // separate question from T-26's document-to-load matching. An email from
 // an address not on this whitelist is never parsed for injection purposes.
+//
+// This lookup is deliberately GLOBAL (no tenant filter) and cannot be
+// otherwise: the mailbox is a single shared inbox, so an inbound email
+// carries no tenant context at all — the sender's address IS the tenant
+// discriminator. What makes that safe is migration 059's
+// uq_contract_shipper_auth_active_email, which enforces one ACTIVE
+// authorization per email address and so guarantees at most one tenant can
+// claim a sender. Should that invariant ever be violated anyway (an index
+// dropped, or a branch where 059 predates the index), this function fails
+// CLOSED rather than guessing: a guessed tenant would silently decide tenant
+// attribution, which margin floor applies, and which tenant receives the
+// pipeline_loads row. Returning null instead routes the email to the
+// unauthorized-sender manual-review exception, which is strictly safer.
 import { db } from '@/lib/pipeline/db-adapter';
+import { logger } from '@/lib/logger';
 
 export interface ContractShipperAuthorization {
   id: number;
@@ -12,20 +26,34 @@ export interface ContractShipperAuthorization {
 }
 
 export async function checkSenderAuthorization(fromAddress: string): Promise<ContractShipperAuthorization | null> {
+  const email = fromAddress.toLowerCase();
   const { rows } = await db.query<{
     id: number;
     tenant_id: number;
     shipper_email: string;
     margin_floor_override_amount: string | null;
   }>(
+    // lower(shipper_email) matches the unique index above, so a row stored
+    // mixed-case by direct SQL is still found rather than being
+    // unique-blocked yet unreadable.
     `SELECT id, tenant_id, shipper_email, margin_floor_override_amount
        FROM contract_shipper_authorizations
-      WHERE shipper_email = $1 AND is_active = true
-      LIMIT 1`,
-    [fromAddress.toLowerCase()],
+      WHERE lower(shipper_email) = $1 AND is_active = true`,
+    [email],
   );
+
+  if (rows.length === 0) return null;
+
+  if (rows.length > 1) {
+    logger.warn('[contract-intake/authorization] ambiguous sender — more than one tenant holds an active authorization; failing closed', {
+      fromAddress: email,
+      tenantIds: rows.map((r) => Number(r.tenant_id)),
+      authorizationIds: rows.map((r) => Number(r.id)),
+    });
+    return null;
+  }
+
   const row = rows[0];
-  if (!row) return null;
   return {
     id: row.id,
     tenantId: row.tenant_id,

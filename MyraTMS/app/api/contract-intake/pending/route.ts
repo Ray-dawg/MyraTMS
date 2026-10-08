@@ -24,6 +24,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const ctx = requireTenantContext(req);
+    // A token carrying no usable tenant claim must not reach withTenant(),
+    // whose own guard throws and would surface as a generic 500.
+    if (!Number.isInteger(ctx.tenantId) || ctx.tenantId <= 0) {
+      return NextResponse.json({ error: 'Forbidden — no tenant context' }, { status: 403 });
+    }
     const pending = await withTenant(ctx.tenantId, async (client) => {
       const { rows } = await client.query(
         `SELECT e.id, e.type, e.severity, e.title, e.detail, e.status,
@@ -37,7 +42,8 @@ export async function GET(req: NextRequest) {
           WHERE e.tenant_id = $1
             AND e.source_module = 'contract_intake'
             AND e.status IN ('active', 'acknowledged')
-          ORDER BY e.created_at DESC`,
+          ORDER BY e.created_at DESC
+          LIMIT 500`,
         [ctx.tenantId],
       );
       return rows;

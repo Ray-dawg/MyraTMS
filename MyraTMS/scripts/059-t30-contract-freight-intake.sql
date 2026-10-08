@@ -31,6 +31,24 @@ CREATE INDEX IF NOT EXISTS idx_contract_shipper_auth_email
     ON contract_shipper_authorizations(shipper_email)
     WHERE is_active = true;
 
+-- The table's own UNIQUE (tenant_id, shipper_email) expresses only the WEAKER,
+-- per-tenant version of the invariant this feature actually needs. The mailbox
+-- is a single shared inbox, so an inbound email carries no tenant context at
+-- all -- the sender's address IS the tenant discriminator, which is why
+-- checkSenderAuthorization() has to query globally rather than per-tenant.
+-- With only the per-tenant constraint, two tenants could each hold an ACTIVE
+-- authorization for the same address and the reader would silently pick one:
+-- that pick decides tenant attribution, which margin floor applies, and (after
+-- the approve branch) which tenant receives the pipeline_loads row -- and it
+-- can flip between polls. This partial unique index is what makes a global
+-- reader safe: it enforces the real invariant, "one shipper email maps to at
+-- most one tenant", while still permitting any number of DEACTIVATED
+-- historical rows per address. lower(shipper_email) because the read path
+-- matches case-insensitively.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_shipper_auth_active_email
+    ON contract_shipper_authorizations (lower(shipper_email))
+    WHERE is_active = true;
+
 -- Additive to the REAL inbound_emails table (scripts/046-e2-04-sellside-loop-schema.sql),
 -- not the spec's nonexistent inbound_document_intake (design §2.1).
 ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS intake_type VARCHAR(30);
