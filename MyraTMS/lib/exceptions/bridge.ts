@@ -19,7 +19,8 @@ export interface SourceSignal {
   sourceModule: 'authority_shadow' | 'lifecycle_late' | 'carrier_risk' | 'stage_escalated' | 'dead_letter'
     | 'payer_risk' | 'transaction_halt' // T-25 extension
     | 'document_terms_mismatch' // T-26 extension
-    | 'tenant_onboarding'; // T-28 extension — no other line in this file changes
+    | 'tenant_onboarding' // T-28 extension
+    | 'contract_intake'; // T-30 extension
   exceptionType: string;
   title: string;
   description: string;
@@ -27,6 +28,7 @@ export interface SourceSignal {
   pipelineLoadId: number | null;
   loadId: string | null;
   carrierId: string | null;
+  inboundEmailId?: number | null; // T-30 — links back to the inbound_emails row that produced this signal
 }
 
 export async function bridgeToExceptions(source: SourceSignal): Promise<boolean> {
@@ -63,12 +65,12 @@ export async function bridgeToExceptions(source: SourceSignal): Promise<boolean>
     await client.query(
       `INSERT INTO exceptions (
          load_id, carrier_id, type, severity, title, detail,
-         tenant_id, pipeline_load_id, source_module, suggested_action, sla_due_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW() + ($11 || ' minutes')::interval)`,
+         tenant_id, pipeline_load_id, source_module, suggested_action, sla_due_at, inbound_email_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW() + ($11 || ' minutes')::interval, $12)`,
       [
         source.loadId, source.carrierId, source.exceptionType, rule.severity,
         source.title, source.description, source.tenantId, source.pipelineLoadId,
-        source.sourceModule, rule.suggestedAction, rule.slaMinutes,
+        source.sourceModule, rule.suggestedAction, rule.slaMinutes, source.inboundEmailId ?? null,
       ],
     );
     return true;
