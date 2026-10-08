@@ -170,4 +170,159 @@ scripts produces the same shape as production.
 
 ---
 
+## Entry 2 — 2026-10-08 — Phase M3 unblock + RLS Day 1
+
+Branch: `br-rough-forest-aif4a3vf` (production). Executed against the two
+blockers recorded in RLS_ROLLOUT.md §0 on 2026-10-07, then Day 1 of the §1
+schedule. Operator approval, verbatim: "I Approve creating myra_app and
+rotating DATABASE_URL (then 061, then 060, then Day 1)." and "I Approve
+cleaning the leftover test rows in production."
+
+Order was fixed by that approval and followed exactly. Every step was first
+rehearsed on the `dev-tests` branch (`br-damp-river-ai21gg86`).
+
+### Pre-flight LSN / PIT marker
+
+Taken immediately before the `ENABLE ROW LEVEL SECURITY` statement:
+
+| Field | Value |
+|---|---|
+| `now() AT TIME ZONE 'UTC'` | `2026-10-08T22:07:25.877Z` |
+| `pg_current_wal_lsn()` | `0/BB35538` |
+| `current_database()` | `neondb` |
+
+### Step 1 — Create role `myra_app`
+
+```sql
+CREATE ROLE myra_app LOGIN PASSWORD '<redacted>'
+  NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+```
+
+Run as `neondb_owner`. Verified from a fresh connection as the new role:
+`current_user = myra_app`, `rolbypassrls = false`, `rolsuper = false`,
+`fn_myra_tenant_id() = 2`, and DDL denied
+(`permission denied for schema public`).
+
+The password exists only in the gitignored
+`MyraTMS/.env.myra_app.production.local` (confirmed with `git check-ignore`)
+and in the Vercel production env. It is not in git and was never printed
+unmasked.
+
+### Step 2 — Migration 061 (`scripts/061_app_role_grants.sql`)
+
+Applied as `neondb_owner`. Post-apply grant probe as `myra_app`:
+
+- `SELECT 1` succeeded on all 20 core tables probed (loads, shippers,
+  carriers, users, tenant_users, tenants, documents, invoices, drivers,
+  notifications, activity_notes, tenant_subscriptions, tenant_config,
+  settings, workflows, quotes, pipeline_loads, events, exceptions,
+  tracking_tokens).
+- Zero `public` tables/views lack SELECT for `myra_app`.
+- `has_table_privilege('loads','INSERT') = true`.
+
+### Step 3 — Rotate Vercel production `DATABASE_URL`
+
+Rotated to the `myra_app` connection string and redeployed; the deployment
+built and aliased to `myratms.vercel.app`. Confirmed by `vercel env pull`.
+
+Two execution notes worth keeping:
+
+1. `vercel env add` wrote an **empty value** twice when the value was piped to
+   stdin (once from PowerShell, once from Bash `printf`). The working form was
+   `vercel env add DATABASE_URL production --value "$URL" --no-sensitive`.
+2. The **pre**-rotation value contained a trailing newline — the same defect
+   class CLAUDE.md warns about for kill switches. The new value does not.
+
+`.vercel/project.json` could not be read from inside the repo (OneDrive
+placeholder: "The cloud file provider is not running"). Worked around by
+linking a temp dir with
+`vercel link --yes --project myratms --scope patrices-projects-85c0644c`.
+
+### Step 4 — Migration 060 (`scripts/060_harden_rls_policies.sql`)
+
+Applied as `neondb_owner`. Verified `unhardened: 0` of `total_policies: 30`;
+`rls_enabled_tables: 0` at that point. Policies on `tenant_audit_log` after
+060:
+
+```
+[ALL] service_admin_bypass  USING/CHECK: current_setting('app.role', true) = 'service_admin'
+[ALL] tenant_isolation      USING/CHECK: tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::bigint
+```
+
+### Step 5 — Leftover test-row cleanup (approved separately)
+
+The pre-guard test suite had written rows into production. Deleted in one
+transaction, as `neondb_owner`:
+
+| Table | Rows | How |
+|---|---|---|
+| `exceptions` | 16 | explicit delete (FK is restrict-by-default) |
+| `pipeline_loads` | 6 | the `TEST-CASCADE-DISPATCH-*`, `TEST-DISP-*`, `TEST-IDEMP-*`, `TEST-PROSPECT-*` rows (ids 695, 696, 697, 1243, 1244, 1245) |
+| `events` | 18 | cascaded automatically (`ON DELETE CASCADE`) |
+| `payer_registry` | 1 | id 33, `ACME CO` |
+
+Audited as `tenant_audit_log` id 345, `event_type = 'test_row_cleanup'`,
+with the approval, the reason, and the per-table counts in the payload.
+Post-check: 0 matching `pipeline_loads`, 0 `payer_registry` id 33.
+
+**Root cause of the earlier FK failure, worth recording** — this is the bug
+CLAUDE.md attributes to `scripts/sprint6-shadow/06-cleanup.ts`:
+`exceptions.pipeline_load_id` is `integer` and references
+`pipeline_loads(id)`, the integer surrogate PK — **not** `pipeline_loads.load_id`,
+which is the TEXT business key. A dependency census keyed on the `TEST-…`
+load_id strings therefore returns 0 for every FK table, and the delete then
+fails on `exceptions_pipeline_load_id_fkey`. Census by PK found the 16 real
+dependents. 15 tables carry a `pipeline_load_id` FK plus
+`inbound_emails.matched_load_id`; seven are `ON DELETE CASCADE` and eight are
+restrict-by-default.
+
+### Step 6 — RLS Day 1: `tenant_audit_log`
+
+```sql
+BEGIN;
+ALTER TABLE tenant_audit_log ENABLE ROW LEVEL SECURITY;
+SELECT relname, relrowsecurity FROM pg_class WHERE relname = 'tenant_audit_log';
+-- relrowsecurity = true, verified in-transaction
+COMMIT;
+```
+
+Smoke test as `myra_app` (all probes in rolled-back transactions):
+
+| Probe | Result |
+|---|---|
+| no context | 0 rows — fail closed ✅ |
+| Myra tenant context | 9 rows ✅ |
+| wrong tenant (999999) | 0 rows ✅ |
+| `app.role = 'service_admin'` | 344 rows ✅ |
+| `service_admin` INSERT | allowed ✅ |
+| per-tenant INSERT, own tenant | allowed ✅ |
+| cross-tenant INSERT | **DENIED** ✅ |
+
+`GET /api/health` → 200, `db.ok = true` (69 ms), `redis.ok = true`.
+
+### Final state at end of Entry 2
+
+| Phase | State |
+|---|---|
+| M1 / M2 | ✅ unchanged from Entry 1 |
+| Migration 060 | ✅ APPLIED to production |
+| Migration 061 | ✅ APPLIED to production |
+| App DB role | ✅ Vercel on `myra_app` (NOBYPASSRLS) · ⬜ **Railway still on `neondb_owner`** |
+| M3 — RLS ENABLED per batch | 🟡 **Day 1 of 12 done** (`tenant_audit_log`); Days 2+ pending |
+| M4 / M5 | ⬜ NOT STARTED |
+
+### Open follow-ups raised by this execution
+
+1. **Rotate `DATABASE_URL` on Railway (`myratms-workers`) to `myra_app`.** Until
+   then every worker path keeps BYPASSRLS and RLS is a no-op for it. The
+   Railway CLI was unauthenticated in the executing session
+   (`railway whoami` → "Unauthorized"), so this is the operator's to do.
+2. The §3 four-hour monitor for Day 1 was not run to completion in-session.
+3. `TEST_RLS_ENABLED=1` in the isolation suite is table-agnostic and cannot
+   gate a partial rollout — see RLS_ROLLOUT.md §0a.
+4. Migrations continue to run as `neondb_owner` by design; only the app
+   connection moved to `myra_app`.
+
+---
+
 <!-- Append future entries below this line. Never edit closed entries. -->
