@@ -55,7 +55,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  let body: { loads?: Array<Partial<RawLoad>>; source?: string };
+  let body: {
+    loads?: Array<Partial<RawLoad> & { shipper_direct_attestation?: string }>;
+    source?: string;
+    shipper_direct_attestation?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -80,10 +84,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // E2-01 §4.8 — manual-import attestation. Required only while the
+  // shipper-direct gate is enabled; optional otherwise so the shadow-drain
+  // scripts keep working unchanged.
+  const ATTESTATION_VALUES = new Set(['yes', 'no', 'unknown']);
+  const gateOn = (process.env.SHIPPER_DIRECT_GATE_ENABLED ?? '').trim().toLowerCase() === 'true';
+  const fileAttestation = body.shipper_direct_attestation;
+  if (fileAttestation !== undefined && !ATTESTATION_VALUES.has(String(fileAttestation))) {
+    return NextResponse.json({ error: 'invalid_attestation', allowed: [...ATTESTATION_VALUES] }, { status: 400 });
+  }
+  const everyRowAttested = body.loads.every((l) => ATTESTATION_VALUES.has(String(l.shipper_direct_attestation ?? '')));
+  if (gateOn && fileAttestation === undefined && !everyRowAttested) {
+    return NextResponse.json(
+      { error: 'attestation_required', hint: "Set shipper_direct_attestation: 'yes' | 'no' | 'unknown' at file level or on every row (E2-01 §4.8)" },
+      { status: 400 },
+    );
+  }
+  if (fileAttestation === 'yes') {
+    logger.info('[pipeline-import] attestation', {
+      sentence: 'I confirm these loads were tendered to Myra directly by the shipper or under an executed co-broker agreement.',
+      attestedBy: 'pipeline-import-token',
+    });
+  }
+
   const source = (body.source ?? 'manual') as RawLoad['loadBoardSource'];
 
   try {
-    const result = await getService().ingestRawLoads(body.loads, source);
+    const result = await getService().ingestRawLoads(body.loads, source, {
+      attestation: fileAttestation as 'yes' | 'no' | 'unknown' | undefined,
+      attestedBy: 'pipeline-import-token',
+    });
 
     logger.info('[pipeline-import] processed', {
       source,

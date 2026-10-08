@@ -56,6 +56,8 @@ export interface QualifyJobPayload extends BaseJobPayload {
   posterMcNumber?: string | null;
   posterDotNumber?: string | null;
   isManualImport?: boolean;
+  // E2-01 §4.8 — manual-import attestation, set by the scanner on CSV rows.
+  attestation?: 'yes' | 'no' | 'unknown' | null;
 }
 
 /**

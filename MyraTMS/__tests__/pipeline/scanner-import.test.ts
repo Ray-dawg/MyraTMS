@@ -148,4 +148,24 @@ describe('ScannerService.ingestRawLoads', () => {
     expect(job?.data.posterMcNumber).toBe('123456');
     expect(job?.data.isManualImport).toBe(true);
   });
+
+  it('writes attestation columns and bumps created_by to scanner-csv-v2', async () => {
+    const loadId = `${RUN_ID}-ATTEST`;
+    const res = await service.ingestRawLoads([{
+      loadId, originCity: 'Sudbury', originState: 'ON', originCountry: 'CA',
+      destinationCity: 'Toronto', destinationState: 'ON', destinationCountry: 'CA',
+      pickupDate: new Date(Date.now() + 3 * 86400_000).toISOString(),
+    }], 'manual', { attestation: 'yes', attestedBy: 'test' });
+    expect(res.inserted).toBe(1);
+    insertedIds.push(res.insertedIds[0]);
+    const row = await db.query(
+      `SELECT shipper_direct_attestation, attested_by, attested_at, created_by FROM pipeline_loads WHERE id = $1`,
+      [res.insertedIds[0]]);
+    expect(row.rows[0].shipper_direct_attestation).toBe('yes');
+    expect(row.rows[0].attested_by).toBe('test');
+    expect(row.rows[0].attested_at).not.toBeNull();
+    expect(row.rows[0].created_by).toBe('scanner-csv-v2');
+    const jobs = await queue.getJobs(['waiting', 'prioritized']);
+    expect(jobs.find((j) => j.data.pipelineLoadId === res.insertedIds[0])?.data.attestation).toBe('yes');
+  });
 });
