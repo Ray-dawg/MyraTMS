@@ -55,4 +55,13 @@ ALTER TABLE pipeline_loads ADD COLUMN IF NOT EXISTS booked_via VARCHAR(20);
 -- exists yet, and there's no TMS loads/carriers row either).
 ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS inbound_email_id INTEGER REFERENCES inbound_emails(id);
 
+-- bridgeToExceptions() drops any signal with no matching active rule in
+-- exception_classification_rules, so contract_intake needs one or every
+-- tender signal is silently lost. '{}' matches every context (same as
+-- tenant_onboarding in 058). Tenant resolved via fn_myra_tenant_id(), never
+-- a literal; exception_classification_rules.tenant_id is INTEGER.
+INSERT INTO exception_classification_rules (tenant_id, source_module, condition, severity, sla_minutes, suggested_action, version)
+VALUES (fn_myra_tenant_id()::integer, 'contract_intake', '{}'::jsonb, 'medium', 1440, 'Review the parsed freight tender and approve (inject into pipeline) or reject', 1)
+ON CONFLICT (tenant_id, source_module, version) DO NOTHING;
+
 COMMIT;
