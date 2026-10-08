@@ -91,7 +91,7 @@ Database migrations are manual SQL scripts in `MyraTMS/scripts/` — run directl
 - `TMS_API_URL` — base URL the Dispatcher uses to call existing TMS routes with a service token
 
 **Kill switches (exact-match, `.trim().toLowerCase()`; a trailing newline in a Vercel/Railway value has silently defeated one before):**
-- `PIPELINE_ENABLED` (master), `SCANNER_ENABLED`, `MAX_CONCURRENT_CALLS` (`0` = shadow mode), `CARRIER_CALLS_ENABLED`, `CARRIER_AUTO_ASSIGN_ENABLED`, `SHIPPER_CONFIRMATION_ENABLED`, `SHIPPER_DIRECT_GATE_ENABLED`, `INBOUND_EMAIL_POLLING_ENABLED`, `SCRAPER_ENABLED` (scraper side). `AUTO_BOOK_PROFIT_THRESHOLD` is **retired** (T-19) — the margin floor lives in `lib/tenants/margin-floor.ts`.
+- `PIPELINE_ENABLED` (master), `SCANNER_ENABLED`, `MAX_CONCURRENT_CALLS` (`0` = shadow mode), `CARRIER_CALLS_ENABLED`, `CARRIER_AUTO_ASSIGN_ENABLED`, `SHIPPER_CONFIRMATION_ENABLED`, `SHIPPER_DIRECT_GATE_ENABLED` (+ `SHIPPER_DIRECT_GATE_MODE` `shadow`|`enforce`, `SHIPPER_DIRECT_GATE_ENFORCED_AT` ISO timestamp — E2-01), `INBOUND_EMAIL_POLLING_ENABLED`, `SCRAPER_ENABLED` (scraper side). `AUTO_BOOK_PROFIT_THRESHOLD` is **retired** (T-19) — the margin floor lives in `lib/tenants/margin-floor.ts`.
 
 **Required (DApp / One_pager):** `NEXT_PUBLIC_API_URL` — MyraTMS API base URL
 
@@ -102,6 +102,8 @@ Database migrations are manual SQL scripts in `MyraTMS/scripts/` — run directl
 - `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_DRIVER_APP_URL`, `NEXT_PUBLIC_TRACKING_URL` — Production URLs for CORS + outbound links
 - `DAT_API_KEY`, `TRUCKSTOP_API_KEY` — Load board integration (clients are still stubs)
 - `FMCSA_API_KEY` — Carrier compliance verification
+- `FMCSA_QC_WEBKEY` — E2-01 shipper-direct gate: FMCSA QCMobile lookups on poster-registry misses (missing key → miss goes to human review, fail closed)
+- `DAT_SEL_CELL_MC`, `DAT_SEL_CELL_DOT` — scraper-side DAT selectors for the poster MC/DOT cells (E2-01)
 - `SAMSARA_API_KEY`, `MOTIVE_API_KEY` — GPS tracking positions
 
 ## Architecture

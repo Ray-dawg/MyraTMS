@@ -1,11 +1,16 @@
 /**
  * Cron: pipeline-scan (Sprint 6.5 — official-API ingest dispatcher)
  *
- * Fires every minute. Reads loadboard_sources for all rows in
- * ingest_method='api' state, throttles per-source by poll_interval_minutes,
- * and dispatches each due source to ScannerService.pollSourceViaAPI().
+ * Fires once a day at 10:00 UTC (vercel.json `0 10 * * *`). The original
+ * Sprint 5 schedule was every minute; it was reduced to daily at the
+ * 2026-05-27 production deploy (commit eee874b) because the Vercel plan
+ * allows one run per day per cron. Per-source throttling by
+ * poll_interval_minutes still applies, so a tighter Vercel schedule can be
+ * restored without code changes once the plan allows it. Reads
+ * loadboard_sources for all rows in ingest_method='api' state and dispatches
+ * each due source to ScannerService.pollSourceViaAPI().
  *
- * The Vercel cron schedule is in vercel.json (`* * * * *`). All four
+ * All four
  * sources (DAT/Truckstop/123LB/Loadlink) currently default to non-'api'
  * states post-migration 026 — this route is therefore a no-work heartbeat
  * until the operator flips a source to 'api' (via the admin endpoint or

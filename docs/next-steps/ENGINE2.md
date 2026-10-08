@@ -27,6 +27,20 @@ This is the single thing every other stream is waiting on. The Engine 3 handoff 
 
 **Then, second half of the session or next session:** shadow-drain the sell-side loop against the loads Pilot 1 booked — `SHIPPER_CONFIRMATION_ENABLED=true` with real shipper emails, `CARRIER_CALLS_ENABLED` still false — so the confirmation PDF, One_pager confirm mode, and nudge/escalate timers are exercised. This needs IMAP credentials provisioned and `run-imap-poller.ts` deployed as a third Railway service for the signed-rate-con return path.
 
+## Shipper-direct gate flip (E2-01 enforcement — built 2026-10-08, flag off)
+
+The double-brokering gate is code-complete (see the tracker Change Log, 2026-10-08). It ships with `SHIPPER_DIRECT_GATE_ENABLED=false` and `SHIPPER_DIRECT_GATE_MODE=shadow`, so nothing blocks until this checklist is walked. It can run before or in parallel with Pilot 1; step 6 should land **before** Phase 6B so the ten consenting shippers' loads are classified.
+
+1. Register an FMCSA QCMobile webKey; set `FMCSA_QC_WEBKEY` on Railway **and** Vercel. Without it every registry miss goes to human review (fail closed) and the queue will be unworkable.
+2. Seed the registry: `pnpm tsx --env-file=.env.local scripts/e2_seed_poster_registry.ts <patrice-labels.csv>` (205 shipper-list rows + mines rows + broker list + Patrice's labels; PRD §4.13 criterion 5).
+3. Backfill history in shadow: `pnpm tsx --env-file=.env.local scripts/e2_backfill_load_source.ts`.
+4. Calibrate: `pnpm tsx --env-file=.env.local scripts/e2_source_calibration_report.ts` → **must exit 0**. Label `unresolvedTopPosters`, re-seed, re-run until it does. Attach the final JSON to the PR (criterion 4).
+5. Set `SHIPPER_DIRECT_GATE_ENABLED=true`, `SHIPPER_DIRECT_GATE_MODE=shadow` on Railway. Watch 24 h of real ingest: distribution of `load_source_class`, registry hit rate (re-run the report).
+6. Flip: set `SHIPPER_DIRECT_GATE_ENFORCED_AT=<now ISO>`, then `SHIPPER_DIRECT_GATE_MODE=enforce` on Railway (Qualifier) first, then Vercel (import route). Restart the worker host. Before this, declare `load_source_class`, `poster_legal_name`, `co_broker_counterparty` on the Retell shipper agents (dynamic variables 63 → 66).
+7. Watch the Alert Center for `load_source_review` rows; resolve each via `POST /api/pipeline/loads/:id/resolve-source` (`entity_class`, `applies_to_poster`, `note`). Unresolved reviews auto-expire inside the 4 h pickup window (daily `pipeline-health` cron). Count per day; if >20/day after day 3, tighten `STRONG_BROKER_TOKENS` in `lib/pipeline/load-source-classifier.ts`.
+
+Any `load_source_assertion` exception (critical) means a load reached the Compiler or Dispatcher without a class after the enforce timestamp. Treat it as a pipeline bug, not an operator task.
+
 ## What this unlocks
 
 - Engine 3 handoff gate (master PRD §9) and Phase 2 exit measurement.

@@ -186,7 +186,11 @@ All gated by `CRON_SECRET` and `PIPELINE_ENABLED=true`.
 | `CARRIER_CALLS_ENABLED` | `false` | E2-03 M2 carrier cascade dials |
 | `CARRIER_AUTO_ASSIGN_ENABLED` | `false` | E2-03 M3 final TMS assign |
 | `SHIPPER_CONFIRMATION_ENABLED` | `false` | E2-04 M2 shipper confirmation emails |
-| `SHIPPER_DIRECT_GATE_ENABLED` | `false` | E2-01 shipper-direct hard gate |
+| `SHIPPER_DIRECT_GATE_ENABLED` | `false` | E2-01 shipper-direct hard gate (classification runs when `true`) |
+| `SHIPPER_DIRECT_GATE_MODE` | `shadow` | E2-01: `shadow` (classify + persist, never block) or `enforce` (Qualifier F1 rejects / routes to review; Compiler + Dispatcher assert `load_source_class`). Only read when `SHIPPER_DIRECT_GATE_ENABLED=true` |
+| `SHIPPER_DIRECT_GATE_ENFORCED_AT` | — | E2-01: ISO timestamp the operator writes at the moment `MODE=enforce` goes live; M2 assertions tolerate `NULL` class on rows created before it |
+| `FMCSA_QC_WEBKEY` | — | E2-01: FMCSA QCMobile key used on registry misses. Missing → every miss goes to review (fail closed) |
+| `DAT_SEL_CELL_MC` / `DAT_SEL_CELL_DOT` (scraper side) | `[data-field="mcNumber"]` / `[data-field="dotNumber"]` | E2-01: DAT result-row selectors for the poster MC / DOT cells |
 | `INBOUND_EMAIL_POLLING_ENABLED` | `false` | E2-04 M4 IMAP poller |
 | `SCRAPER_ENABLED` (scraper side) | `false` | Railway scraper |
 | `AUTO_BOOK_PROFIT_THRESHOLD` | — | **Retired by T-19**; margin floor is `lib/tenants/margin-floor.ts`. Preflight scripts only report it. |
