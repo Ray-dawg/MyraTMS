@@ -27,6 +27,8 @@ This is the single thing every other stream is waiting on. The Engine 3 handoff 
 
 **Then, second half of the session or next session:** shadow-drain the sell-side loop against the loads Pilot 1 booked — `SHIPPER_CONFIRMATION_ENABLED=true` with real shipper emails, `CARRIER_CALLS_ENABLED` still false — so the confirmation PDF, One_pager confirm mode, and nudge/escalate timers are exercised. This needs IMAP credentials provisioned and `run-imap-poller.ts` deployed as a third Railway service for the signed-rate-con return path.
 
+> **Session mega-prompts:** each go-live gate has a paste-ready session prompt under `docs/next-steps/engine2-gate-prompts/` (GATE-0 security/env → GATE-1 registry calibration → GATE-2 enforce flip → GATE-3 Pilot 1 live calls → GATE-4 ramp/sell-side/middleware/tenanting). Run them in order; each checks its predecessor.
+
 ## Shipper-direct gate flip (E2-01 enforcement — built 2026-10-08, flag off)
 
 The double-brokering gate is code-complete (see the tracker Change Log, 2026-10-08). It ships with `SHIPPER_DIRECT_GATE_ENABLED=false` and `SHIPPER_DIRECT_GATE_MODE=shadow`, so nothing blocks until this checklist is walked. It can run before or in parallel with Pilot 1; step 6 should land **before** Phase 6B so the ten consenting shippers' loads are classified.
