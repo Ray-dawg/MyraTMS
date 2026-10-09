@@ -10,6 +10,17 @@ BEGIN;
 -- margin_floor_override_amount is a DOLLAR amount (same unit as
 -- resolveMargin()'s minMargin), not a percentage — the spec's own
 -- _pct name and NUMERIC(5,2) width would misrepresent that.
+-- OPEN DESIGN QUESTION, OWNED BY THE USER (deliberately unresolved here): is a
+-- stored $0 margin floor meaningful?
+--   (a) Yes, a deliberate operator choice: the column stays permissive, the
+--       `??` in lib/contract-intake/validate-rate.ts stays, and the API
+--       refuses 0 only so an empty form field cannot silently disable the floor.
+--   (b) No, never meaningful: would need
+--       CHECK (margin_floor_override_amount IS NULL OR margin_floor_override_amount > 0)
+--       PLUS changes to validate-rate.ts and its passing test
+--       validate-rate.test.ts ("accepts a tender with an explicit override floor of $0").
+-- Do not add the CHECK on its own: that half-implements (b) and leaves a green
+-- test describing a state the database could no longer hold.
 -- tenant_id is BIGINT, not INTEGER — tenants.id is BIGINT and every other
 -- tenant-scoped table in this schema (37+, including exceptions) agrees;
 -- INTEGER here was a defect the brief copied verbatim from the spec without
@@ -29,6 +40,24 @@ CREATE TABLE IF NOT EXISTS contract_shipper_authorizations (
 
 CREATE INDEX IF NOT EXISTS idx_contract_shipper_auth_email
     ON contract_shipper_authorizations(shipper_email)
+    WHERE is_active = true;
+
+-- The table's own UNIQUE (tenant_id, shipper_email) expresses only the WEAKER,
+-- per-tenant version of the invariant this feature actually needs. The mailbox
+-- is a single shared inbox, so an inbound email carries no tenant context at
+-- all -- the sender's address IS the tenant discriminator, which is why
+-- checkSenderAuthorization() has to query globally rather than per-tenant.
+-- With only the per-tenant constraint, two tenants could each hold an ACTIVE
+-- authorization for the same address and the reader would silently pick one:
+-- that pick decides tenant attribution, which margin floor applies, and (after
+-- the approve branch) which tenant receives the pipeline_loads row -- and it
+-- can flip between polls. This partial unique index is what makes a global
+-- reader safe: it enforces the real invariant, "one shipper email maps to at
+-- most one tenant", while still permitting any number of DEACTIVATED
+-- historical rows per address. lower(shipper_email) because the read path
+-- matches case-insensitively.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_shipper_auth_active_email
+    ON contract_shipper_authorizations (lower(shipper_email))
     WHERE is_active = true;
 
 -- Additive to the REAL inbound_emails table (scripts/046-e2-04-sellside-loop-schema.sql),
@@ -54,5 +83,15 @@ ALTER TABLE pipeline_loads ADD COLUMN IF NOT EXISTS booked_via VARCHAR(20);
 -- carrier_id link fields fit a freight-tender signal (no pipeline_loads row
 -- exists yet, and there's no TMS loads/carriers row either).
 ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS inbound_email_id INTEGER REFERENCES inbound_emails(id);
+
+-- bridgeToExceptions() drops any signal with no matching active rule in
+-- exception_classification_rules, so contract_intake needs one or every
+-- tender signal is silently lost. '{}' matches every context (same as
+-- tenant_onboarding in 058). Tenant resolved via fn_myra_tenant_id(), never
+-- a literal; exception_classification_rules.tenant_id is INTEGER.
+-- NOTE: a separate (higher-severity) rule for unauthorized senders is deferred to T-30b.
+INSERT INTO exception_classification_rules (tenant_id, source_module, condition, severity, sla_minutes, suggested_action, version)
+VALUES (fn_myra_tenant_id()::integer, 'contract_intake', '{}'::jsonb, 'medium', 1440, 'Review the contract-intake item: approve or reject a parsed tender, or confirm an unauthorized sender is not an expected shipper', 1)
+ON CONFLICT (tenant_id, source_module, version) DO NOTHING;
 
 COMMIT;

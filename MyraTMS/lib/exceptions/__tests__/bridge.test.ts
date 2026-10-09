@@ -73,4 +73,34 @@ describe('bridgeToExceptions', () => {
     });
     expect(result).toBe(false);
   });
+
+  it('writes inbound_email_id when a contract_intake signal supplies one (T-30 extension)', async () => {
+    (matchClassificationRule as any).mockResolvedValueOnce({ severity: 'medium', slaMinutes: 1440, suggestedAction: 'Review.' });
+    const queryMock = vi.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ id: 'exc-3' }] });
+    (withTenant as any).mockImplementationOnce((_id: number, cb: any) => cb({ query: queryMock }));
+
+    const result = await bridgeToExceptions({
+      tenantId: 2, sourceModule: 'contract_intake', exceptionType: 'tender_pending_approval',
+      title: 'New tender ready — approve to inject', description: 'x', context: {},
+      pipelineLoadId: null, loadId: null, carrierId: null, inboundEmailId: 42,
+    });
+    expect(result).toBe(true);
+    const [insertSql, insertParams] = queryMock.mock.calls[1];
+    expect(insertSql).toContain('inbound_email_id');
+    expect(insertParams).toHaveLength(12);
+    expect(insertParams[11]).toBe(42);
+    expect(insertParams[8]).toBe('contract_intake');
+  });
+
+  it('writes NULL inbound_email_id when the signal omits it', async () => {
+    (matchClassificationRule as any).mockResolvedValueOnce({ severity: 'medium', slaMinutes: 1440, suggestedAction: 'Review.' });
+    const queryMock = vi.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    (withTenant as any).mockImplementationOnce((_id: number, cb: any) => cb({ query: queryMock }));
+
+    await bridgeToExceptions({
+      tenantId: 2, sourceModule: 'carrier_risk', exceptionType: 'carrier_risk_signal',
+      title: 'x', description: 'y', context: {}, pipelineLoadId: null, loadId: null, carrierId: 'CAR-1',
+    });
+    expect(queryMock.mock.calls[1][1][11]).toBeNull();
+  });
 });

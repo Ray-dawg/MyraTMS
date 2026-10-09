@@ -37,6 +37,11 @@ interface Exception {
   title: string
   detail: string
   status: "active" | "acknowledged" | "resolved"
+  // Present on every row (the list route selects e.*). T-30's contract_intake
+  // exceptions are resolved through the contract-intake flow, not the plain
+  // Resolve button below -- PATCH /api/exceptions/:id answers a bare
+  // { action: 'resolve' } on one of those with a 400.
+  source_module?: string | null
   acknowledged_at: string | null
   resolved_at: string | null
   created_at: string
@@ -109,6 +114,17 @@ const severityDot: Record<string, string> = {
   high: "bg-orange-500",
   medium: "bg-yellow-500",
   low: "bg-blue-500",
+}
+
+// T-30 -- a contract_intake exception carries a parsed freight tender and is
+// closed by approving or rejecting that tender (which needs a decision, and on
+// approve the tender itself). The plain Resolve control sends only
+// { action: 'resolve' }, which that route answers with a 400, so it is
+// replaced by a note here rather than left to fail.
+const CONTRACT_INTAKE_NOTE = "Approve or reject in the contract-intake flow"
+
+function isContractIntake(exc: Exception): boolean {
+  return exc.source_module === "contract_intake"
 }
 
 function timeAgo(timestamp: string): string {
@@ -341,15 +357,21 @@ export function AlertCenter() {
                           <span className="text-[10px] text-muted-foreground italic">
                             Acknowledged
                           </span>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-[11px] text-green-600 hover:text-green-700 px-2"
-                            onClick={() => handleAction(exc.id, "resolve")}
-                          >
-                            <CheckCircle className="h-3 w-3 mr-1" />
-                            Resolve
-                          </Button>
+                          {isContractIntake(exc) ? (
+                            <span className="text-[10px] text-muted-foreground italic">
+                              {CONTRACT_INTAKE_NOTE}
+                            </span>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 text-[11px] text-green-600 hover:text-green-700 px-2"
+                              onClick={() => handleAction(exc.id, "resolve")}
+                            >
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              Resolve
+                            </Button>
+                          )}
                         </div>
                       ) : exc.status === "resolved" ? (
                         <p className="text-[10px] text-muted-foreground italic mt-2">
@@ -380,15 +402,21 @@ export function AlertCenter() {
                             <Eye className="h-3 w-3 mr-1" />
                             Acknowledge
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-[11px] text-green-600 hover:text-green-700 px-2"
-                            onClick={() => handleAction(exc.id, "resolve")}
-                          >
-                            <CheckCircle className="h-3 w-3 mr-1" />
-                            Resolve
-                          </Button>
+                          {isContractIntake(exc) ? (
+                            <span className="text-[10px] text-muted-foreground italic px-2">
+                              {CONTRACT_INTAKE_NOTE}
+                            </span>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 text-[11px] text-green-600 hover:text-green-700 px-2"
+                              onClick={() => handleAction(exc.id, "resolve")}
+                            >
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              Resolve
+                            </Button>
+                          )}
                         </div>
                       )}
                     </div>

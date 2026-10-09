@@ -15,7 +15,7 @@ MyraTMS is a freight brokerage Transportation Management System (TMS) built as a
 - **Driver_App/** — Legacy driver app prototype (superseded by DApp). Port 3001. Not actively maintained.
 - **scraper/** — Standalone TypeScript/Playwright headless scraper (DAT, Truckstop, 123LB, Loadlink). Not a Next.js app. Targets Railway, writes load-board rows into the shared Neon DB. See dedicated section below and `scraper/README.md`.
 - **`Engine 2/`** — **Not a project.** Spec material (PRDs E2-01..E2-04, agent specs T02–T13, build plan, playbook) for the 7-agent acquisition pipeline **plus the sell-side loop** built on top of it. Status: deployed to production in shadow-drain mode; first live Retell call placed 2026-06-06; sell-side (E2-03 + E2-04) code-complete with every flag off. Has its own `CLAUDE.md`. Don't run anything from inside it.
-- **`Engine 3/`** — **Not a project.** Master PRD + child specs T-17..T-30 for the "Autonomous Brokerage Operating System." Status: **T-17 through T-28 built and applied to production** (T-20 onward in shadow mode), **T-30 in progress** (3 of 12 tasks; migration 059 committed, *not* applied), **T-29 not started**. Code lives in `MyraTMS/`, not here. Has its own `CLAUDE.md`, `wave1.md` (T-18/T-19 outcomes), and the tracker at `docs/superpowers/plans/completion.md`.
+- **`Engine 3/`** — **Not a project.** Master PRD + child specs T-17..T-30 for the "Autonomous Brokerage Operating System." Status: **T-17 through T-28 built and applied to production** (T-20 onward in shadow mode), **T-30 Tasks 1–11 merged to `master` 2026-10-09** (verified only on Neon `t30-verify`; migration 059 *not* applied to production; the `contract-intake-finalize` cron is held out of `vercel.json` until it is), **T-29 not started**. Code lives in `MyraTMS/`, not here. Has its own `CLAUDE.md`, `wave1.md` (T-18/T-19 outcomes), and the tracker at `docs/superpowers/plans/completion.md`.
 - **`docs/`** — Repo-level architecture docs: `docs/architecture/` (multi-tenant ADRs, runbooks, `PRODUCTION_MIGRATION_LOG.md`), `docs/plans/` + `docs/superpowers/` (DApp, deployment, quoting, landing plans), `docs/next-steps/` (one brief per engine).
 - **`_bmad/`** — BMAD agent framework tooling. Not a project; nothing here is deployed.
 
@@ -159,7 +159,7 @@ Schema defined across migration scripts in `MyraTMS/scripts/`. Hyphenated names 
 | `056-t26-document-automation.sql` | Engine 3 T-26: `documents.parsed_terms`/`terms_match_status` + document/inbound-email lifecycle triggers |
 | `057-t27-finance-orchestration.sql` | Engine 3 T-27: `financing_decisions`, `factoring_submissions`, `quick_pay_disbursements`, `kyc_verifications`, `v_float_exposure` |
 | `058-t28-customer-os-onboarding.sql` (+rollback) | Engine 3 T-28: `tenant_onboarding_sessions` + go-live classification rule |
-| `059-t30-contract-freight-intake.sql` (+rollback) | Engine 3 T-30: `contract_shipper_authorizations` — **committed, NOT applied to production** (verified 2026-10-07) |
+| `059-t30-contract-freight-intake.sql` (+rollback) | Engine 3 T-30: `contract_shipper_authorizations` + seeds the `contract_intake` classification rule — **NOT applied to production** (verified 2026-10-09). Apply only this post-merge version (the pre-merge master copy lacked the rule seed) |
 | `060_harden_rls_policies.sql` | Multi-tenant M3 pre-req: rewrites all 30 policies with a `NULLIF(current_setting(...), '')` guard so a reused pooled connection returns zero rows instead of erroring — **applied to production 2026-10-08** |
 | `061_app_role_grants.sql` | Multi-tenant M3 pre-req: grants for the non-BYPASSRLS app role `myra_app` — **applied to production 2026-10-08**. Migrations still run as `neondb_owner` |
 
@@ -226,6 +226,7 @@ Configured in `MyraTMS/vercel.json`; all require `Authorization: Bearer $CRON_SE
 | `0 11 * * *` | `/api/cron/pipeline-health` | Engine 2: stuck-job + dead-letter + E2-03 M5 sell-side health checks (`lib/pipeline/health-checks.ts`) |
 | `0 7 * * *` | `/api/cron/feedback-aggregation` | Engine 2: lane_stats aggregation + persona α/β refresh |
 | `0 13 * * *` | `/api/cron/exception-bridge` | Engine 3 T-24: bridges lifecycle-late / carrier-risk / stage-escalated / dead-letter signals into `exceptions` |
+| *(held)* | `/api/cron/contract-intake-finalize` | Engine 3 T-30: books `matched` email-tender loads (`finalizeMatchedTenders()`). Route merged 2026-10-09 and listed in middleware `SELF_AUTHENTICATING_PATHS`; **schedule deliberately absent from `vercel.json`** until migration 059 is applied (no kill switch) |
 
 Crons run on Vercel. Engine 2 *workers* do not — they run on Railway. `lib/cron/cron-handlers.ts` is **dead code** (no cron route imports it).
 
@@ -280,7 +281,7 @@ BullMQ pipeline that scans load boards, qualifies/researches/ranks, compiles a n
 - The Dispatcher refuses to dispatch to `carrier_status='prospect'` carriers and escalates instead. Preserve this gate.
 - Any change to `voice-worker`, `carrier-voice-worker`, `retell-webhook`, `compiler-worker`, `dispatcher-worker`, or `dispatch-gate` is a live-call-path change and needs human review (risk E3-R1).
 
-### Engine 3 Autonomous Ops Layer — T-17..T-28 in production (shadow), T-30 in progress, T-29 not started
+### Engine 3 Autonomous Ops Layer — T-17..T-28 in production (shadow), T-30 merged (cron held, 059 unapplied), T-29 not started
 
 Engine 3 wraps Engine 2 as a service: event layer, agent governance, tenant policy, carrier intelligence, pricing, negotiation, lifecycle monitoring, exception engine, risk/fraud, document automation, finance orchestration, customer onboarding. Phase 1 (T-17–T-19) shipped 2026-08-25. Phase 2 (T-20–T-26), Phase 3 (T-27) and Phase 4's T-28 were built and applied to production between 2026-08-26 and 2026-08-31, **all in shadow mode and all ahead of the master PRD §9 handoff gate at Patrice's explicit direction.** The gate itself (Pilot 1 green, real call volume) is still unmet, and so is Phase 2's own exit gate (100 consecutive zero-touch loads). Every "held open" acceptance criterion across these modules is waiting on real dispatch/call volume, not on code.
 
@@ -297,7 +298,7 @@ Engine 3 wraps Engine 2 as a service: event layer, agent governance, tenant poli
 - T-26 `lib/documents/rate-con-terms.ts` (Claude PDF term extraction + comparison, wired into the IMAP poller's `shipper_reply` branch), `app/api/documents/{rate-con,terms-mismatches,intake-match-report}`.
 - T-27 `lib/finance/` (`routing.ts` `decideRoute()`, `credit-lookup`, `float-governor`, `capital-days`, `factoring-sync`, `treasury-report`, `adapters/{ecapital,stripe,persona}.ts` — **sandbox-only**), `app/api/finance/*`.
 - T-28 `lib/tenants/provision.ts`, `lib/tenants/onboarding-session.ts`, `app/api/tenant-onboarding/*`, go-live approval via `PATCH /api/exceptions/[id]`.
-- T-30 (partial) `lib/contract-intake/authorization.ts`, `stages.ts` `matched → booked`, migration 059 (unapplied). Remaining: tender extraction, margin validation, bridge extension, IMAP wiring, finalize-booking watcher + cron, approve/reject branch, API surface, e2e fixture, regression + apply.
+- T-30 (Tasks 1–11 merged to `master` 2026-10-09; **059 not applied, finalize cron held**) `lib/contract-intake/{authorization,validate-rate,finalize-booking}.ts`, `lib/documents/tender-terms.ts`, IMAP-poller tender branch, `bridge.ts` `contract_intake` source, approve/reject branch on `PATCH /api/exceptions/[id]` (the only `pipeline_loads` insertion point), `app/api/contract-intake/pending`, `app/api/tenants/[id]/contract-shippers`, `app/api/cron/contract-intake-finalize`, `stages.ts` `matched → booked`, migration 059 (**unapplied to production**). Verified only on `t30-verify`; needs the E2-04 IMAP poller, which has never run against a real mailbox. Remaining (Task 12): the separately-confirmed production apply of 059, then re-adding the `contract-intake-finalize` schedule to `vercel.json`.
 
 **Critical:** Read `Engine 3/wave1.md` before touching T-17/T-18/T-19 code, and the module's entry in `Engine 3/docs/superpowers/plans/completion.md` before touching any other Engine 3 module — each records real schema-reality corrections (tenant_id BIGINT vs INTEGER, TEXT vs INTEGER PKs, timestamptz casts) and real bugs (IDORs in T-22/T-23/T-26/T-27, test-row leaks) that a fresh session would otherwise re-hit. Engine 3 modules **do not edit Engine 2 live-path files**; T-30's one-line `stages.ts` change is the only exception to date. `completion.md` is the living tracker — update per module, don't batch.
 
@@ -371,7 +372,7 @@ Standalone sibling project — not part of the MyraTMS workspace, not deployed o
 
 | Project | Vercel Project Name | Notes |
 |---------|--------------------|-------|
-| MyraTMS | `myratms` (`prj_gb8g00RfVeJeoujrLVPhchm8maN4`) | Production. API routes, 8 crons, admin/broker UI. Node 24.x. |
+| MyraTMS | `myratms` (`prj_gb8g00RfVeJeoujrLVPhchm8maN4`) | Production. API routes, 8 scheduled crons (T-30's 9th held), admin/broker UI. Node 24.x. |
 | DApp | `myra-driver-app` | https://myra-driver-app.vercel.app |
 | One_pager tracking | `v0-enterprise-logistic-one-pager` | https://v0-enterprise-logistic-one-pager.vercel.app |
 | myra-landing | `myra-landing` | https://myra-landing.vercel.app — static export |
@@ -384,7 +385,7 @@ Neon project `lingering-bar-21372774` (MyraM1); production branch `br-rough-fore
 |---------|---------------|--------|
 | `myratms-workers` (project `149aa93e-…`) | `pnpm tsx scripts/run-workers.ts` via `railway.json` (NIXPACKS, ON_FAILURE ×5) | 🔴 **NOT RUNNING since 2026-06-06** — service instance has `latestDeployment = None` and no `source.repo`/`source.image`; all 10 deployments are `REMOVED`. Verified 2026-10-09 with an authenticated Railway CLI. See Known Issues. |
 | Headless scraper | Dockerfile in `scraper/` | Deploy not recorded (roadmap A.3.3 open) |
-| IMAP poller | `pnpm tsx scripts/run-imap-poller.ts` | **Not deployed; no IMAP credentials** — required before E2-04 M4/M6 or T-30 Tasks 6–7 can run for real |
+| IMAP poller | `pnpm tsx scripts/run-imap-poller.ts` | **Not deployed; no IMAP credentials** — required before E2-04 M4/M6 or T-30's email-intake path can run for real |
 
 Cross-app linking: `NEXT_PUBLIC_API_URL` (DApp, One_pager → MyraTMS API) and `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_DRIVER_APP_URL` / `NEXT_PUBLIC_TRACKING_URL` (MyraTMS → other apps for outbound links and CORS allowlist).
 

@@ -21,7 +21,8 @@ export interface PricingQuoteRequest {
   // is an API-initiated preview, not a live Dispatch One pricing call, and
   // must not write pricing_engine_requests audit rows indistinguishable from
   // a real 'dispatch_one' request.
-  requestSource: 'engine2_researcher_shadow' | 'engine2_researcher_live' | 'dispatch_one' | 'shadow_comparison' | 'negotiation_api_preview';
+  requestSource: 'engine2_researcher_shadow' | 'engine2_researcher_live' | 'dispatch_one' | 'shadow_comparison' | 'negotiation_api_preview'
+    | 'contract_intake_validation'; // T-30 — validates a shipper-tendered rate, never negotiates
   pipelineLoadId?: number;
   load: {
     originCity: string; originState: string; originCountry: string;

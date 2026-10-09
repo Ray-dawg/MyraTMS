@@ -11,7 +11,7 @@
 | T-24 Exception Engine · T-25 Risk & Fraud · T-26 Document Automation | In production, shadow mode | T-24 criteria 2/9 held open; **Phase 2 exit gate (100 consecutive ≥80% zero-touch loads) not met** |
 | T-27 Finance Orchestration | In production, shadow mode | Adapters are sandbox-only; Pilot 1 Financial Architecture doc still not in repo |
 | T-28 Customer OS & Onboarding | In production, pushed | — |
-| **T-30 Contract Freight Intake** | **3 of 12 tasks; migration 059 committed but NOT applied** | Tasks 3–12; depends on the E2-04 IMAP poller which has never run for real |
+| **T-30 Contract Freight Intake** | **Code-complete on unmerged branch `t30-contract-freight-intake`; migration 059 NOT applied; not in production** | Whole-branch review, then the separately-confirmed 059 apply + merge/push; depends on the E2-04 IMAP poller which has never run for real |
 | T-29 Control Plane & White-label | Not started | Gated on Phase 4 exit + counsel review |
 
 Verified 2026-10-07 by direct query on production (`br-rough-forest-aif4a3vf`): every Engine 3 migration through 058 is live; `contract_shipper_authorizations` (059) is absent.
