@@ -120,7 +120,24 @@ async function seedCarrierAndTmsLoad(opts: {
 
 describe('pollInbox (E2-04 M4)', () => {
   afterAll(async () => {
-    if (seededMessageIds.length) await db.query(`DELETE FROM inbound_emails WHERE message_id = ANY($1)`, [seededMessageIds]);
+    if (seededMessageIds.length) {
+      // T-30 added an unauthorized-sender branch that bridges an exception
+      // carrying exceptions.inbound_email_id -> inbound_emails(id), so these
+      // rows now have a dependent the original cleanup never had. Delete the
+      // children first or afterAll throws exceptions_inbound_email_id_fkey and
+      // leaks every row this file seeded. Keyed on the resolved integer ids,
+      // NOT on message_id: exceptions has no message_id, and keying a
+      // dependency sweep on the wrong column is how scripts/sprint6-shadow/
+      // 06-cleanup.ts came to FK-violate against this same table.
+      await db.query(
+        `DELETE FROM exceptions
+           WHERE inbound_email_id IN (
+             SELECT id FROM inbound_emails WHERE message_id = ANY($1)
+           )`,
+        [seededMessageIds],
+      );
+      await db.query(`DELETE FROM inbound_emails WHERE message_id = ANY($1)`, [seededMessageIds]);
+    }
     if (seededDocumentLoadIds.length) await db.query(`DELETE FROM documents WHERE related_to = ANY($1)`, [seededDocumentLoadIds]);
     if (seededTmsLoadIds.length) await db.query(`DELETE FROM loads WHERE id = ANY($1)`, [seededTmsLoadIds]);
     if (seededCarrierIds.length) await db.query(`DELETE FROM carriers WHERE id = ANY($1)`, [seededCarrierIds]);
