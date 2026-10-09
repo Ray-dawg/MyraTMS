@@ -62,7 +62,13 @@ export async function buildCalibrationReport(): Promise<CalibrationReport> {
            ON (pr.mc_number IS NOT NULL AND pr.mc_number = pl.poster_mc_number)
            OR (pr.mc_number IS NULL AND pr.normalized_name = pl.poster_company_normalized)
         WHERE pr.entity_class = 'broker'
-          AND pr.class_source = 'human_review'
+          -- Operator-originated broker labels. 'human_review' alone (the
+          -- original filter) excluded every row the seed script writes, which
+          -- tags the operator's broker list 'seed_broker_list' — so the
+          -- criterion-4 check could never see the very labels it exists to
+          -- cross-validate. Both sources are human judgment; machine-inferred
+          -- classes (fmcsa_*, heuristic) stay out deliberately.
+          AND pr.class_source IN ('human_review', 'seed_broker_list')
           AND pl.load_source_class IN ('shipper_direct', 'co_brokered')
           AND NOT EXISTS (
             SELECT 1 FROM co_broker_agreements a

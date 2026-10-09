@@ -157,4 +157,28 @@ describe('backfillBatch (shadow mode)', () => {
     expect(row.rows[0].load_source_method).toBe('registry');
     expect(row.rows[0].poster_registry_id).toBe(registryId);
   });
+
+  it('persists the resolved poster identity so the calibration report can see it, and never overwrites a value the live ingest path already wrote', async () => {
+    // pipelineLoadId3 was classified via the shipper_company fallback in the
+    // previous test. Without this write, poster_company_raw/_normalized stay
+    // NULL, and all three meaningful queries in
+    // e2_source_calibration_report.ts key on those columns — so the report
+    // exits 0 vacuously and hands the operator an empty labelling worklist.
+    const after = await db.query<{ poster_company_raw: string; poster_company_normalized: string }>(
+      `SELECT poster_company_raw, poster_company_normalized FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId3],
+    );
+    expect(after.rows[0].poster_company_raw).toBe('Test Backfill Shipper');
+    expect(after.rows[0].poster_company_normalized).toBe('test backfill shipper');
+
+    // COALESCE, not assignment: a value scanner-worker.ts wrote on ingest
+    // must survive any number of --force re-runs.
+    await db.query(`UPDATE pipeline_loads SET poster_company_raw = 'Ingest Wrote This' WHERE id = $1`, [pipelineLoadId3]);
+    await backfillBatch([pipelineLoadId3], { force: true });
+    const reRun = await db.query<{ poster_company_raw: string }>(
+      `SELECT poster_company_raw FROM pipeline_loads WHERE id = $1`,
+      [pipelineLoadId3],
+    );
+    expect(reRun.rows[0].poster_company_raw).toBe('Ingest Wrote This');
+  });
 }, 30_000);

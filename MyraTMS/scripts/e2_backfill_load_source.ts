@@ -1,8 +1,10 @@
 /**
  * Shadow-mode historical backfill for the shipper-direct classifier. Writes
- * pipeline_loads.load_source_* columns for existing rows; never touches
- * stage or qualification_reason (that's Session 2's Qualifier wiring).
- * Idempotent and resumable — safe to interrupt and re-run.
+ * pipeline_loads.load_source_* columns for existing rows, plus
+ * poster_company_raw/_normalized where they are still NULL (pre-migration-040
+ * rows) using the same posterFromRawLoad() helper the live scanner uses;
+ * never touches stage or qualification_reason (that's Session 2's Qualifier
+ * wiring). Idempotent and resumable — safe to interrupt and re-run.
  *
  * Usage:
  *   pnpm tsx --env-file=.env.local scripts/e2_backfill_load_source.ts
@@ -20,6 +22,7 @@ import {
   normalizeCompanyName,
   type ClassifyLoadSourceInput,
 } from '@/lib/pipeline/load-source-classifier';
+import { posterFromRawLoad } from '@/lib/pipeline/poster-identity';
 
 export interface BackfillSummary {
   processed: number;
@@ -64,7 +67,13 @@ export async function backfillBatch(
     // historical shipper_company column (populated by scanner-worker.ts) so
     // the backfill can actually classify real historical data instead of
     // routing every row to poster_identity_missing.
-    const companyRaw = row.poster_company_raw ?? row.shipper_company;
+    // posterFromRawLoad() is the same helper scanner-worker.ts uses on ingest,
+    // so the fallback here produces byte-identical values to the live path
+    // (trim, empty-string -> null) rather than a second ad-hoc derivation.
+    const companyRaw = posterFromRawLoad({
+      shipperCompany: row.shipper_company,
+      posterCompanyRaw: row.poster_company_raw,
+    }).posterCompanyRaw;
     const companyNormalized = row.poster_company_normalized ?? (companyRaw ? normalizeCompanyName(companyRaw) : null);
 
     const registryHit = await findRegistryHit(
@@ -110,15 +119,27 @@ export async function backfillBatch(
     // reason code rides along inside load_source_evidence for audit.
     const evidence = { ...result.evidence, reasonCode: result.reasonCode };
 
+    // Persist the resolved poster identity alongside the classification.
+    // Rows ingested before migration 040 have poster_company_raw/_normalized
+    // NULL, and all three meaningful queries in
+    // e2_source_calibration_report.ts key on those columns — without this
+    // write the report's labelledBrokersAccepted JOIN matches nothing and
+    // unresolvedTopPosters comes back empty, so it exits 0 vacuously and
+    // hands the operator no labelling worklist (observed on dev-tests,
+    // 2026-10-09: 257/257 rows classified, unresolvedTopPosters = []).
+    // COALESCE keeps this additive and idempotent: a value written by the
+    // live ingest path is never overwritten.
     await db.query(
       `UPDATE pipeline_loads
        SET load_source_class = $1, load_source_method = $2, load_source_confidence = $3,
            load_source_evaluated_at = NOW(), load_source_evidence = $4,
-           poster_registry_id = $5
+           poster_registry_id = $5,
+           poster_company_raw = COALESCE(poster_company_raw, $7),
+           poster_company_normalized = COALESCE(poster_company_normalized, $8)
        WHERE id = $6`,
       [
         result.class, result.method, result.confidence, JSON.stringify(evidence),
-        registryHit?.id ?? null, row.id,
+        registryHit?.id ?? null, row.id, companyRaw, companyNormalized,
       ],
     );
 
