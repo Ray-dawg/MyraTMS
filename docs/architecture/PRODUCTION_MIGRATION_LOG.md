@@ -499,3 +499,36 @@ is never consulted — `registryHitRate` is 0 over a 2,253-row registry. That is
 a missing-ingest problem, not a data-volume one: `loadboard_sources.dat.
 last_polled_at` is NULL (the scraper has never polled, roadmap A.3.3 open) and
 every other source is `disabled`. Criterion 5 is PASS on production.
+
+### Addendum, same day — GATE 1 step 5: Railway gate flags
+
+Set on Railway project `149aa93e-8536-4024-bbf9-5e2fe91f106c`, service
+`myratms-workers`, environment `production`:
+
+| Variable | Value | Read back |
+|---|---|---|
+| `SHIPPER_DIRECT_GATE_ENABLED` | `true` | `'true'`, len 4 |
+| `SHIPPER_DIRECT_GATE_MODE` | `shadow` | `'shadow'`, len 6 |
+| `SHIPPER_DIRECT_GATE_ENFORCED_AT` | *(left unset)* | — |
+
+Byte lengths were checked explicitly because a trailing newline in a Railway
+value has silently defeated an Engine 2 kill switch before; every switch uses
+exact-match `.trim().toLowerCase()`. Simulating `getShipperDirectGateMode()`
+against the live values returns `shadow`. The flag pair is fail-safe by
+construction: only the literal `enforce` reaches enforce mode.
+
+**Deliberately NOT set on Vercel.** `SHIPPER_DIRECT_GATE_ENABLED` is read in two
+places. On Railway it drives classification in the Qualifier. On Vercel
+(`app/api/pipeline/import/route.ts`) it does not classify — it makes
+`shipper_direct_attestation` mandatory and returns 400 `attestation_required`
+without it, which would break the existing shadow-drain import scripts.
+
+**🔴 These flags currently have no consumer.** The same session found that the
+`myratms-workers` service instance has `latestDeployment = None`, no
+`source.repo` and no `source.image`, and that all 10 of its deployments are
+status `REMOVED` with the newest dated `2026-06-07T01:04:14Z`. `railway logs`
+returns nothing, and setting a variable did not trigger a redeploy. There has
+been no Engine 2 worker process in production since 2026-06-06. Redeploying the
+service is a separate, explicitly-confirmed step, and `MAX_CONCURRENT_CALLS=25`
+— re-verified still set the same day, against every document describing shadow
+drain as `0` — must be settled before that happens.
