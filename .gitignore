@@ -31,3 +31,6 @@ Thumbs.db
 
 # Git worktrees (per-session isolated workspaces)
 .worktrees/
+
+# Local secrets file — never commit
+API-KEYS.md
