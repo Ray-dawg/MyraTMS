@@ -3,7 +3,37 @@ import { forEachActiveTenant } from "@/lib/db/tenant-context"
 import { buildShipperAnalyticsHtml } from "@/lib/email-templates/shipper-analytics"
 import { sendGenericEmail } from "@/lib/email"
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// UNREACHABLE AS CONFIGURED -- THIS CRON HAS NEVER EXECUTED (found 2026-10-08)
+//
+// vercel.json registers it ({ "path": "/api/cron/shipper-reports",
+// "schedule": "0 6 1 * *" }), but a Vercel cron invocation is:
+//     GET /api/cron/shipper-reports
+//     Authorization: Bearer $CRON_SECRET
+// This route exports POST only, so Next answers 405 Method Not Allowed from
+// the router -- before any handler code, and therefore before the auth check
+// below ever runs. TWO independent mismatches, either one fatal:
+//     method  Vercel sends GET          <-> route exports POST only
+//     header  Vercel sends Authorization: Bearer  <-> route reads x-cron-secret
+//
+// Consequences to keep in mind when reading this file:
+//   * the fail-closed hardening of the credential check below is INERT -- it
+//     has never evaluated in production and cannot until the method is fixed;
+//   * the SELF_AUTHENTICATING_PATHS entry for this path in middleware.ts is
+//     likewise inert (the 405 precedes the handler either way);
+//   * any claim that this job runs on its registered schedule is false.
+//     Treat its effects as never having happened.
+//
+// DELIBERATELY NOT FIXED. Enabling it starts real outbound email -- monthly analytics
+// reports sent directly to every shipper with a delivered load last month.
+// Starting outbound email to external counterparties is reserved for the
+// operator.
+// Compare the five crons that DO work -- exception-bridge, exception-detect,
+// feedback-aggregation, pipeline-health, pipeline-scan -- each exports GET and
+// reads `authorization` as `Bearer ${CRON_SECRET}`. Making this one work means
+// matching that shape, and that is the operator's decision, not a drive-by.
+// ===========================================================================
+//
 // POST /api/cron/shipper-reports
 //
 // Vercel Cron (1st of each month, 06:00 UTC). For each active tenant, sends
@@ -13,13 +43,17 @@ import { sendGenericEmail } from "@/lib/email"
 
 export async function POST(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET
-  const isDevelopment = process.env.NODE_ENV !== "production"
-
-  if (!isDevelopment) {
-    const incoming = request.headers.get("x-cron-secret")
-    if (!cronSecret || incoming !== cronSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
+  const providedSecret = request.headers.get("x-cron-secret")
+  // Fail closed. `NODE_ENV !== "production"` skipped the check ENTIRELY for
+  // anything that is not a production build (preview, test, an unset NODE_ENV),
+  // and an unset CRON_SECRET must never mean "open". The local-development
+  // affordance is kept but narrowed to NODE_ENV === "development", matching
+  // app/api/cron/fmcsa-reverify/route.ts. This route is bypassed by middleware
+  // (it carries its own credential), so this is the only gate.
+  const isDev = process.env.NODE_ENV === "development"
+  if (!isDev && (!cronSecret || providedSecret !== cronSecret)) {
+    console.warn("[cron/shipper-reports] Unauthorized -- invalid or missing x-cron-secret")
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   // Determine prior month (shared across all tenants).

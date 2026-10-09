@@ -15,8 +15,10 @@ import { redis } from "@/lib/redis"
  * request is wasteful on Vercel's serverless functions and the REST PING
  * is sufficient signal that Upstash is reachable.
  *
- * Public: no auth. Safe to expose because it returns only generic latencies,
- * no DB rows or secrets.
+ * Public: no auth (bypassed in middleware.ts SELF_AUTHENTICATING_PATHS). Safe
+ * to expose because it returns only generic latencies and a constant failure
+ * marker -- no DB rows, no secrets, and no driver error strings (those carry
+ * the Neon/Upstash hostname; see OPAQUE_ERROR below).
  */
 
 const CHECK_TIMEOUT_MS = 3000
@@ -43,6 +45,21 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   })
 }
 
+// This route is unauthenticated (see middleware.ts SELF_AUTHENTICATING_PATHS),
+// so the response body must never carry a driver error string. Neon/Upstash
+// connection faults put the hostname in `e.message` -- e.g. "getaddrinfo
+// ENOTFOUND ep-<endpoint-id>.<region>.aws.neon.tech" -- which would publish
+// the production endpoint id in a 503 body to any anonymous caller. Log the
+// real message server-side; return a constant.
+const OPAQUE_ERROR = "unreachable"
+
+function logProbeFailure(dependency: string, e: unknown): void {
+  console.error(
+    `[health] ${dependency} probe failed:`,
+    e instanceof Error ? e.message : String(e),
+  )
+}
+
 async function checkDb(): Promise<CheckResult> {
   const t0 = Date.now()
   try {
@@ -50,7 +67,8 @@ async function checkDb(): Promise<CheckResult> {
     await withTimeout(sql`SELECT 1 AS ok`, CHECK_TIMEOUT_MS)
     return { ok: true, latency_ms: Date.now() - t0 }
   } catch (e) {
-    return { ok: false, latency_ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) }
+    logProbeFailure("db", e)
+    return { ok: false, latency_ms: Date.now() - t0, error: OPAQUE_ERROR }
   }
 }
 
@@ -60,7 +78,8 @@ async function checkRedis(): Promise<CheckResult> {
     await withTimeout(redis.ping(), CHECK_TIMEOUT_MS)
     return { ok: true, latency_ms: Date.now() - t0 }
   } catch (e) {
-    return { ok: false, latency_ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) }
+    logProbeFailure("redis", e)
+    return { ok: false, latency_ms: Date.now() - t0, error: OPAQUE_ERROR }
   }
 }
 

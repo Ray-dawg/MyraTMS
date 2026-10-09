@@ -11,6 +11,14 @@
  * NOTE on auth: HMAC signature verification is enforced inside
  * handleRetellWebhook using `RETELL_WEBHOOK_SECRET`. Configure that env var
  * with the secret from the Retell dashboard before going live.
+ *
+ * SCOPE OF THAT CLAIM: it covers POST only. This route is listed in
+ * middleware.ts SELF_AUTHENTICATING_PATHS, which bypasses user-JWT auth for
+ * the whole path -- so the GET reachability probe below is unauthenticated by
+ * design. It is safe only because it returns a fixed two-field marker and
+ * touches nothing; do not add any request-derived or environment-derived
+ * value to its response, and do not add further methods here without their
+ * own credential check.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -57,8 +65,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 }
 
-// Retell occasionally probes endpoints with GET. Return a small marker so we
-// can verify reachability from the dashboard without exposing internals.
+// Retell occasionally probes endpoints with GET. Returns a fixed marker so we
+// can verify reachability from the dashboard. UNAUTHENTICATED (middleware
+// bypasses this path; HMAC verification applies to POST only) -- so the body
+// must stay a constant and must never echo anything from the request or env.
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ok: true, route: 'retell-callback' }, { status: 200 });
 }

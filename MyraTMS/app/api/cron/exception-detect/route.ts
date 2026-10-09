@@ -13,7 +13,10 @@ import { forEachActiveTenant } from "@/lib/db/tenant-context"
 export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization")
   const cronSecret = process.env.CRON_SECRET
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  // Fail closed: an unset CRON_SECRET used to skip the check entirely, which
+  // left this route open. It is also now bypassed by middleware (it carries
+  // its own credential), so this is the only gate.
+  if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 

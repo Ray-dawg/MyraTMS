@@ -2,25 +2,59 @@ import { NextRequest, NextResponse } from "next/server"
 import { forEachActiveTenant } from "@/lib/db/tenant-context"
 import crypto from "crypto"
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// UNREACHABLE AS CONFIGURED -- THIS CRON HAS NEVER EXECUTED (found 2026-10-08)
+//
+// vercel.json registers it ({ "path": "/api/cron/invoice-alerts",
+// "schedule": "0 8 * * *" }), but a Vercel cron invocation is:
+//     GET /api/cron/invoice-alerts
+//     Authorization: Bearer $CRON_SECRET
+// This route exports POST only, so Next answers 405 Method Not Allowed from
+// the router -- before any handler code, and therefore before the auth check
+// below ever runs. TWO independent mismatches, either one fatal:
+//     method  Vercel sends GET          <-> route exports POST only
+//     header  Vercel sends Authorization: Bearer  <-> route reads x-cron-secret
+//
+// Consequences to keep in mind when reading this file:
+//   * the fail-closed hardening of the credential check below is INERT -- it
+//     has never evaluated in production and cannot until the method is fixed;
+//   * the SELF_AUTHENTICATING_PATHS entry for this path in middleware.ts is
+//     likewise inert (the 405 precedes the handler either way);
+//   * any claim that this job runs on its registered schedule is false.
+//     Treat its effects as never having happened.
+//
+// DELIBERATELY NOT FIXED. Enabling it starts real outbound email (notifications to
+// shippers about overdue invoices) across every active tenant, retroactively
+// covering however many invoices have aged since this job silently stopped
+// mattering. Starting outbound email is reserved for the operator.
+// Compare the five crons that DO work -- exception-bridge, exception-detect,
+// feedback-aggregation, pipeline-health, pipeline-scan -- each exports GET and
+// reads `authorization` as `Bearer ${CRON_SECRET}`. Making this one work means
+// matching that shape, and that is the operator's decision, not a drive-by.
+// ===========================================================================
+//
 // POST /api/cron/invoice-alerts
 //
 // Vercel Cron (daily 08:00 UTC). For each active tenant: find overdue
 // invoices, refresh days_outstanding, and create deduped notifications.
 //
-// Auth: x-cron-secret header must match CRON_SECRET env var.
-//       In development (NODE_ENV !== 'production') the check is skipped.
+// Auth: x-cron-secret header must match CRON_SECRET env var. Fails closed when
+//       CRON_SECRET is unset. Skipped only when NODE_ENV === 'development'.
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET
-  const isDevelopment = process.env.NODE_ENV !== "production"
-
-  if (!isDevelopment) {
-    const incoming = request.headers.get("x-cron-secret")
-    if (!cronSecret || incoming !== cronSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
+  const providedSecret = request.headers.get("x-cron-secret")
+  // Fail closed. `NODE_ENV !== "production"` skipped the check ENTIRELY for
+  // anything that is not a production build (preview, test, an unset NODE_ENV),
+  // and an unset CRON_SECRET must never mean "open". The local-development
+  // affordance is kept but narrowed to NODE_ENV === "development", matching
+  // app/api/cron/fmcsa-reverify/route.ts. This route is bypassed by middleware
+  // (it carries its own credential), so this is the only gate.
+  const isDev = process.env.NODE_ENV === "development"
+  if (!isDev && (!cronSecret || providedSecret !== cronSecret)) {
+    console.warn("[cron/invoice-alerts] Unauthorized -- invalid or missing x-cron-secret")
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   try {

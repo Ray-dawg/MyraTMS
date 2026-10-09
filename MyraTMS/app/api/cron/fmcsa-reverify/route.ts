@@ -1,11 +1,44 @@
 import { NextRequest, NextResponse } from "next/server"
 import { forEachActiveTenant } from "@/lib/db/tenant-context"
 
+// ===========================================================================
+// UNREACHABLE AS CONFIGURED -- THIS CRON HAS NEVER EXECUTED (found 2026-10-08)
+//
+// vercel.json registers it ({ "path": "/api/cron/fmcsa-reverify",
+// "schedule": "0 2 * * *" }), but a Vercel cron invocation is:
+//     GET /api/cron/fmcsa-reverify
+//     Authorization: Bearer $CRON_SECRET
+// This route exports POST only, so Next answers 405 Method Not Allowed from
+// the router -- before any handler code, and therefore before the auth check
+// below ever runs. TWO independent mismatches, either one fatal:
+//     method  Vercel sends GET          <-> route exports POST only
+//     header  Vercel sends Authorization: Bearer  <-> route reads x-cron-secret
+//
+// Consequences to keep in mind when reading this file:
+//   * the fail-closed hardening of the credential check below is INERT -- it
+//     has never evaluated in production and cannot until the method is fixed;
+//   * the SELF_AUTHENTICATING_PATHS entry for this path in middleware.ts is
+//     likewise inert (the 405 precedes the handler either way);
+//   * any claim that this job runs on its registered schedule is false.
+//     Treat its effects as never having happened.
+//
+// DELIBERATELY NOT FIXED. Turning it on starts live FMCSA API traffic and begins writing
+// compliance_alerts rows for every active tenant on a schedule nobody has
+// reviewed; it is also the only one of the three whose effects are not email,
+// so it is the likeliest to be switched on first -- but still not here.
+// Compare the five crons that DO work -- exception-bridge, exception-detect,
+// feedback-aggregation, pipeline-health, pipeline-scan -- each exports GET and
+// reads `authorization` as `Bearer ${CRON_SECRET}`. Making this one work means
+// matching that shape, and that is the operator's decision, not a drive-by.
+// ===========================================================================
+//
 // POST /api/cron/fmcsa-reverify
-// vercel.json: { "path": "/api/cron/fmcsa-reverify", "schedule": "0 6 * * *" }
 // Re-verifies active carriers (last_fmcsa_sync NULL or >30 days) for every
 // active tenant. Up to 50 carriers per tenant per invocation. Requires
 // x-cron-secret header.
+//
+// NOTE the stale schedule: this comment said "0 6 * * *"; vercel.json has
+// "0 2 * * *". Corrected in the banner above.
 
 interface FmcsaCarrier {
   allowedToOperate?: string
@@ -137,7 +170,9 @@ export async function POST(request: NextRequest) {
   const providedSecret = request.headers.get("x-cron-secret")
   const isDev = process.env.NODE_ENV === "development"
 
-  if (!isDev && cronSecret && providedSecret !== cronSecret) {
+  // Fail closed: `cronSecret &&` used to skip the check when CRON_SECRET was
+  // unset or empty, leaving this route open outside development.
+  if (!isDev && (!cronSecret || providedSecret !== cronSecret)) {
     console.warn("[cron/fmcsa-reverify] Unauthorized -- invalid or missing x-cron-secret")
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
