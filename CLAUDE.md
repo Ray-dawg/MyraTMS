@@ -228,6 +228,8 @@ Configured in `MyraTMS/vercel.json`; all require `Authorization: Bearer $CRON_SE
 | `0 13 * * *` | `/api/cron/exception-bridge` | Engine 3 T-24: bridges lifecycle-late / carrier-risk / stage-escalated / dead-letter signals into `exceptions` |
 | *(held)* | `/api/cron/contract-intake-finalize` | Engine 3 T-30: books `matched` email-tender loads (`finalizeMatchedTenders()`). Route merged 2026-10-09 and listed in middleware `SELF_AUTHENTICATING_PATHS`; **schedule deliberately absent from `vercel.json`** until migration 059 is applied (no kill switch) |
 
+**T-30 cron held (2026-10-09):** `contract-intake-finalize` was removed from `vercel.json` on purpose — `finalizeMatchedTenders()` has no kill switch and migration 059 is not applied to production. Re-add `{"path":"/api/cron/contract-intake-finalize","schedule":"0 14 * * *"}` only in the same change that records the 059 apply.
+
 Crons run on Vercel. Engine 2 *workers* do not — they run on Railway. `lib/cron/cron-handlers.ts` is **dead code** (no cron route imports it).
 
 **Three of these have never executed.** `fmcsa-reverify`, `invoice-alerts` and `shipper-reports` export `POST` only and read `x-cron-secret`, while Vercel sends `GET` + `Authorization: Bearer $CRON_SECRET` — Next answers 405 before the handler. See Known Issues; do not assume their effects have happened.

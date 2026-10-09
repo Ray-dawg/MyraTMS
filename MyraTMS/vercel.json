@@ -31,10 +31,6 @@
     {
       "path": "/api/cron/exception-bridge",
       "schedule": "0 13 * * *"
-    },
-    {
-      "path": "/api/cron/contract-intake-finalize",
-      "schedule": "0 14 * * *"
     }
   ]
 }
