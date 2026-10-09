@@ -41,9 +41,29 @@ export async function createLoad(data: Record<string, unknown>) {
   return res.json()
 }
 
+/**
+ * Error thrown by mutation helpers that surface the server's response. `message`
+ * is the server's `error` string when present, `body` is the parsed JSON (e.g.
+ * the 409 `{error, from, to, allowed}` from an illegal load status transition).
+ */
+export class ApiError extends Error {
+  readonly status: number
+  readonly body: Record<string, unknown> | null
+  constructor(message: string, status: number, body: Record<string, unknown> | null) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.body = body
+  }
+}
+
 export async function updateLoad(id: string, data: Record<string, unknown>) {
   const res = await fetch(`/api/loads/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) })
-  if (!res.ok) throw new Error("Failed to update load")
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as Record<string, unknown> | null
+    const serverMessage = body && typeof body.error === "string" ? body.error : null
+    throw new ApiError(serverMessage ?? "Failed to update load", res.status, body)
+  }
   mutate((key: string) => typeof key === "string" && key.startsWith("/api/loads"), undefined, { revalidate: true })
   return res.json()
 }

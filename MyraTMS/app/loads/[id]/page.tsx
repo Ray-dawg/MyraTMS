@@ -36,6 +36,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { StatusBadge } from "@/components/status-badge"
 import { ActivityNotes, type ActivityNote } from "@/components/activity-notes"
@@ -44,13 +54,13 @@ import { MatchPanel } from "@/components/carrier-matching/match-panel"
 import { CarrierRating } from "@/components/carrier-matching/carrier-rating"
 import { CreateInvoiceDialog } from "@/components/create-invoice-dialog"
 import { AssignDriverDialog } from "@/components/assign-driver-dialog"
-import { useLoad, useDocuments, useShippers, useCarriers, useNotes, useDrivers, updateLoad } from "@/lib/api"
+import { useLoad, useDocuments, useShippers, useCarriers, useNotes, useDrivers, updateLoad, ApiError } from "@/lib/api"
+import { canOfferStatusControl, effectiveStatusRole, isCorrectionTransition, manualStatusOptions, stepperStepsFor } from "@/lib/loads/status-control"
+import { useWorkspace } from "@/lib/workspace-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { LoadMap } from "@/components/load-map-dynamic"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-
-const statusSteps = ["Booked", "Dispatched", "In Transit", "Delivered", "Invoiced", "Closed"]
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(value)
@@ -61,6 +71,7 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
   const router = useRouter()
 
   const { data: rawLoad, mutate: revalidateLoad } = useLoad(id)
+  const { profile, profileLoaded } = useWorkspace()
   const { data: rawDocs = [] } = useDocuments({ relatedTo: id, relatedType: "Load" })
   const { data: rawShippers = [] } = useShippers()
   const { data: rawCarriers = [] } = useCarriers()
@@ -130,7 +141,40 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
     riskFlag: c.risk_flag as boolean || false,
   })).find((c: any) => c.company === load.carrier) : null
 
-  const currentStepIndex = load ? statusSteps.indexOf(load.status) : 0
+  // Stepper sequence for THIS load: lifecycle order from the transition
+  // module, minus conditional steps the load has no evidence of (see
+  // stepperStepsFor -- "Awaiting Signature" only exists on the AI-cascade
+  // path, so rendering it for a manually-assigned load claimed a rate-con
+  // signature that never happened).
+  const statusSteps = stepperStepsFor({
+    status: load?.status,
+    pipelineLoadId: (rawLoad?.pipeline_load_id ?? null) as string | number | null,
+    carrierSignatureReceivedAt: (rawLoad?.carrier_signature_received_at ?? null) as string | null,
+  })
+  // -1 when the status is unknown/legacy: nothing shows complete, nothing current.
+  const currentStepIndex = load ? statusSteps.findIndex((s) => s === load.status) : -1
+
+  // Manual status control. Options are derived from nextLoadStatuses() via
+  // manualStatusOptions(); the client role only decides what to OFFER, the
+  // server re-checks every edge on PATCH.
+  //
+  // effectiveStatusRole() gates on profileLoaded, NOT on !profileLoading: the
+  // workspace context seeds profile with fallbackProfile (role "admin") and
+  // clears profileLoading in a `finally`, so a FAILED /api/auth/me used to
+  // leave this reading "admin" for whoever was actually signed in.
+  const statusRole = effectiveStatusRole({ role: profile.role, profileLoaded })
+  // Whether to render the control AT ALL. The PATCH route enforces
+  // OPERATOR_ROLES on the finance-side edges (Delivered -> Invoiced ->
+  // Closed) itself, but keeps the driver-reachable forward edges open to any
+  // authenticated caller because the DApp drives them -- so without this gate
+  // the Select would still hand one-click Booked -> ... -> Delivered to every
+  // non-operator role that can open this page. OPERATOR_ROLES in
+  // status-transitions.ts.
+  const canChangeLoadStatus = canOfferStatusControl(statusRole)
+  const statusOptions = load ? manualStatusOptions(load.status, statusRole) : []
+  const [statusChanging, setStatusChanging] = useState(false)
+  // Pending target of a backward ops-correction awaiting AlertDialog confirmation.
+  const [pendingCorrection, setPendingCorrection] = useState<string | null>(null)
 
   // Map notes from DB to ActivityNote format, with fallback seed notes
   const seedNotes: ActivityNote[] = rawNotes.length > 0
@@ -215,6 +259,40 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
       setDriverAssigning(false)
     }
   }, [id, revalidateLoad])
+
+  // The PATCH itself. The server is the authority: a rejected edge comes back
+  // as an ApiError whose message names the legal ones (409), or 403/404.
+  const applyStatusChange = useCallback(async (nextStatus: string) => {
+    setStatusChanging(true)
+    try {
+      await updateLoad(id, { status: nextStatus })
+      toast.success(`Status changed to ${nextStatus}`)
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to update status")
+    } finally {
+      // One awaited revalidation on every outcome: a 404/403 means the row
+      // moved or access changed, so the stale row must not stay rendered
+      // either. Awaiting it before re-enabling the Select keeps the options
+      // from being recomputed from a stale load.status.
+      await revalidateLoad()
+      setStatusChanging(false)
+    }
+  }, [id, revalidateLoad])
+
+  // Manual status change requested from the Select.
+  const handleStatusChange = useCallback((nextStatus: string) => {
+    // Backward ops corrections re-enter a status whose side effects already
+    // ran once (status_change workflows; the quote-feedback sample, which is
+    // exactly-once server-side but still worth an explicit confirmation).
+    // The confirmation is an AlertDialog, not window.confirm: the native
+    // dialog ignores next-themes / tenant branding, can be suppressed by the
+    // browser, and cannot be asserted on in jsdom.
+    if (isCorrectionTransition(load?.status ?? "", nextStatus)) {
+      setPendingCorrection(nextStatus)
+      return
+    }
+    void applyStatusChange(nextStatus)
+  }, [applyStatusChange, load?.status])
 
   // Invite new driver
   const handleInviteDriver = useCallback(async () => {
@@ -580,6 +658,24 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
               </Badge>
             )}
             <StatusBadge status={load.status} />
+            {/* Operator-only: see canOfferStatusControl / OPERATOR_ROLES. */}
+            {canChangeLoadStatus && (
+              <Select
+                // Controlled with no value: the Select is an action menu ("move to..."), the badge shows the current status.
+                value=""
+                onValueChange={handleStatusChange}
+                disabled={statusChanging || statusOptions.length === 0}
+              >
+                <SelectTrigger size="sm" className="h-7 w-[150px] text-[11px]" aria-label="Change load status" data-testid="load-status-select">
+                  <SelectValue placeholder={statusChanging ? "Updating..." : statusOptions.length === 0 ? "No next status" : "Change status..."} />
+                </SelectTrigger>
+                <SelectContent>
+                  {statusOptions.map((s) => (
+                    <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             {load.podUrl ? (
               <Badge className="bg-success/10 text-success border-success/30 text-[10px] gap-1">
                 <CheckCircle2 className="h-3 w-3" />
@@ -1252,6 +1348,36 @@ export default function LoadDetailPage({ params }: { params: Promise<{ id: strin
           </div>
         </div>
       </div>
+
+      {/* Backward ops-correction confirmation (replaces window.confirm). */}
+      <AlertDialog
+        open={pendingCorrection !== null}
+        onOpenChange={(open) => { if (!open) setPendingCorrection(null) }}
+      >
+        <AlertDialogContent data-testid="status-correction-confirm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Move {load.id} backwards?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {load.status} &rarr; {pendingCorrection} is an ops correction, not a lifecycle step.
+              Status-change workflows for {pendingCorrection} will run again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            {/* AlertDialogAction closes the dialog itself; the Select's own
+                "Updating..." placeholder covers the in-flight state. */}
+            <AlertDialogAction
+              onClick={() => {
+                const next = pendingCorrection
+                setPendingCorrection(null)
+                if (next) void applyStatusChange(next)
+              }}
+            >
+              Move backwards
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

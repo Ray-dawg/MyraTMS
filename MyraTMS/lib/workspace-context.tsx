@@ -35,6 +35,14 @@ interface WorkspaceContextType {
   profile: UserProfile
   updateProfile: (updates: Partial<UserProfile>) => void
   profileLoading: boolean
+  /**
+   * True only once GET /api/auth/me has returned a real user. Distinct from
+   * `!profileLoading`, which is also true when the fetch FAILED and `profile`
+   * is still fallbackProfile (role "admin"). Anything making an authorization
+   * decision from `profile.role` must gate on this, not on profileLoading --
+   * see lib/loads/status-control.ts effectiveStatusRole().
+   */
+  profileLoaded: boolean
 }
 
 const WorkspaceContext = createContext<WorkspaceContextType | null>(null)
@@ -56,6 +64,13 @@ export function getCurrentUserName(): string {
   return `${profile.firstName} ${profile.lastName}`
 }
 
+/**
+ * Pre-identity placeholder, NOT a default identity. role: "admin" exists only
+ * so the sidebar/settings/profile screens have something to render before
+ * /api/auth/me resolves; it is deliberately left as-is rather than widened or
+ * narrowed, because those consumers read it for display. Consumers making an
+ * authorization decision must gate on `profileLoaded` instead.
+ */
 const fallbackProfile: UserProfile = {
   firstName: "User",
   lastName: "",
@@ -82,6 +97,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [profile, setProfile] = useState<UserProfile>(fallbackProfile)
   const [profileLoading, setProfileLoading] = useState(true)
+  // Set ONLY on the success path below -- never in the `finally`.
+  const [profileLoaded, setProfileLoaded] = useState(false)
 
   // Fetch the real user profile on mount
   useEffect(() => {
@@ -106,6 +123,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             role: (user.role as UserProfile["role"]) || "admin",
             avatarInitials: `${(user.firstName || "U")[0]}${(user.lastName || "")[0] || ""}`.toUpperCase(),
           })
+          // Only here: a real identity came back from the server. The `finally`
+          // below clears profileLoading on EVERY path including !res.ok and
+          // network errors, which is why that flag cannot stand in for this one.
+          //
+          // The role is required, not just the user: the setProfile() above
+          // falls back to "admin" for a user with no role claim, so treating
+          // that as "loaded" would reopen the same fail-open this flag closes.
+          // Display still gets the fallback; authorization gets nothing.
+          if (typeof user.role === "string" && user.role.length > 0) setProfileLoaded(true)
         }
       } catch {
         // Network error -- keep fallback defaults
@@ -253,6 +279,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         profile,
         updateProfile,
         profileLoading,
+        profileLoaded,
       }}
     >
       {children}
