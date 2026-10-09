@@ -1,0 +1,539 @@
+{
+  "generatedAt": "2026-10-09T16:01:06.066Z",
+  "inputs": {
+    "mines": {
+      "file": "C:/tmp/gate1-input/ontario_mines_raw.csv",
+      "rows": 50
+    },
+    "ontarioCarriers": {
+      "file": "C:/tmp/gate1-input/435e8ce8-1c4f-4a7d-9e03-55971f8e9a3d-7d8ea828-d600-4848-9c73-90bf5e35e7ad-csv.csv",
+      "rows": 309
+    },
+    "canadianCarriers": {
+      "file": "C:/tmp/gate1-input/435e8ce8-1c4f-4a7d-9e03-55971f8e9a3d-d8e9c5dc-d38a-4dbd-9de6-9e22fdbcf165-csv.csv",
+      "rows": 291
+    },
+    "brokers": {
+      "file": "C:/tmp/gate1-input/435e8ce8-1c4f-4a7d-9e03-55971f8e9a3d-bfbc6a41-18c7-4c0b-832f-923b7259e37f-csv.csv",
+      "rows": 59
+    },
+    "fmcsaBrokers": {
+      "file": "C:/tmp/gate1-input/435e8ce8-1c4f-4a7d-9e03-55971f8e9a3d-da6157a6-6c3d-4b1a-8aae-66836f09a459-csv.csv",
+      "rows": 1264
+    }
+  },
+  "outputs": [
+    {
+      "file": "ontario-mines.csv",
+      "entityClass": "shipper",
+      "classSource": "seed_mines_dossier",
+      "confidence": 0.95,
+      "rows": 48
+    },
+    {
+      "file": "broker-list.csv",
+      "entityClass": "broker",
+      "classSource": "seed_broker_list",
+      "confidence": 0.9,
+      "rows": 52
+    },
+    {
+      "file": "broker-list-fmcsa.csv",
+      "entityClass": "broker",
+      "classSource": "seed_broker_list_fmcsa",
+      "confidence": 0.95,
+      "rows": 1524
+    },
+    {
+      "file": "carriers-for-hire.csv",
+      "entityClass": "carrier_for_hire",
+      "classSource": "seed_carrier_list",
+      "confidence": 0.9,
+      "rows": 381
+    }
+  ],
+  "totals": {
+    "candidates": 2239,
+    "written": 2005,
+    "droppedDuplicateWithinClass": 166,
+    "droppedLowerPrecedence": 68
+  },
+  "precedenceOverrides": [
+    {
+      "normalized": "all routes logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "all-connect logistical services",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "bison transport",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "br1 logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "brian kurtz trucking",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "briway carriers",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "canaan transport group",
+      "keptAs": "broker-list.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "canada drayage",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "canex global logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "canpro logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "capital southern transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "celsius freight",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "charger logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "cimtran transportation services",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "contract express",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "cross point transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "csa transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "dedicated freight systems",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "eassons transport",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "et transport",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "etlas freight",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "everyday freight",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "fargo transportation services",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "final mile logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "first frontier logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "flashbee logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "flowgistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "frontier distribution services",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "frontline carrier systems",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "gateway freight systems",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "hunter express",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "ideal logistics group",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "isg transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "linamar transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "midland transport",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "on time events & logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "orbit motor freight",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "over the hills logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "paige logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "peerless logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "penner international",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "pinnacle logistics solutions",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "pride group logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "quarterback transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "roadlinx",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "rpm expedite",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "ruby truck line",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "sharco transport & logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "shipnorthamerica transportation",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "steelhorse freight services",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "stephen frederick logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "sure track courier",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "the blm group",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "the logistics alliance",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "think freight solutions",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "traffix",
+      "keptAs": "broker-list.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "trailways transportation group",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "trans 99 logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "transport bellemare international",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "transpro freight systems",
+      "keptAs": "broker-list.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "tri-ad international freight forwarding",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "triangle logistics solutions",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "triple star logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "triton transport",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "trux international",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "vision transportation systems",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "westway group canada",
+      "keptAs": "broker-list.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    },
+    {
+      "normalized": "wood-hall logistics",
+      "keptAs": "broker-list-fmcsa.csv",
+      "droppedFrom": [
+        "carriers-for-hire.csv"
+      ]
+    }
+  ]
+}

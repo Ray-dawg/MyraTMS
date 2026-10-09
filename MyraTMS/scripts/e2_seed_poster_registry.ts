@@ -2,6 +2,11 @@
  * Seeds poster_registry from normalized CSV files. See
  * scripts/data/poster-registry-seed/README.md for the expected format and
  * Engine 2/E2-01_Engine2_Expansion_PRD.md §4.4 for the source list.
+ * Generate the CSVs from the operator's raw lists with
+ * scripts/e2_convert_poster_registry_sources.ts.
+ *
+ * Takes NO CSV argument — it reads the fixed paths in the `sources` array
+ * below and skips any missing file with a warning.
  *
  * Usage:
  *   pnpm tsx --env-file=.env.local scripts/e2_seed_poster_registry.ts
@@ -113,10 +118,23 @@ async function main() {
   const dryRun = process.argv.includes('--dry-run');
   const dataDir = path.join(process.cwd(), 'scripts', 'data', 'poster-registry-seed');
 
-  const sources: Array<[string, 'shipper' | 'broker', string, number]> = [
-    [path.join(dataDir, 'pilot1-shippers.csv'), 'shipper', 'seed_shipper_list', 0.9],
-    [path.join(dataDir, 'ontario-mines.csv'), 'shipper', 'seed_mines_dossier', 0.95],
+  // Ordered fail-closed: the broker lists run FIRST so that a company present
+  // in both a broker list and a carrier/shipper list is already in the registry
+  // as 'broker' (reject) by the time the lower-precedence source is read, and
+  // seedFromCsv's "never downgrade an equal-or-higher-confidence row" guard
+  // keeps it there. e2_convert_poster_registry_sources.ts also resolves these
+  // collisions at convert time; this ordering is the belt to that braces, and
+  // matters when a file is hand-edited rather than generated.
+  const sources: Array<[string, 'shipper' | 'broker' | 'carrier_for_hire', string, number]> = [
+    [path.join(dataDir, 'broker-list-fmcsa.csv'), 'broker', 'seed_broker_list_fmcsa', 0.95],
     [path.join(dataDir, 'broker-list.csv'), 'broker', 'seed_broker_list', 0.9],
+    // Trucking companies are NOT shippers. carrier_for_hire routes a poster to
+    // carrier_reposted/review, never to a shipper_direct accept — seeding this
+    // list as 'shipper' would manufacture exactly the false accepts the gate
+    // exists to prevent.
+    [path.join(dataDir, 'carriers-for-hire.csv'), 'carrier_for_hire', 'seed_carrier_list', 0.9],
+    [path.join(dataDir, 'ontario-mines.csv'), 'shipper', 'seed_mines_dossier', 0.95],
+    [path.join(dataDir, 'pilot1-shippers.csv'), 'shipper', 'seed_shipper_list', 0.9],
   ];
 
   let totalInserted = 0;

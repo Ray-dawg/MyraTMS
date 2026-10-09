@@ -1,0 +1,61 @@
+{
+  "totalRows": 250,
+  "byClass": {
+    "unresolved": 250
+  },
+  "byMethod": {
+    "NULL": 250
+  },
+  "registryHitRate": 0,
+  "labelledBrokersAccepted": [],
+  "unresolvedTopPosters": [
+    {
+      "poster": "TEST_Sun Belt Freight",
+      "count": 28
+    },
+    {
+      "poster": "TEST_Boreal Logistics Group",
+      "count": 25
+    },
+    {
+      "poster": "TEST_Maple Leaf Distribution",
+      "count": 25
+    },
+    {
+      "poster": "TEST_Atlantic Provinces Freight",
+      "count": 22
+    },
+    {
+      "poster": "TEST_Trans-Canada Cargo",
+      "count": 22
+    },
+    {
+      "poster": "TEST_Canso Trucking",
+      "count": 20
+    },
+    {
+      "poster": "TEST_Cascade Shipping LLC",
+      "count": 19
+    },
+    {
+      "poster": "TEST_Midwest Brokerage Inc",
+      "count": 19
+    },
+    {
+      "poster": "TEST_Pacific Coast Logistics",
+      "count": 19
+    },
+    {
+      "poster": "TEST_Beacon Logistics",
+      "count": 18
+    },
+    {
+      "poster": "TEST_Northern Mine Supply Co",
+      "count": 17
+    },
+    {
+      "poster": "TEST_Prairie Truck Lines",
+      "count": 16
+    }
+  ]
+}
