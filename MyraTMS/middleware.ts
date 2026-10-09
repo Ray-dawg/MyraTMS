@@ -229,6 +229,9 @@ export const PUBLIC_PATHS = [
 // the test until it is listed here.
 // ---------------------------------------------------------------------------
 export const SELF_AUTHENTICATING_PATHS = [
+  // T-30. Route exists and checks CRON_SECRET itself; its schedule is held out
+  // of vercel.json until migration 059 is applied to production.
+  "/api/cron/contract-intake-finalize",
   "/api/cron/exception-bridge",
   "/api/cron/exception-detect",
   "/api/cron/feedback-aggregation",
