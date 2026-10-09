@@ -103,6 +103,10 @@ async function seedPipelineLoad(): Promise<number> {
 describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
   let mockServer: http.Server;
   let responseQueue: Array<{ status: number; body: unknown }> = [];
+  // /carriers/{dot}/operation-classification responses (see d7c1f05 and the
+  // matching note in carrier-verification.test.ts). Empty queue -> 500 ->
+  // 'unknown' operation classification (fail closed).
+  let opClassQueue: Array<{ status: number; body: unknown }> = [];
   const envBackup = { ...process.env };
 
   afterAll(async () => {
@@ -134,6 +138,8 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
     await seedCarrier({ id: carrierId, company: 'Gate Test Carrier A', contactEmail: 'dispatch-test@example.com', preVerified: true });
     await seedTmsLoad({ id: loadId, carrierId });
     const pipelineLoadId = await seedPipelineLoad();
+
+    opClassQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } });
 
     const result = await runAiCascadeDispatchGate({
       tenantId: LEGACY_DEFAULT_TENANT_ID, loadId, carrierId, pipelineLoadId, referenceNumber: loadId,
@@ -181,7 +187,7 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
 
   it('unverified carrier resolved as carrier_for_hire+active by the lookup: verifies inline, dispatch proceeds', async () => {
     mockServer = http.createServer((req, res) => {
-      const next = responseQueue.shift();
+      const next = (req.url ?? '').includes('/operation-classification') ? opClassQueue.shift() : responseQueue.shift();
       if (!next) { res.writeHead(500).end('no queued response'); return; }
       res.writeHead(next.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(next.body));
@@ -206,6 +212,10 @@ describe('runAiCascadeDispatchGate (E2-03 M3/M4)', () => {
         content: [{
           carrier: {
             legalName: 'Gate Test Carrier C',
+            // The seeded carrier has no dot_number, so the DOT for the
+            // operation-classification call comes from this payload, as it
+            // does from a real /carriers/docket-number/{mc} response.
+            dotNumber: `9${RUN_ID}`,
             brokerAuthorityStatus: 'N',
             commonAuthorityStatus: 'A',
             contractAuthorityStatus: 'N',

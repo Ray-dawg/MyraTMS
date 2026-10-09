@@ -44,6 +44,12 @@ async function seedCarrier(overrides: {
 describe('verifyCarrierAuthority (E2-03 M4)', () => {
   let mockServer: http.Server;
   let responseQueue: Array<{ status: number; body: unknown }> = [];
+  // Since d7c1f05 a resolved QCMobile carrier costs a second request to
+  // /carriers/{dot}/operation-classification (the for-hire/private split is
+  // not in the /carriers payload). Served from its own queue so the carrier
+  // lookup queue keeps its one-response-per-test shape; an empty queue answers
+  // 500, which authority-lookup treats as 'unknown' (fail closed).
+  let opClassQueue: Array<{ status: number; body: unknown }> = [];
   let requestCount = 0;
   const envBackup = { ...process.env };
   const seededIds: string[] = [];
@@ -51,7 +57,7 @@ describe('verifyCarrierAuthority (E2-03 M4)', () => {
   beforeAll(async () => {
     mockServer = http.createServer((req, res) => {
       requestCount += 1;
-      const next = responseQueue.shift();
+      const next = (req.url ?? '').includes('/operation-classification') ? opClassQueue.shift() : responseQueue.shift();
       if (!next) { res.writeHead(500).end('no queued response'); return; }
       res.writeHead(next.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(next.body));
@@ -73,6 +79,7 @@ describe('verifyCarrierAuthority (E2-03 M4)', () => {
 
   beforeEach(() => {
     responseQueue = [];
+    opClassQueue = [];
     requestCount = 0;
   });
 
@@ -96,6 +103,8 @@ describe('verifyCarrierAuthority (E2-03 M4)', () => {
         }],
       },
     });
+
+    opClassQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } });
 
     const result = await verifyCarrierAuthority(id);
     expect(result.verified).toBe(true);
@@ -194,6 +203,8 @@ describe('verifyCarrierAuthority (E2-03 M4)', () => {
         }],
       },
     });
+
+    opClassQueue.push({ status: 200, body: { content: [{ operationClassDesc: 'Authorized For Hire' }] } });
 
     const result = await verifyCarrierAuthority(id);
     expect(result.verified).toBe(false);

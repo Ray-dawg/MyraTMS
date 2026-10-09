@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
-const authMock = vi.fn(() => ({ user: { tenantId: 2, isSuperAdmin: false } }));
+const authMock = vi.fn((..._args: any[]) => ({ user: { tenantId: 2, isSuperAdmin: false } }));
 vi.mock('@/lib/governance/api-helpers', () => ({
   authorizeGovernanceRequest: (...args: any[]) => authMock(...args),
 }));
