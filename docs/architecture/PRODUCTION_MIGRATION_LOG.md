@@ -423,3 +423,79 @@ open and is now also a GATE 0 exit criterion. Added by this entry:
 ---
 
 <!-- Append future entries below this line. Never edit closed entries. -->
+
+---
+
+## Entry 4 — 2026-10-09 — GATE 1: `poster_registry` seeded on production + historical back-fill
+
+No schema migration. A **data** change, recorded here because it writes 2,253
+rows to a production table that gates an accept/reject decision, and because it
+mutates 250 existing `pipeline_loads` rows.
+
+### What was written
+
+| Target | Before | After |
+|---|---|---|
+| `poster_registry` | 0 rows | **2,253 rows** |
+| `pipeline_loads.load_source_*` | NULL on all 250 | `unresolved`/review on all 250 |
+| `pipeline_loads.poster_company_normalized` | NULL on all 250 | populated on all 250 |
+
+Branch `br-rough-forest-aif4a3vf`, endpoint `ep-lively-shadow-aibzw8bp`, via an
+explicit `--env-file` holding only `DATABASE_URL`. `.env.local` was not edited.
+Both scripts ran from the worktree `.worktrees/gate1-registry-calibration`
+at commit `85b74b5`.
+
+```
+pnpm tsx --env-file=<prod> scripts/e2_seed_poster_registry.ts --dry-run   # 2253
+pnpm tsx --env-file=<prod> scripts/e2_seed_poster_registry.ts             # 2253 inserted / 0 skipped
+pnpm tsx --env-file=<prod> scripts/e2_backfill_load_source.ts             # processed=250 accept=0 reject=0 review=250
+pnpm tsx --env-file=<prod> scripts/e2_source_calibration_report.ts        # exit 0
+```
+
+### Registry composition, verified by direct query after the run
+
+| entity_class | class_source | confidence | rows |
+|---|---|---|---|
+| broker | `seed_broker_list_fmcsa` | 0.95 | 1524 |
+| broker | `seed_broker_list` | 0.90 | 52 |
+| carrier_for_hire | `seed_carrier_list` | 0.90 | 381 |
+| shipper | `seed_shipper_list` | 0.90 | 248 |
+| shipper | `seed_mines_dossier` | 0.95 | 48 |
+
+Zero duplicate `normalized_name` values. 1,263 rows carry both MC and DOT.
+**296 rows are accept-capable** (`entity_class IN ('shipper','carrier_private')
+AND confidence >= 0.8`) — `poster_registry` is the only path to a
+`shipper_direct` accept, because FMCSA cannot establish shipper-direct status
+(every private fleet also registers "Authorized For Hire", verified live
+2026-10-08).
+
+### Behavioural blast radius: none, today
+
+All E2-01 classification is behind `SHIPPER_DIRECT_GATE_ENABLED`, which was
+**not** touched and remains unset. Seeding the registry changes no request
+path. The back-fill writes only `load_source_*`, `poster_registry_id` and the
+two poster-identity columns — never `stage` or `qualification_reason`.
+
+### Rollback
+
+`DELETE FROM poster_registry WHERE class_source IN ('seed_broker_list',
+'seed_broker_list_fmcsa', 'seed_carrier_list', 'seed_shipper_list',
+'seed_mines_dossier');` restores the pre-state exactly — every row written here
+carries one of those five `class_source` values and the table was empty before.
+The back-fill is idempotent and re-runnable with `--force`; to revert it,
+`UPDATE pipeline_loads SET load_source_class = NULL, load_source_method = NULL,
+load_source_confidence = NULL, load_source_evaluated_at = NULL,
+load_source_evidence = NULL, poster_registry_id = NULL;` (the poster-identity
+columns are worth keeping — they are derived from `shipper_company`, which is
+unchanged).
+
+### What this does NOT close
+
+PRD §4.13 **criterion 4 stays OPEN.** All 250 production `pipeline_loads` are
+synthetic `TEST_*` fixtures from the 2026-06/08 shadow drain, every one
+`created_by='scanner-csv-v1'` with `shipper_direct_attestation` NULL, so
+`classifyLoadSource()`'s manual-import branch is authoritative and the registry
+is never consulted — `registryHitRate` is 0 over a 2,253-row registry. That is
+a missing-ingest problem, not a data-volume one: `loadboard_sources.dat.
+last_polled_at` is NULL (the scraper has never polled, roadmap A.3.3 open) and
+every other source is `disabled`. Criterion 5 is PASS on production.
