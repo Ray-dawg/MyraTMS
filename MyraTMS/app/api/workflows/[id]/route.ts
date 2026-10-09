@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
+import { enforceFeature } from "@/lib/features/route-gate"
 
 const ALLOWED_COLUMNS: Record<string, { col: string; jsonStringify?: boolean }> = {
   name: { col: "name" },
@@ -19,6 +20,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "tms_advanced")
+  if (denied) return denied
   const { id } = await params
 
   const row = await withTenant(ctx.tenantId, async (client) => {
@@ -36,6 +39,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "tms_advanced")
+  if (denied) return denied
   const { id } = await params
   const body = await req.json()
 
@@ -78,6 +83,8 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "tms_advanced")
+  if (denied) return denied
   const { id } = await params
 
   const found = await withTenant(ctx.tenantId, async (client) => {

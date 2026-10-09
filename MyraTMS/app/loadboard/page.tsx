@@ -1,5 +1,6 @@
 "use client"
 
+import { FeatureGate } from "@/components/feature-gate"
 import { useState, useMemo, useCallback } from "react"
 import { Search, Download, Radio, RefreshCw, ArrowUpDown, Plus, X, Wifi, WifiOff } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
@@ -50,7 +51,7 @@ const sourceColors: Record<string, string> = {
 
 type SortField = "rate" | "rate_per_mile" | "miles" | "pickup_date"
 
-export default function LoadBoardPage() {
+function LoadBoardPageContent() {
   const [search, setSearch] = useState("")
   const [originFilter, setOriginFilter] = useState("")
   const [destFilter, setDestFilter] = useState("")
@@ -412,5 +413,13 @@ export default function LoadBoardPage() {
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+export default function LoadBoardPage() {
+  return (
+    <FeatureGate feature="autobroker_pro" title="Load Board">
+      <LoadBoardPageContent />
+    </FeatureGate>
   )
 }

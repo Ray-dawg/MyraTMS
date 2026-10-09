@@ -2,10 +2,14 @@ import { generateText, Output } from "ai"
 import { z } from "zod"
 import { withTenant } from "@/lib/db/tenant-context"
 import { requireTenantContext } from "@/lib/auth"
+import { enforceFeature } from "@/lib/features/route-gate"
 import type { NextRequest } from "next/server"
 
 export async function POST(req: NextRequest) {
   const ctx = requireTenantContext(req)
+  // Intelligence (sidebar requiredFeature) — cross-tenant lane intelligence tier.
+  const denied = await enforceFeature(ctx.tenantId, "data_lane_intelligence")
+  if (denied) return denied
 
   const { loads, alerts, carriers } = await withTenant(ctx.tenantId, async (client) => {
     const [loads, alerts, carriers] = await Promise.all([

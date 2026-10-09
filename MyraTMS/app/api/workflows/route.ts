@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { apiError } from "@/lib/api-error"
+import { enforceFeature } from "@/lib/features/route-gate"
 
 export async function GET(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "tms_advanced")
+  if (denied) return denied
 
   const rows = await withTenant(ctx.tenantId, async (client) => {
     const { rows } = await client.query(
@@ -21,6 +24,8 @@ export async function POST(req: NextRequest) {
   const user = getCurrentUser(req)
   if (!user) return apiError("Unauthorized", 401)
   const ctx = requireTenantContext(req)
+  const denied = await enforceFeature(ctx.tenantId, "tms_advanced")
+  if (denied) return denied
 
   const body = await req.json()
   const { name, description, triggerType, triggerConfig, conditions, actions, active } = body

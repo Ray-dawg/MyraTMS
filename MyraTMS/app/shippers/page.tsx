@@ -30,7 +30,7 @@ type Shipper = {
   contactPhone: string
 }
 import { useWorkspace } from "@/lib/workspace-context"
-import { useShippers, createShipper } from "@/lib/api"
+import { useShippers, createShipper, useUsers } from "@/lib/api"
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0 }).format(value)
@@ -76,6 +76,11 @@ export default function ShippersPage() {
     contactPhone: (s.contact_phone || "") as string,
   }))
 
+  const { data: usersData, isLoading: usersLoading, error: usersError } = useUsers()
+  const repOptions: { id: string; name: string }[] = (Array.isArray(usersData) ? usersData : [])
+    .map((u: { id: string; firstName?: string; lastName?: string }) => ({ id: u.id, name: `${u.firstName || ""} ${u.lastName || ""}`.trim() }))
+    .filter((u: { name: string }) => u.name)
+
   const [form, setForm] = useState({ company: "", industry: "", contactName: "", contactEmail: "", contactPhone: "", assignedRep: "" })
 
   const filtered = allShippers.filter((s) => {
@@ -102,6 +107,7 @@ export default function ShippersPage() {
         contactName: form.contactName,
         contactEmail: form.contactEmail,
         contactPhone: form.contactPhone,
+        assignedRep: form.assignedRep || undefined,
       })
       addNotification({ title: `Shipper ${form.company} added`, description: `New prospect added`, type: "success", timestamp: new Date().toISOString() })
       toast.success(`${form.company} added as a new shipper`)
@@ -171,7 +177,7 @@ export default function ShippersPage() {
               <div className="space-y-1.5"><Label className="text-xs">Email</Label><Input type="email" placeholder="email@company.com" value={form.contactEmail} onChange={(e) => setForm((p) => ({ ...p, contactEmail: e.target.value }))} className="h-9 text-sm" /></div>
               <div className="space-y-1.5"><Label className="text-xs">Phone</Label><Input placeholder="(555) 555-0123" value={form.contactPhone} onChange={(e) => setForm((p) => ({ ...p, contactPhone: e.target.value }))} className="h-9 text-sm" /></div>
             </div>
-            <div className="space-y-1.5"><Label className="text-xs">Assigned Rep</Label><Select value={form.assignedRep} onValueChange={(v) => setForm((p) => ({ ...p, assignedRep: v }))}><SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Sarah Chen">Sarah Chen</SelectItem><SelectItem value="Marcus Johnson">Marcus Johnson</SelectItem><SelectItem value="Alex Rivera">Alex Rivera</SelectItem></SelectContent></Select></div>
+            <div className="space-y-1.5"><Label className="text-xs">Assigned Rep</Label><Select value={form.assignedRep} onValueChange={(v) => setForm((p) => ({ ...p, assignedRep: v }))}><SelectTrigger className="h-9 text-sm"><SelectValue placeholder={usersLoading ? "Loading..." : "Select rep"} /></SelectTrigger><SelectContent>{repOptions.length === 0 ? (<div className="px-2 py-1.5 text-xs text-muted-foreground">{usersLoading ? "Loading users..." : usersError ? "Couldn't load users" : "No users found"}</div>) : repOptions.map((r) => (<SelectItem key={r.id} value={r.name}>{r.name}</SelectItem>))}</SelectContent></Select></div>
           </div>
           <DialogFooter>
             <Button variant="outline" size="sm" className="text-xs" onClick={() => setAddOpen(false)}>Cancel</Button>

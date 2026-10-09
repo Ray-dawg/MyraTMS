@@ -11,13 +11,12 @@ import { TenantProvider } from "@/components/tenant-context"
 import { TenantBrandingApplier } from "@/components/tenant-branding"
 import { Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { isBareRoute as checkBareRoute } from "@/lib/bare-routes"
 
-// Routes that render without the app shell (sidebar, topbar, etc.)
-const BARE_ROUTES = ["/login", "/invite"]
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const isBareRoute = BARE_ROUTES.some((r) => pathname.startsWith(r))
+  const isBareRoute = checkBareRoute(pathname)
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)

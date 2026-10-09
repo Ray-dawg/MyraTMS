@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { withTenant } from "@/lib/db/tenant-context"
 import { getCurrentUser, requireTenantContext } from "@/lib/auth"
 import { escapeLikeMeta } from "@/lib/escape-like"
+import { ASSIGNABLE_REP_ROLES_SQL } from "@/lib/users/assignable-roles"
 
 export async function GET(req: NextRequest) {
   const ctx = requireTenantContext(req)
@@ -34,9 +35,26 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json()
   const id = `SHP-${Date.now().toString(36).toUpperCase()}`
-  const assignedRep = `${user.firstName || ""} ${user.lastName || ""}`.trim()
+  const defaultRep = `${user.firstName || ""} ${user.lastName || ""}`.trim()
+  const requestedRep = typeof body.assignedRep === "string" ? body.assignedRep.trim() : ""
 
-  await withTenant(ctx.tenantId, async (client) => {
+  const unknownRep = await withTenant(ctx.tenantId, async (client) => {
+    // Stored format stays a display-name string. A requested rep must be an
+    // assignable member of this tenant; no request falls back to the caller.
+    let assignedRep = defaultRep
+    if (requestedRep) {
+      const { rows: match } = await client.query(
+        `SELECT 1 FROM tenant_users tu
+           JOIN users u ON u.id = tu.user_id
+          WHERE tu.tenant_id = $1
+            AND ${ASSIGNABLE_REP_ROLES_SQL}
+            AND btrim(u.first_name || ' ' || u.last_name) = $2
+          LIMIT 1`,
+        [ctx.tenantId, requestedRep],
+      )
+      if (match.length === 0) return true
+      assignedRep = requestedRep
+    }
     await client.query(
       `INSERT INTO shippers (
          id, company, industry, pipeline_stage, contract_status, assigned_rep,
@@ -57,7 +75,10 @@ export async function POST(req: NextRequest) {
         body.conversionProbability || 0,
       ],
     )
+    return false
   })
+
+  if (unknownRep) return NextResponse.json({ error: "Unknown assigned rep" }, { status: 400 })
 
   return NextResponse.json({ id }, { status: 201 })
 }
