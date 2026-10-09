@@ -325,4 +325,101 @@ Smoke test as `myra_app` (all probes in rolled-back transactions):
 
 ---
 
+## Entry 3 — 2026-10-09 — GATE 0: tenant-header bypass closed, middleware enabled
+
+No database migration. Code-only deploy, recorded here because it changes the
+production authorization boundary and because it is the first time
+`middleware.ts` has ever executed in production.
+
+### What was deployed
+
+`origin/master` `2eed7ee` → **`b334446`** (15 commits; Vercel project `myratms`
+builds from the GitHub remote). The two that matter here:
+
+| Commit | Layer |
+|---|---|
+| `a5055f0` | `getTenantContext()` resolves tenant from the signed JWT, never from `x-myra-*` request headers |
+| `b334446` | `config.matcher` fixed so middleware routes at all, plus the bypass lists that make that survivable; `/api/documents` driver row-scoping; `/api/health` error redaction |
+
+The other 13 are the E2-01 shipper-direct gate stack and the FMCSA QCMobile
+lookup fix, which rode along. All E2-01 behaviour stays behind
+`SHIPPER_DIRECT_GATE_ENABLED`, which was not touched.
+
+GATE 0 assigned the second layer to Gate 4. It was released here at the
+operator's explicit direction, after the build-artifact and live verification
+below.
+
+### Verified live, after deploy
+
+The exploit was confirmed **still live at 14:44 UTC**, minutes before the deploy
+landed: `GET /api/loads` with `x-myra-tenant-id: 2`, no cookie and no token,
+returned HTTP 200 and real load rows. It flipped to 401 at 14:45:17 UTC.
+
+Bypass-list verification against production (the actual risk of enabling
+middleware — a wrong entry 401s a cron, the Retell webhook, or a shipper
+confirmation link). Note the discriminator: middleware's own rejection body is
+`{"error":"Unauthorized"}` capitalised, so a **405** or a **lowercase**
+`unauthorized` proves the request reached the route instead:
+
+| Request | Result | Reading |
+|---|---|---|
+| `GET /api/loads` + forged `x-myra-tenant-id: 2` | 401 | **exploit dead** |
+| `GET /api/health` | 200, `db.ok:true` | bypass OK; also confirms Vercel's `myra_app` role reads fine |
+| `GET /api/webhooks/retell-callback` | 200 | bypass OK — webhook POSTs will land |
+| `POST /api/cron/pipeline-scan` | **405** | bypass OK (405 is Next's router, after middleware) |
+| `GET /api/cron/pipeline-scan` | 401 **lowercase** | bypass OK — the route's own `CRON_SECRET` check answered |
+| `POST /api/pipeline/import` | 401 **lowercase** | bypass OK — route's own token check answered |
+| `GET /api/confirmations/<junk>` | 404 `Confirmation not found` | handler reached — E2-04 confirm flow intact |
+| `GET /api/tracking/<junk>` | 404 `Tracking token not found` | handler reached |
+| `POST /api/auth/login` | 400 `Email and password are required` | public — nobody is locked out |
+| `POST /api/auth/driver-login` | 400 | public — DApp login intact |
+| `GET /rate/<junk>` | 200 | public rating page intact |
+| `GET /api/shippers`, `/api/carriers`, `/api/invoices` | 401 | protected (these are the three a driver JWT used to reach) |
+| `GET /api/tracking/positions` | 401 | protected — the old bare `/api/tracking/` prefix had bypassed this |
+| `GET /api/documents` | 401 | protected |
+| `GET /dashboard`, no cookie and with `auth-token=garbage` | 307 both | page routes redirect, no 401 dead-end |
+
+Pre-deploy: `pnpm build` succeeded and emitted `Proxy (Middleware)`; the
+compiled matcher was read back out of `.next/server/middleware-manifest.json`
+and confirmed to match `/api/*` and page routes while skipping
+`/_next/static/*`, `/favicon.ico` and `/manifest.json`. 175 new tests pass;
+full suite 1071 passed / 3 failed / 5 skipped, the 3 failures pre-existing on
+`4d552eb` in the E2-03 carrier-verification path.
+
+### Found while validating the bypass lists — NOT fixed
+
+1. **`/api/cron/fmcsa-reverify`, `/api/cron/invoice-alerts` and
+   `/api/cron/shipper-reports` have never executed.** Each exports `POST` only
+   and reads `x-cron-secret`; a Vercel cron invocation is `GET` +
+   `Authorization: Bearer $CRON_SECRET`, so Next answers 405 from the router
+   before any handler code. Two independent mismatches, either one fatal.
+   **Treat their effects as never having happened** — no FMCSA re-verification,
+   no invoice reminders, no monthly shipper reports have ever been sent.
+   Deliberately left off: switching them on starts live FMCSA API traffic and
+   real outbound email to external shippers, retroactive over everything that
+   has aged since. Operator decision. The five that work (`exception-bridge`,
+   `exception-detect`, `feedback-aggregation`, `pipeline-health`,
+   `pipeline-scan`) export `GET` and read `authorization`; match that shape.
+2. **`/api/documents` had no row scoping for driver principals.** Fixed in
+   `b334446` — it had to be the same commit, because middleware is what grants
+   a driver token that path.
+
+### Open follow-ups — all operator-only, GATE 0 is NOT closed
+
+Entry 2 follow-up 1 (rotate Railway `DATABASE_URL` to `myra_app`) is still
+open and is now also a GATE 0 exit criterion. Added by this entry:
+
+1. **Confirm `MAX_CONCURRENT_CALLS=0`** on Vercel `myratms` **and** Railway
+   `myratms-workers`. Found at `25` on 2026-08-26 and never re-verified. Check
+   for trailing whitespace — kill switches are exact-match
+   `.trim().toLowerCase()`.
+2. **Set `FMCSA_QC_WEBKEY` on Railway and Vercel.** Value is in git-ignored
+   `MyraTMS/.env.local`. Without it the E2-01 gate fails closed and every
+   poster-registry miss routes to human review.
+3. **Watch for 401s on the Vercel cron runs, the Retell webhook and shipper
+   confirmation links** over the next day. Middleware is newly live; those are
+   the three failure modes a wrong bypass entry produces.
+
+---
+
 <!-- Append future entries below this line. Never edit closed entries. -->
