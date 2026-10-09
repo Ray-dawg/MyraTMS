@@ -78,4 +78,40 @@ describe('e2_convert_poster_registry_sources', () => {
     expect(rows[0].mc_number).toBe('555002');
     expect(droppedDuplicateWithinClass).toBe(1);
   });
+
+  it('emits a differing operating name as its own row and keeps the DOT on the legal row only', () => {
+    // poster_registry has a unique partial index on dot_number as well as
+    // mc_number (migration 040), so an alias row carrying the same DOT would
+    // fail the insert outright.
+    const shippers = w('s.csv', [
+      'Company,Operating Name,City,Province,Country,USDOT Number,Type',
+      'Aecon Power Services Inc,Aecon Utilities,Toronto,ON,Canada,4358451,Shipper (private fleet)',
+    ].join('\n') + '\n');
+    const { candidates } = buildCandidates({ shippers });
+    const rows = resolve(candidates).byOutput.get('shippers')!;
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.legal_name === 'Aecon Power Services Inc')!.dot_number).toBe('4358451');
+    expect(rows.find((r) => r.legal_name === 'Aecon Utilities')!.dot_number).toBe('');
+  });
+
+  it('does not emit an operating name that normalizes to the legal name', () => {
+    const shippers = w('s2.csv', [
+      'Company,Operating Name,City,Province,Country,USDOT Number,Type',
+      'Procter & Gamble Inc,Procter & Gamble Ltd.,North York,ON,Canada,3477367,Shipper (private fleet)',
+    ].join('\n') + '\n');
+    const { candidates } = buildCandidates({ shippers });
+    expect(resolve(candidates).byOutput.get('shippers')!).toHaveLength(1);
+  });
+
+  it('a seeded shipper still loses to a broker label on the same name', () => {
+    const shippers = w('s3.csv', [
+      'Company,Operating Name,City,Province,Country,USDOT Number,Type',
+      'Janus Freight Inc,,Toronto,ON,Canada,9000001,Shipper (private fleet)',
+    ].join('\n') + '\n');
+    const brokers = w('b3.csv', 'Company,HQ City,Province/State,Country\nJanus Freight Ltd,Toronto,ON,Canada\n');
+    const { candidates } = buildCandidates({ shippers, brokers });
+    const { byOutput } = resolve(candidates);
+    expect(byOutput.get('shippers')).toHaveLength(0);
+    expect(byOutput.get('brokers')).toHaveLength(1);
+  });
 });

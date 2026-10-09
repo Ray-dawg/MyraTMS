@@ -34,7 +34,14 @@ as `broker` by the time a lower-precedence source is read, and `seedFromCsv`'s
 | 2 | `broker-list.csv` | Known-broker list (Appendix B) | `broker` | `seed_broker_list` | 0.9 | 52 |
 | 3 | `carriers-for-hire.csv` | Ontario + Canadian trucking directories | `carrier_for_hire` | `seed_carrier_list` | 0.9 | 381 |
 | 4 | `ontario-mines.csv` | Ontario mining lead list | `shipper` | `seed_mines_dossier` | 0.95 | 48 |
-| 5 | `pilot1-shippers.csv` | Pilot 1 Ontario shipper lead list (~205 rows) | `shipper` | `seed_shipper_list` | 0.9 | **absent** |
+| 5 | `pilot1-shippers.csv` | Pilot 1 Ontario private-fleet shipper list | `shipper` | `seed_shipper_list` | 0.9 | 248 |
+
+`pilot1-shippers.csv`'s 248 rows are 201 distinct companies (each carrying its
+USDOT number) plus 47 operating-name aliases. An alias is emitted as its own
+name row so a poster typing it still matches, but **without** the DOT:
+`poster_registry` has a unique partial index on `dot_number` as well as
+`mc_number` (migration 040), so duplicating it would fail the insert. The same
+rule applies to the FMCSA DBA rows.
 
 ## Why trucking companies are `carrier_for_hire`, not `shipper`
 
@@ -50,11 +57,13 @@ authority, so for those 68 the broker label is authoritative and the converter
 drops them from `carriers-for-hire.csv`. `MANIFEST.json.precedenceOverrides`
 lists every one.
 
-## Only 48 accepts are currently reachable
+## The accept surface
 
-`ontario-mines.csv` is the only `shipper`-class file present, so exactly 48
-posters can produce a `shipper_direct` accept from the registry. Until
-`pilot1-shippers.csv` lands, every other poster resolves to reject (broker),
-review (carrier), or review (registry miss). Since FMCSA cannot establish
-shipper-direct status, there is no second accept path — see the tracker entries
-dated 2026-10-08 and 2026-10-09.
+The two `shipper`-class files are the entire accept surface: 248 + 48 = **296
+registry rows can produce a `shipper_direct` accept**. Every other poster
+resolves to reject (broker), review (carrier), or review (registry miss).
+Since FMCSA cannot establish shipper-direct status, there is no second accept
+path — see the tracker entries dated 2026-10-08 and 2026-10-09. Growing the
+accept surface means adding labelled shipper rows here (or resolving reviews
+through `POST /api/pipeline/loads/:id/resolve-source`, which writes
+`class_source='human_review'`), never loosening the classifier.

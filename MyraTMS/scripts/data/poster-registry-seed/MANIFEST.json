@@ -1,6 +1,10 @@
 {
-  "generatedAt": "2026-10-09T16:01:06.066Z",
+  "generatedAt": "2026-10-09T16:53:29.014Z",
   "inputs": {
+    "shippers": {
+      "file": "C:/tmp/gate1-input/pilot1_shippers_raw.csv",
+      "rows": 204
+    },
     "mines": {
       "file": "C:/tmp/gate1-input/ontario_mines_raw.csv",
       "rows": 50
@@ -23,6 +27,13 @@
     }
   },
   "outputs": [
+    {
+      "file": "pilot1-shippers.csv",
+      "entityClass": "shipper",
+      "classSource": "seed_shipper_list",
+      "confidence": 0.9,
+      "rows": 248
+    },
     {
       "file": "ontario-mines.csv",
       "entityClass": "shipper",
@@ -53,9 +64,9 @@
     }
   ],
   "totals": {
-    "candidates": 2239,
-    "written": 2005,
-    "droppedDuplicateWithinClass": 166,
+    "candidates": 2490,
+    "written": 2253,
+    "droppedDuplicateWithinClass": 169,
     "droppedLowerPrecedence": 68
   },
   "precedenceOverrides": [

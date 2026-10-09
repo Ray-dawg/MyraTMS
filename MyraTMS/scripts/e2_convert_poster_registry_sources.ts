@@ -5,7 +5,8 @@
  * checked against something reproducible rather than a hand count.
  *
  * Usage (paths are the operator's raw files, which live outside the repo):
- *   pnpm tsx scripts/e2_convert_poster_registry_sources.ts \
+ *   pnpm tsx --env-file=.env.local scripts/e2_convert_poster_registry_sources.ts \
+ *     --shippers=<pilot1_shippers.csv> \
  *     --mines=<ontario_mines.csv> \
  *     --ontario-carriers=<ontario_trucking_contacts.csv> \
  *     --canadian-carriers=<canadian_trucking_contacts.csv> \
@@ -60,6 +61,7 @@ interface OutputSpec {
 }
 
 const OUTPUTS = {
+  shippers: { file: 'pilot1-shippers.csv', kind: 'shipper', classSource: 'seed_shipper_list', confidence: 0.9 },
   mines: { file: 'ontario-mines.csv', kind: 'shipper', classSource: 'seed_mines_dossier', confidence: 0.95 },
   brokers: { file: 'broker-list.csv', kind: 'broker', classSource: 'seed_broker_list', confidence: 0.9 },
   fmcsaBrokers: { file: 'broker-list-fmcsa.csv', kind: 'broker', classSource: 'seed_broker_list_fmcsa', confidence: 0.95 },
@@ -140,6 +142,7 @@ export interface ConvertManifest {
 }
 
 export interface ConvertInputs {
+  shippers?: string;
   mines?: string;
   ontarioCarriers?: string;
   canadianCarriers?: string;
@@ -150,6 +153,33 @@ export interface ConvertInputs {
 export function buildCandidates(files: ConvertInputs): { candidates: Candidate[]; inputs: ConvertManifest['inputs'] } {
   const candidates: Candidate[] = [];
   const inputs: ConvertManifest['inputs'] = {};
+
+  if (files.shippers) {
+    const rows = readCsv(files.shippers);
+    inputs.shippers = { file: files.shippers, rows: rows.length };
+    for (const r of rows) {
+      const legal = pick(r, 'Company', 'Company Name', 'Legal Name');
+      const operating = pick(r, 'Operating Name', 'DBA / Operating Name');
+      const dot = pick(r, 'USDOT Number', 'DOT Number');
+      const legalRow = candidate('shippers', 'pilot1-shipper-list', legal, {
+        dot,
+        country: pick(r, 'Country'),
+        province: pick(r, 'Province', 'Province/State'),
+      });
+      if (legalRow) candidates.push(legalRow);
+      // Same rule as the FMCSA DBA rows: emit a differing operating name so a
+      // poster typing it still matches, but leave the DOT on the legal row --
+      // poster_registry has a unique partial index on dot_number as well as
+      // mc_number (migration 040), so duplicating it would fail the insert.
+      if (operating && normalizeCompanyName(operating) !== normalizeCompanyName(legal)) {
+        const opRow = candidate('shippers', 'pilot1-shipper-list-operating-name', operating, {
+          country: pick(r, 'Country'),
+          province: pick(r, 'Province', 'Province/State'),
+        });
+        if (opRow) candidates.push(opRow);
+      }
+    }
+  }
 
   if (files.mines) {
     const rows = readCsv(files.mines);
@@ -296,6 +326,7 @@ function arg(name: string): string | undefined {
 async function main() {
   const outDir = arg('out') ?? path.join(process.cwd(), 'scripts', 'data', 'poster-registry-seed');
   const files: ConvertInputs = {
+    shippers: arg('shippers'),
     mines: arg('mines'),
     ontarioCarriers: arg('ontario-carriers'),
     canadianCarriers: arg('canadian-carriers'),
