@@ -12,7 +12,7 @@
 > were applied to the production Neon branch on **2026-05-04** and master was
 > promoted the same day — see [PRODUCTION_MIGRATION_LOG.md](./PRODUCTION_MIGRATION_LOG.md)
 > Entry 1 for LSNs and the Vercel deployment pin. Still true as of 2026-10-07
-> (verified by direct query): **RLS is OFF** on every table (M3 not started),
+> (verified by direct query): **RLS was OFF** on every table (M3 not started) — *update 2026-10-08: M3 Day 1 done, RLS enabled on `tenant_audit_log` only* —
 > `pipeline_loads.tenant_id` does not exist (M5 / migration 030 not started),
 > and 029's policies are created-but-disabled. Engine 3 T-28 has since made
 > `lib/tenants/provision.ts` + `app/api/tenant-onboarding/*` the shared tenant
@@ -117,11 +117,11 @@ operational phases. As of 2026-10-07 (table originally written 2026-05-07, M1/M2
 |---|---|---|
 | M1 | Foundation tables (027) + tenant_id column with DEFAULT (028) | ✅ APPLIED TO PRODUCTION 2026-05-04 (PRODUCTION_MIGRATION_LOG Entry 1) |
 | M2 | App code uses withTenant + JWT carries tenantId | ✅ DEPLOYED TO PRODUCTION 2026-05-04 |
-| M3 | RLS ENABLE per batch | ⬜ NOT STARTED |
+| M3 | RLS ENABLE per batch | 🟡 Day 1 of 12 done 2026-10-08 (`tenant_audit_log`); Railway still on `neondb_owner` |
 | M4 | Drop DEFAULT, reject JWTs without claim, Tenant 2 7-day soak | ⬜ NOT STARTED |
 | M5 | Engine 2 tenanting (migration 030, rename + apply) | ⬜ NOT STARTED |
 
-The handoff state was code-complete / staging-validated / production-not-yet-deployed; since 2026-05-04 it is **M1+M2 live in production, M3–M5 not started**.
+The handoff state was code-complete / staging-validated / production-not-yet-deployed; since 2026-05-04 it is **M1+M2 live in production, M3 Day 1 done (2026-10-08), M4–M5 not started**.
 
 ## §4 — Open items (the things to decide / build next)
 

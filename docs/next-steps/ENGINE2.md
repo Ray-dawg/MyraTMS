@@ -4,11 +4,11 @@
 
 ## Where it stands
 
-- **Deployed, shadow-drain mode.** Vercel `myratms` (API + 8 crons) and Railway `myratms-workers` (10 BullMQ workers) have been live since 2026-06-04.
+- **Deployed, shadow-drain mode.** Vercel `myratms` (API + 8 crons) is live on `master`. Railway `myratms-workers` (10 BullMQ workers) ran 2026-06-04 → 2026-06-06 and **has had no deployment since** (trial expired — see `RAILWAY_REDEPLOY_TODO.md`).
 - **Acquisition pipeline proven.** Phase 6A shadow drain (2026-06-04): 75 synthetic loads, 5 reached `briefed` with real negotiation briefs, two real bugs fixed mid-drain.
 - **One live call, ever.** 2026-06-06, to the operator's own number, 34.8 seconds, full chain scanner → qualify → research → rank → compile → Retell dial. Post-call hardening fixed call recording and the webhook outcome flow.
 - **Sell-side loop code-complete, never run.** E2-03 (carrier cascade, dispatch gate, carrier verification, health checks) and E2-04 (shipper written confirmation, carrier brief, inbound email, signed-rate-con gate) are merged. `CARRIER_CALLS_ENABLED`, `CARRIER_AUTO_ASSIGN_ENABLED`, `SHIPPER_CONFIRMATION_ENABLED`, `INBOUND_EMAIL_POLLING_ENABLED` are all off. No carrier has ever been called. IMAP credentials were never provisioned; `scripts/run-imap-poller.ts` has never run against a real mailbox and is not deployed anywhere.
-- **Open safety finding.** `MAX_CONCURRENT_CALLS=25` was found in production env on 2026-08-26 while every document says `0`. Not re-verified since.
+- **Resolved safety finding.** `MAX_CONCURRENT_CALLS=25` was found in production env on 2026-08-26; set to `0` on Railway 2026-10-09.
 - **Roadmap position** (`Engine 2/docs/superpowers/plans/completion.md` → Production Ship Roadmap): Phase A is done except A.3.3 (scraper deploy), A.3.4/A.3.6 (cron dashboard confirm, custom domain), **A.4.5 (first 10 live calls)**, and all of A.5 (compliance/legal review). Phases B–D untouched.
 
 ## The next step: run Pilot 1 for real — Phase 6B, first 10 live shipper calls

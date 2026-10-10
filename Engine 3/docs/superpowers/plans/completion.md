@@ -4,8 +4,8 @@
 
 **Master PRD:** [E3-00_Engine3_Master_PRD.md](../../../E3-00_Engine3_Master_PRD.md)
 **Started:** 2026-08-24
-**Last updated:** 2026-10-08 (T-30 entry rewritten: all 12 plan tasks built on unmerged branch `t30-contract-freight-intake`, verified on `t30-verify` only; migration 059 NOT applied to production; Phase 2 exit measurement 0 of 100)
-**Status:** Phase 1 (Instrument) complete — but see the T-18/T-19 corrections below; several criteria previously marked done were verified against zero/absent data and are now HELD-OPEN or UNDISCLOSED-OPEN, not PASS. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate; T-22 criterion 4 corrected below (FAIL-with-disclosed-substitution, not PASS); **Phase 2's own exit gate (100 consecutive ≥80% zero-touch loads) is NOT met.** Phase 3: T-27 built, all 7 criteria PASS (2026-08-31). Phase 4: T-28 built, verified, applied to production, pushed; all 5 acceptance criteria pass. **T-30 is code-complete on an unmerged, unpushed branch (all 12 plan tasks; verified on `t30-verify` only) — it is NOT in production and migration 059 is not applied.** Phases 5–6 (T-29): not started. The master PRD §9 handoff gate remains unmet — Engine 2 is in shadow drain with one live call ever placed (2026-06-06).
+**Last updated:** 2026-10-09 (T-30 Tasks 1–11 merged to `master` in `2bb2ba7`; migration 059 still NOT applied to production; `contract-intake-finalize` cron held out of `vercel.json` in `b466d91`; Phase 2 exit measurement 0 of 100)
+**Status:** Phase 1 (Instrument) code complete, **exit gate NOT met** (no live code path evaluates a governance envelope; `pipeline_loads.tenant_id` absent because migration 030 is unapplied) — but see the T-18/T-19 corrections below; several criteria previously marked done were verified against zero/absent data and are now HELD-OPEN or UNDISCLOSED-OPEN, not PASS. Phase 2: all 7 modules (T-20–T-26) built and applied to production in shadow mode, ahead of the formal handoff gate; T-22 criterion 4 corrected below (FAIL-with-disclosed-substitution, not PASS); **Phase 2's own exit gate (100 consecutive ≥80% zero-touch loads) is NOT met.** Phase 3: T-27 built, all 7 criteria PASS (2026-08-31). Phase 4: T-28 built, verified, applied to production, pushed; all 5 acceptance criteria pass. **T-30 is code-complete on an unmerged, unpushed branch (all 12 plan tasks; verified on `t30-verify` only) — it is NOT in production and migration 059 is not applied.** Phases 5–6 (T-29): not started. The master PRD §9 handoff gate remains unmet — Engine 2 is in shadow drain with one live call ever placed (2026-06-06).
 
 ## How to use this file
 
@@ -50,7 +50,7 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 **Spec:** [T18_Agent_Runtime_Governance.md](../../../T18_Agent_Runtime_Governance.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t18-agent-runtime-governance-design.md`
 **Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-24-t18-agent-runtime-governance.md`
-**Status:** ✅ **DONE — shipped to production 2026-08-24**
+**Status:** ✅ code shipped to production 2026-08-24 · ⬜ **not wired**: nothing in `lib/workers/` or `app/` calls `applyEnvelope()`/`evaluateAuthority()` (only `scripts/t18_replay_shadow_evaluation.ts`)
 
 - [x] Design doc — traced `AUTO_BOOK_PROFIT_THRESHOLD` and found it's not wired into any real decision path today (aspirational parity only, unlike the other 3 kill-switch env vars); split `evaluateAuthority()` into a pure `applyEnvelope()` core + thin DB wrapper for fast unit testing; `lib/governance/` chosen as the new directory (done 2026-08-24)
 - [x] Implementation plan — 12 tasks. Self-review caught and fixed a dead variable in a test and a tenant-scoping gap in the envelope POST route (done 2026-08-24)
@@ -81,7 +81,7 @@ Exit gate (master PRD §8): every Engine 2 event emitted to the event layer; one
 
 **Spec:** [T19_Tenant_Policy_Model.md](../../../T19_Tenant_Policy_Model.md)
 **Design doc:** `MyraTMS/docs/superpowers/specs/2026-08-24-t19-tenant-policy-model-design.md`
-**Status:** ✅ **DONE — shipped to production 2026-08-25**
+**Status:** ✅ code shipped to production 2026-08-25 · ⬜ T-19 API endpoints not built (see task list) · `evaluatePolicy()` called by the Qualifier only, in shadow
 
 Redesigned against the real production schema rather than the base spec's assumptions (see design doc): reuses `tenants`/`tenant_users` as-is instead of creating new tables, fixes a real production tenant_id mislabeling bug (T-17/T-18 hardcoded `1`, the `_system` tenant, instead of resolving Myra's real id by slug), adds `freight_business_type` as a new column distinct from `tenants.type`, and consolidates three disconnected margin-floor values down to the one actually driving `auto_book_eligible` in production ($270 CAD / $200 USD).
 
@@ -189,7 +189,7 @@ Redesigned against the real production schema rather than the base spec's assump
 - [x] `scripts/t22_shadow_parity_sell.ts` — sell-side shadow-parity harness — **criterion 1 OPEN**, see below
 - [x] `scripts/t22_shadow_parity_buy.ts` — buy-side shadow-parity harness (pure/local synthetic math check) — **criterion 2 PASS**, 5/5 synthetic cases 100% match (done 2026-08-27)
 - [x] 3 API endpoints: `POST /api/negotiation/envelope`, `GET /api/negotiation/objection-playbook`, `GET /api/negotiation/shadow-parity-report` — **criterion 5 PASS** (done 2026-08-28)
-- [x] Criteria 3, 4, 6 PASS: objection playbook seeded verbatim with zero drift; `buy-negotiation-queue`/`carrier-call-queue` already existed pre-T-22 (criterion 6 was already satisfied going in — `lib/workers/carrier-voice-worker.ts` is the real, live-connected Dispatch One integration, confirmed by a prior session and not re-investigated here); T-16 suite green (see regression note below)
+- [x] Criteria 3, 6 PASS (criterion 4 later corrected to FAIL-with-disclosed-substitution — see below): objection playbook seeded verbatim with zero drift; `buy-negotiation-queue`/`carrier-call-queue` already existed pre-T-22 (criterion 6 was already satisfied going in — `lib/workers/carrier-voice-worker.ts` is the real, live-connected Dispatch One integration, confirmed by a prior session and not re-investigated here); T-16 suite green (see regression note below)
 
 **Two real incidents surfaced and resolved during this module — both worth reading in full before touching `lib/negotiation/` or its ops scripts again:**
 
@@ -462,7 +462,7 @@ Once both were corrected, all 19 T-28 tests passed against `t28-verify` on the f
 
 **Spec:** [T30_Contract_Freight_Intake.md](../../../T30_Contract_Freight_Intake.md)
 **Implementation plan:** `MyraTMS/docs/superpowers/plans/2026-08-31-t30-contract-freight-intake.md`, design doc `MyraTMS/docs/superpowers/specs/2026-08-31-t30-contract-freight-intake-design.md` (§2/§2a: schema-reality corrections vs. the spec's §4 — every column in 059 differs from the spec for a documented reason; `POST /api/contract-intake/webhook` dropped because the E2-04 IMAP poller is the real intake path)
-**Status:** 🟡 **CODE-COMPLETE ON AN UNMERGED, UNPUSHED BRANCH — NOT IN PRODUCTION.** All 12 plan tasks are done on branch `t30-contract-freight-intake` (base `2eed7ee`, 21 commits `54e73f6`..`438e3d4` plus the Task 12 docs commit; Tasks 1, 1b, 2 were already on `master`, `01e79f4`..`87bc938`). **Migration `059` has NOT been applied to production** (verified absent 2026-10-07; not touched in Task 12). It was applied only to the disposable Neon branch `t30-verify` (`br-odd-wave-aibhv7nc`, endpoint `ep-calm-frog-aiwtr1uz`), and was *amended* during the build (a seeded `contract_intake` classification rule — see findings), so the file to apply is the amended one. Nothing was merged to `master` and nothing was pushed. Every "PASS" below means "passes on `t30-verify`", never "observed in production". Do not read this like T-28's "applied to production".
+**Status:** 🟡 **MERGED TO `master` 2026-10-09 (`2bb2ba7`) — NOT LIVE: migration 059 not applied to production; `contract-intake-finalize` cron held out of `vercel.json` (`b466d91`).** *History as of 2026-10-08:* All 12 plan tasks are done on branch `t30-contract-freight-intake` (base `2eed7ee`, 21 commits `54e73f6`..`438e3d4` plus the Task 12 docs commit; Tasks 1, 1b, 2 were already on `master`, `01e79f4`..`87bc938`). **Migration `059` has NOT been applied to production** (verified absent 2026-10-07; not touched in Task 12). It was applied only to the disposable Neon branch `t30-verify` (`br-odd-wave-aibhv7nc`, endpoint `ep-calm-frog-aiwtr1uz`), and was *amended* during the build (a seeded `contract_intake` classification rule — see findings), so the file to apply is the amended one. Nothing was merged to `master` and nothing was pushed. Every "PASS" below means "passes on `t30-verify`", never "observed in production". Do not read this like T-28's "applied to production".
 
 **What was built** (all in `MyraTMS/`):
 - `lib/contract-intake/authorization.ts` — sender whitelist check (`checkSenderAuthorization()`, `isAmbiguousSender()`); one-tenant-per-shipper-email invariant (unique index in 059); an address on two tenants' whitelists fails closed and raises a distinct "Ambiguous freight-tender sender" exception

@@ -8,7 +8,7 @@
 
 ## Where it stands
 
-- **Multi-tenant M1 + M2 in production since 2026-05-04** (migrations 027–031 applied; code promoted; `docs/architecture/PRODUCTION_MIGRATION_LOG.md` Entry 1). Verified 2026-10-07: **RLS is OFF on every table** (M3 not started), `pipeline_loads.tenant_id` does not exist (M5 / migration 030 not started), M4 not started.
+- **Multi-tenant M1 + M2 in production since 2026-05-04** (migrations 027–031 applied; code promoted; `docs/architecture/PRODUCTION_MIGRATION_LOG.md` Entry 1). Verified 2026-10-07: RLS was OFF on every table. **Update 2026-10-08: M3 Day 1 done — RLS enabled on `tenant_audit_log`; Days 2–12 pending; Railway still on `neondb_owner`**, `pipeline_loads.tenant_id` does not exist (M5 / migration 030 not started), M4 not started.
 - **Application code is the only tenant boundary.** A missed `withTenant()` leaks across tenants and nothing in the database catches it. Four Engine 3 routes shipped tenant-isolation IDORs that review caught; the next one might not be caught.
 - **Test suite hazard.** `MyraTMS/.env.local`'s `DATABASE_URL` has pointed at production; most Engine 2/3 tests write rows. About 10 of ~850 tests fail on a rotating basis (`cost-calculator`, `carrier-brief-compiler-worker`, `ranker`, `researcher`, `t25-reconcile-payer`).
 - **Deferred code follow-ups** (HANDOFF.md §4): daily Redis→`tenant_usage` aggregation cron, purge executor, zip export, `user_invites.role` widening, `useUsage()` hook, white-label domain UI, impersonation UI, owner-picker user search, component tests, pool tuning, Stripe billing (whole scope), warehouse build.

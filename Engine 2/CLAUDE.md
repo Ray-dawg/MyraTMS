@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Engine 2 is the spec package for the AI freight pipeline. The integration is DONE; the live code is in the sibling `MyraTMS/` app.** The 7-agent acquisition pipeline was placed into `MyraTMS/` during Sprints 0–6.5 (April–May 2026). The **sell-side loop** (E2-02 investigation → E2-03 M0–M6 → E2-04 M0–M6 + review fixes) was built on top of it in August 2026, also in `MyraTMS/`.
 
-**Status (2026-10-07):**
-- **Deployed to production in shadow-drain mode.** Vercel (`myratms`) hosts the API + crons; Railway (`myratms-workers`) boots the 10 BullMQ workers (deployed 2026-06-04). Phase 6A shadow drain proved the acquisition pipeline end-to-end (75 synthetic loads, 5 reached `briefed`, 0 calls).
+**Status (2026-10-09):**
+- **Deployed to production in shadow-drain mode.** Vercel (`myratms`) hosts the API + crons; Railway (`myratms-workers`) is meant to boot the 10 BullMQ workers but has had **no deployment since 2026-06-06** (Railway trial expired; redeploy runbook in `RAILWAY_REDEPLOY_TODO.md`). Phase 6A shadow drain proved the acquisition pipeline end-to-end (75 synthetic loads, 5 reached `briefed`, 0 calls).
 - **First live Retell call placed 2026-06-06** (to the operator's own number, persona `friendly`, 34.8s). Phase 6B — 10 consenting test shippers — has **not** run.
 - **Sell-side loop code-complete, never exercised in production.** `CARRIER_CALLS_ENABLED`, `CARRIER_AUTO_ASSIGN_ENABLED`, `SHIPPER_CONFIRMATION_ENABLED`, `INBOUND_EMAIL_POLLING_ENABLED` are all off; no carrier has ever been called; IMAP credentials have never been provisioned; `scripts/run-imap-poller.ts` has never run against a real mailbox.
 - **Open since 2026-08-26, not re-verified:** `MAX_CONCURRENT_CALLS=25` was found in production env while every doc says `0`. Re-check before any drain.
@@ -182,7 +182,7 @@ All gated by `CRON_SECRET` and `PIPELINE_ENABLED=true`.
 |---|---|---|
 | `PIPELINE_ENABLED` | `false` | Master — skips all queue processing AND blocks crons |
 | `SCANNER_ENABLED` | `false` | CSV/API ingest |
-| `MAX_CONCURRENT_CALLS` | `0` (shadow) | Shipper calls. **Found at `25` in production 2026-08-26 — unresolved** |
+| `MAX_CONCURRENT_CALLS` | `0` (shadow) | Shipper calls. Found at `25` on 2026-08-26; **set to `0` on Railway 2026-10-09** |
 | `CARRIER_CALLS_ENABLED` | `false` | E2-03 M2 carrier cascade dials |
 | `CARRIER_AUTO_ASSIGN_ENABLED` | `false` | E2-03 M3 final TMS assign |
 | `SHIPPER_CONFIRMATION_ENABLED` | `false` | E2-04 M2 shipper confirmation emails |
